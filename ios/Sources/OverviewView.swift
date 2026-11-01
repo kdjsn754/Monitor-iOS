@@ -4,8 +4,6 @@ struct OverviewView: View {
     @EnvironmentObject private var model: AppModel
     /// 闪存卡的轨道色 / 图例点色要分深浅两档，所以这一页也得读主题。
     @Environment(\.colorScheme) private var colorScheme
-    /// 由 `MainTabs` 传进来：进二级页时把底栏收掉（见 App.swift 的 overlay）。
-    @Binding var hidesTabBar: Bool
     @State private var showAllDevices = false
     /// 风扇控制页（点「风扇」那块打开，见 hardwareSection）。
     /// v1.28.28 起是 push 进来的独立页面，不再是半屏面板。
@@ -35,11 +33,6 @@ struct OverviewView: View {
             .background(Color.clear)
             // 标题画在内容里了，导航栏整条不要：留着它状态栏下面会空出一整条。
             .toolbar(.hidden, for: .navigationBar)
-            // 给底栏留白：这页 ScrollView 自己声明底部 safe area，
-            // 让最后一卡停在玻璃栏上方，不再被遮住（见 App.swift 的 overlay 说明）。
-            .safeAreaInset(edge: .bottom) {
-                Color.clear.frame(height: AppTabBar.contentBottomInset)
-            }
             .refreshable {
                 await model.manualRefresh()
             }
@@ -49,10 +42,9 @@ struct OverviewView: View {
             // 返回按钮的文案取上一页的标题，这里给一个（导航栏本身是隐藏的，不会显示出来）。
             .navigationTitle("概览")
             .navigationDestination(isPresented: $showFanControl) {
+                // 风扇页收起原生底栏：不收的话「应用到路由器」会被玻璃栏压着。
                 FanControlView()
-            }
-            .onChange(of: showFanControl) { _, pushed in
-                hidesTabBar = pushed
+                    .toolbar(.hidden, for: .tabBar)
             }
         }
     }

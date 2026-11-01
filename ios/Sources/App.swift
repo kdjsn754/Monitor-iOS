@@ -183,39 +183,22 @@ struct RootView: View {
 struct MainTabs: View {
     @EnvironmentObject private var model: AppModel
     @State private var selection = 0
-    /// 概览页 push 出二级页（风扇控制）时把底栏收掉。
-    /// 底栏是浮在 TabView 上的 overlay，不收的话会压在「应用到路由器」上面，
-    /// 而且一级页的导航栏出现在二级页本来就说不通。
-    @State private var hidesTabBar = false
 
     var body: some View {
-        // 系统 TabView 只当作「页面容器」用：它负责保留每一页的滚动位置和弹窗状态，
-        // 但底下那条栏由我们自绘（见 AppTabBar），这样才能做到
-        // 「选中后图标变实心」—— 系统的 .tabItem 只有一种图，给不了选中态。
+        // v2.1.6 起直接用系统原生底栏（iOS 26 自带液态玻璃与形变动画）。
+        // 之前的自绘胶囊（AppTabBar 274x62 + TabBarGlass）整套删掉，
+        // 想找回旧样子：备份在 E:/WorkBuddyJob/tmp/backup-tabbar-b87。
         TabView(selection: $selection) {
-            OverviewView(hidesTabBar: $hidesTabBar)
+            OverviewView()
                 .tag(0)
-                .toolbar(.hidden, for: .tabBar)
+                .tabItem { Label("概览", systemImage: "square.grid.2x2") }
             ProxyView()
                 .tag(1)
-                .toolbar(.hidden, for: .tabBar)
+                .tabItem { Label("代理", systemImage: "shield") }
             SettingsView()
                 .tag(2)
-                .toolbar(.hidden, for: .tabBar)
+                .tabItem { Label("设置", systemImage: "gearshape") }
         }
-        // 底栏用 overlay 浮在内容之上：滚动时卡片会滑到栏底下被玻璃模糊掉，
-        // 既能看到「下面还有内容」又不会被硬切断——这正是液态玻璃想要的效果。
-        // 「最后一行不被栏压住」由每一页 ScrollView 自己的 `.safeAreaInset(edge: .bottom)`
-        // 留白来保证，不依赖 TabView 的 inset 向下传播（实测部分 iOS 版本上传不进子页，
-        // 会导致最底行被盖住，正是之前截图里看到的现象）。
-        .overlay(alignment: .bottom) {
-            if !hidesTabBar {
-                AppTabBar(selection: $selection)
-                    .padding(.bottom, AppTabBar.bottomPadding)
-                    .transition(.opacity)
-            }
-        }
-        .animation(.easeOut(duration: 0.18), value: hidesTabBar)
         // 采集跟着页面走：切到哪一页就只采那一页要用的数据，设置页完全不采。
         .onChange(of: selection) { _, value in
             model.setActivePage(AppPage(tab: value))
@@ -223,125 +206,6 @@ struct MainTabs: View {
         .onAppear {
             model.setActivePage(AppPage(tab: selection))
         }
-    }
-}
-
-/// 自绘的底部导航栏。
-///
-/// 尺寸是按另一款系统级 App 的底栏截图量出来的（402pt 宽的机器上）：
-/// 胶囊宽 274、高 62、离屏幕物理底边 21、内边距 4、三格等分；
-/// 选中项铺一块 `systemFill` 胶囊，图标换实心、文字加粗——
-/// 也就是系统 App 那种「只有一个选中项有底色」的写法，不再给图标上蓝色。
-struct AppTabBar: View {    @Binding var selection: Int
-
-    private enum Metrics {
-        static let width: CGFloat = 274      // 胶囊总宽
-        static let height: CGFloat = 62      // 胶囊总高
-        static let inset: CGFloat = 4        // 胶囊内边距（选中胶囊离外框的距离）
-        static let icon: CGFloat = 26        // 图标框（墨迹约 23，和系统底栏的图标一样大）
-        static let label: CGFloat = 10       // 标签字号
-        static let bottomGap: CGFloat = 21   // 栏底到屏幕物理底边
-    }
-
-    private let items: [(glyph: TabGlyphKind, title: String)] = [
-        (.overview, "概览"),
-        (.proxy, "代理"),
-        (.settings, "设置")
-    ]
-
-    var body: some View {
-        HStack(spacing: 0) {
-            ForEach(Array(items.enumerated()), id: \.offset) { index, item in
-                itemView(index: index, item: item)
-            }
-        }
-        .padding(Metrics.inset)
-        .frame(width: Metrics.width, height: Metrics.height)
-        .modifier(TabBarGlass())
-        .animation(.easeOut(duration: 0.16), value: selection)
-    }
-
-    private func itemView(index: Int, item: (glyph: TabGlyphKind, title: String)) -> some View {
-        let isSelected = selection == index
-        return Button {
-            guard !isSelected else { return }
-            selection = index
-        } label: {
-            VStack(spacing: 4) {
-                // 图标和文字都用「具体的黑/白」而不是 `.primary`：玻璃底栏会把
-                // 层级色降级渲染，选中项的实心图标曾经因此变成 tertiary 那一档的灰。
-                TabGlyph(kind: item.glyph,
-                         filled: isSelected,
-                         tint: Color(uiColor: .label))
-                    .frame(width: Metrics.icon, height: Metrics.icon)
-                Text(item.title)
-                    .font(.system(size: Metrics.label, weight: isSelected ? .semibold : .medium))
-            }
-            .foregroundStyle(Color(uiColor: .label))
-            .frame(maxWidth: .infinity)
-            .frame(height: Metrics.height - Metrics.inset * 2)
-            .background {
-                if isSelected {
-                    Capsule(style: .continuous)
-                        .fill(Color(.systemFill))
-                }
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(TabBarButtonStyle())
-        .accessibilityLabel(item.title)
-        .accessibilityAddTraits(isSelected ? AccessibilityTraits.isSelected : AccessibilityTraits())
-    }
-}
-
-/// 底栏按钮：按下时只轻微缩小，**不变淡**。
-///
-/// `.plain` 在按下时会把 label 整体压低不透明度，黑色图标于是变成灰的——
-/// 底栏图标本来就小，一淡就像「没选中」或「被禁用」，切换的那一下观感很差。
-private struct TabBarButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .scaleEffect(configuration.isPressed ? 0.96 : 1)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
-    }
-}
-
-extension AppTabBar {
-    /// home indicator 那一截的高度（没有的机型为 0）。
-    @MainActor
-    private static var safeBottomInset: CGFloat {
-        (UIApplication.shared.connectedScenes.first as? UIWindowScene)?
-            .keyWindow?.safeAreaInsets.bottom ?? 34
-    }
-
-    /// 让栏底落在离屏幕物理底边 21pt 的位置。
-    ///
-    /// 底栏是挂在 TabView 下沿的 overlay 上的，而 TabView 的边界是**安全区**边界
-    /// （底部让出了 home indicator 那 34pt）。所以要往下压 34-21=13pt，
-    /// 这里算成内边距就是负数；没有 home indicator 的机型（inset 为 0）会自然退回 21。
-    @MainActor
-    static var bottomPadding: CGFloat {
-        Metrics.bottomGap - safeBottomInset
-    }
-
-    /// 各页 ScrollView 底部要给底栏留的高度。
-    ///
-    /// = 栏高 + 栏底到屏幕底的距离 + 6 的一点余量 - 页面自己已经让出的安全区。
-    /// 写死 84 的话，栏往下压了 23pt 之后底部会多出一大块空白。
-    @MainActor
-    static var contentBottomInset: CGFloat {
-        Metrics.height + 6 + bottomPadding
-    }
-}
-
-/// 导航栏的玻璃底：iOS 26 用系统「液态玻璃」(`glassEffect`)，
-/// 胶囊会实时把背后的页面渐变、卡片折进玻璃里，滑动时内容滑到栏下会被自然模糊，
-/// 既看得到「底下还有东西」，又不会被硬生生切断。
-/// 最低版本即 iOS 26，不再为低版本做毛玻璃退回。
-struct TabBarGlass: ViewModifier {
-    func body(content: Content) -> some View {
-        content
-            .glassEffect(.regular, in: Capsule(style: .continuous))
     }
 }
 

@@ -59,10 +59,6 @@ struct ProxyView: View {
             .background(Color.clear)
             // 见 OverviewView：标题画在内容里，导航栏整条不要。
             .toolbar(.hidden, for: .navigationBar)
-            // 给底栏留白（见 App.swift 的 overlay 说明），最后一行不被玻璃栏遮住。
-            .safeAreaInset(edge: .bottom) {
-                Color.clear.frame(height: AppTabBar.contentBottomInset)
-            }
             .refreshable {
                 await model.manualRefresh()
             }
