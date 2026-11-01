@@ -122,6 +122,55 @@ struct OpenClashMetrics {
     var apiReachable = false
 }
 
+/// 一条 OpenClash 订阅（路由器 UCI 里的 `config_subscribe` 段）。
+///
+/// 订阅不存手机里：路由器上的 UCI 才是唯一来源，网页后台和 App 改的是同一份数据，
+/// 所以这里只做「读出来 → 改 → commit」，不在本地另存一份。
+/// `name` 同时是产物文件名（`/etc/openclash/config/<name>.yaml`），重名会互相覆盖。
+struct ProxySubscription: Identifiable, Hashable {
+    /// UCI 段名（`cfg0a1b2c` 或 `@config_subscribe[0]`），增删改都靠它定位。
+    var id: String
+    var name: String
+    /// 原始地址字段，可能有多行：一行一条订阅地址。
+    var address: String
+    /// 请求时的 User-Agent，OpenClash 默认 `clash-verge/v2.4.5`。
+    var ua: String
+    var enabled: Bool
+    /// 已下载配置文件的修改时间；还没下载过就是 nil。
+    var updatedAt: Date?
+
+    var lines: [String] {
+        address.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// 列表第二行：第一行地址的域名。拿不到 host 就退回原串。
+    var host: String {
+        guard let first = lines.first else { return "" }
+        if let host = URL(string: first)?.host, !host.isEmpty { return host }
+        return first
+    }
+
+    var detail: String {
+        guard !host.isEmpty else { return "没有地址" }
+        guard let date = updatedAt else { return host + " · 还没下载" }
+        return host + " · " + Self.relative(date)
+    }
+
+    static func relative(_ date: Date) -> String {
+        let seconds = Date().timeIntervalSince(date)
+        if seconds < 60 { return "刚刚更新" }
+        if seconds < 3600 { return "\(Int(seconds / 60)) 分钟前更新" }
+        if seconds < 86_400 { return "\(Int(seconds / 3600)) 小时前更新" }
+        if seconds < 86_400 * 7 { return "\(Int(seconds / 86_400)) 天前更新" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "M 月 d 日更新"
+        return formatter.string(from: date)
+    }
+}
+
+
 struct AccessCheck: Identifiable {
     enum Site: String, CaseIterable, Identifiable {
         case baidu

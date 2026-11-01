@@ -1,0 +1,28 @@
+# 仓库只放「构建输入」。下面是构建过程产生的中间物，一律不入库。
+# 这份文件同时放在源码根目录，pack.py 会把它一起同步进仓库。
+
+# XcodeGen 生成的工程（每次 CI 都由 project.yml 现生成）
+ios/*.xcodeproj/
+ios/*.xcworkspace/
+xcuserdata/
+*.xcuserstate
+
+# 编译产物 / 归档 / SPM 缓存
+ios/build/
+ios/.build/
+build/
+DerivedData/
+*.xcarchive
+*.ipa
+
+# 明确不进仓库的交付文档与本地脚本（详见 开发交接.md「7.5 构建与发布」）
+ios/README.md
+ios/build-unsigned-ipa.sh
+codemagic.yaml
+更新说明.txt
+开发交接.md
+闪存容量计算说明.md
+
+# 系统垃圾
+.DS_Store
+Thumbs.db

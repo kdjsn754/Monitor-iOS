@@ -65,15 +65,24 @@ struct ProxyView: View {
             .refreshable {
                 await model.manualRefresh()
             }
+            // 订阅条数要显示在配置卡的副标题里，进页面就先读一次；
+            // 刚连上时状态还没到、上面这一次会直接返回，所以再挂一个 onChange 补读。
+            .task { await model.loadSubscriptions(silent: true) }
+            .onChange(of: model.ocStateLoaded) { _, loaded in
+                guard loaded else { return }
+                Task { await model.loadSubscriptions(silent: true) }
+            }
             .sheet(isPresented: $showPanel) {
                 if let url = oc.panelURL {
                     PanelView(url: url)
                 }
             }
             .sheet(isPresented: $showConfigPicker) {
-                ConfigPickerSheet(configs: oc.configs, applied: oc.config) { name in
+                ProxyConfigSheet(configs: oc.configs, applied: oc.config) { name in
                     Task { await model.switchConfig(name); await model.refreshOpenClash() }
                 }
+                // sheet 不一定继承 EnvironmentObject：显式再注入一次，避免运行时崩。
+                .environmentObject(model)
             }
         }
     }
@@ -452,7 +461,7 @@ struct ProxyView: View {
                                 .foregroundStyle(.secondary)
                         } else {
                             HStack(spacing: 4) {
-                                Text("更换")
+                                Text("管理")
                                     .font(.caption.weight(.medium))
                                 Image(systemName: "chevron.right")
                                     .font(.system(size: 9, weight: .bold))
@@ -482,7 +491,13 @@ struct ProxyView: View {
     private var configDetail: String {
         guard model.ocStateLoaded else { return "正在读取配置文件列表" }
         guard !oc.configs.isEmpty else { return "没有可用配置" }
-        return "共 \(oc.configs.count) 个配置文件"
+        var text = "共 \(oc.configs.count) 个配置文件"
+        // 订阅也在这个弹窗里（v2.1.0 并进来的），顺手把条数带上，
+        // 否则外面看不出里面还有东西。
+        if !model.subscriptions.isEmpty {
+            text += " · \(model.subscriptions.count) 个订阅"
+        }
+        return text
     }
 
     private var canOpenPanel: Bool {
@@ -639,23 +654,39 @@ struct ProxyView: View {
     }
 }
 
-/// 配置文件选择器。
+/// 配置文件 + 订阅 弹窗。
 ///
-/// v1.28.29 换成和「新建连接」同一套系统表单弹窗：`NavigationStack` + `Form`，
-/// 「取消」在导航栏左上、标题居中，列表是原生分组卡与缩进分隔线。
-/// （用户：「这三个弹出窗口都改成（新建连接）这种的弹窗」）
+/// v1.28.29 把这里换成和「新建连接」同一套系统表单弹窗：`NavigationStack` + `Form`，
+/// 「关闭」在导航栏左上、标题居中，列表是原生分组卡与缩进分隔线。
 ///
-/// 选择方式也从「点整行」改成「行尾开关」：一行只有一枚亮着。
-/// **开关只表示选中，不直接下发**——换配置会重启 OpenClash 内核，
-/// 正在走的连接会断一下，所以仍然要点底部那枚整宽按钮才生效
-/// （用户：「这两个增加切换按钮」，但没要求去掉确认步骤）。
-private struct ConfigPickerSheet: View {
+/// v2.1.0 把「订阅」并进来（用户选了 C 方案）：顶部一段分段控件，
+/// **不新增入口、不多一层 sheet**；点订阅进编辑页是同一条栈里的 push。
+/// 订阅本身存在路由器 UCI 的 `config_subscribe` 段里，这里只做读写与触发更新。
+private struct ProxyConfigSheet: View {
     let configs: [String]
     let applied: String
     let onApply: (String) -> Void
 
+    @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
+
+    @State private var tab: Tab = .configs
     @State private var picked: String
+    @State private var editing: ProxySubscription?
+    @State private var adding = false
+    @State private var pending: UpdateRequest?
+
+    enum Tab: String, CaseIterable, Identifiable {
+        case configs = "配置文件"
+        case subs = "订阅"
+        var id: String { rawValue }
+    }
+
+    /// 待确认的一次更新：里面带着「要不要重启内核」。
+    struct UpdateRequest: Identifiable {
+        let id = UUID()
+        let targets: [ProxySubscription]
+    }
 
     init(configs: [String], applied: String, onApply: @escaping (String) -> Void) {
         self.configs = configs
@@ -669,42 +700,92 @@ private struct ConfigPickerSheet: View {
         NavigationStack {
             Form {
                 Section {
-                    ForEach(configs, id: \.self) { name in
-                        row(name)
+                    Picker("", selection: $tab) {
+                        ForEach(Tab.allCases) { item in
+                            Text(sectionTitle(item)).tag(item)
+                        }
                     }
-                } header: {
-                    Text("共 \(configs.count) 个 · 当前用 \(appliedName)")
-                } footer: {
-                    Text("打开开关只是选中，点下方按钮才会真正切换。切换后 OpenClash 会重启内核，正在走的连接会断一下。")
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 2, trailing: 16))
+                    .listRowBackground(Color.clear)
                 }
 
-                // 整宽胶囊放在表单里，形状和「连接并保存」那颗一致；
-                // 没得可应用时是灰底灰字（`GlassProminentButtonStyle(dimmed:)`），
-                // 不再是以前那枚点了没反应的淡蓝死按钮。
-                Section {
-                    Button {
-                        apply()
-                    } label: {
-                        Text(actionTitle)
-                            .font(.subheadline.weight(.semibold))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.8)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 12)
-                    }
-                    .buttonStyle(GlassProminentButtonStyle(dimmed: !canApply))
-                    .disabled(!canApply)
-                    .listRowBackground(Color.clear)
-                    .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                if tab == .configs {
+                    configSection
+                    applySection
+                } else {
+                    subscriptionSection
+                    updateSection
                 }
             }
-            .navigationTitle("选择配置文件")
+            .navigationTitle("代理配置")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("取消") { dismiss() }
+                    Button("关闭") { dismiss() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    if tab == .subs {
+                        Button {
+                            adding = true
+                        } label: {
+                            Image(systemName: "plus")
+                        }
+                        .accessibilityLabel("添加订阅")
+                    }
                 }
             }
+            .navigationDestination(isPresented: $adding) {
+                SubscriptionEditView(subscription: nil)
+            }
+            .navigationDestination(item: $editing) { sub in
+                SubscriptionEditView(subscription: sub)
+            }
+            .task { await model.loadSubscriptions(silent: true) }
+        }
+        .overlay { confirmLayer }
+    }
+
+    private func sectionTitle(_ item: Tab) -> String {
+        switch item {
+        case .configs: return "配置文件 \(configs.count)"
+        case .subs: return "订阅 \(model.subscriptions.count)"
+        }
+    }
+
+    // MARK: - 配置文件
+
+    private var configSection: some View {
+        Section {
+            ForEach(configs, id: \.self) { name in
+                row(name)
+            }
+        } header: {
+            Text("共 \(configs.count) 个 · 当前用 \(appliedName)")
+        } footer: {
+            Text("打开开关只是选中，点下方按钮才会真正切换。切换后 OpenClash 会重启内核，正在走的连接会断一下。")
+        }
+    }
+
+    // 整宽胶囊放在表单里，形状和「连接并保存」那颗一致；
+    // 没得可应用时是灰底灰字（`GlassProminentButtonStyle(dimmed:)`）。
+    private var applySection: some View {
+        Section {
+            Button {
+                apply()
+            } label: {
+                Text(actionTitle)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+            }
+            .buttonStyle(GlassProminentButtonStyle(dimmed: !canApply))
+            .disabled(!canApply)
+            .listRowBackground(Color.clear)
+            .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
         }
     }
 
@@ -759,5 +840,306 @@ private struct ConfigPickerSheet: View {
 
     private var actionTitle: String {
         canApply ? "应用「\(picked)」" : "已在使用 \(appliedName)"
+    }
+
+    // MARK: - 订阅
+
+    private var subscriptionSection: some View {
+        Section {
+            if model.subscriptions.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(model.subsLoaded ? "还没有订阅" : "正在读取订阅…")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    if model.subsLoaded {
+                        Text("点右上角 + 添加一条（名称 + 订阅地址）。")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 6)
+            } else {
+                ForEach(model.subscriptions) { sub in
+                    subRow(sub)
+                }
+            }
+        } header: {
+            Text(model.subsLoaded
+                 ? "\(model.subscriptions.count) 个订阅 · 存在路由器上"
+                 : "订阅")
+        } footer: {
+            Text("点一行可编辑，左滑删除。开关只表示允许它参与「全部更新」，不动当前正在跑的配置。")
+        }
+    }
+
+    private func subRow(_ sub: ProxySubscription) -> some View {
+        let busy = model.subsBusy != nil
+        return HStack(spacing: 10) {
+            // 只有名字这一块能点进编辑：整行做成按钮会跟右边的开关抢点击。
+            Button {
+                editing = sub
+            } label: {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(sub.name)
+                        .font(.body)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .foregroundStyle(Color(uiColor: .label))
+                    Text(sub.detail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            // Form 行里的自定义按钮必须 borderless：改用默认/plain 样式，
+            // 整行都会变成点击区，点开关附近也会跳走（见交接 7.1）。
+            .buttonStyle(.borderless)
+            // 不用 .disabled：那会把名字压淡成灰，看着像「这条坏了」。
+            .allowsHitTesting(!busy)
+
+            if busy {
+                ProgressView()
+                    .controlSize(.mini)
+            } else {
+                Toggle("", isOn: Binding {
+                    sub.enabled
+                } set: { on in
+                    Task { await model.setSubscriptionEnabled(sub, on) }
+                })
+                .labelsHidden()
+                .accessibilityLabel("启用 \(sub.name)")
+            }
+        }
+        .padding(.vertical, 4)
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button(role: .destructive) {
+                Task { await model.deleteSubscription(sub) }
+            } label: {
+                Label("删除", systemImage: "trash")
+            }
+        }
+    }
+
+    private var updateSection: some View {
+        Section {
+            Button {
+                startUpdate()
+            } label: {
+                HStack(spacing: 8) {
+                    Spacer()
+                    if model.subsBusy != nil {
+                        ProgressView().controlSize(.mini)
+                    }
+                    Text(model.subsBusy == nil ? "全部更新" : "正在更新…")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                }
+                .padding(.vertical, 4)
+            }
+            .disabled(model.subsBusy != nil || !model.subscriptions.contains(where: \.enabled))
+        } footer: {
+            Text("订阅由路由器上的 OpenClash 下载并转成 Clash 配置，名称就是文件名（如 吹雪云.yaml）。")
+        }
+    }
+
+    private func startUpdate() {
+        let targets = model.subscriptions.filter(\.enabled)
+        guard !targets.isEmpty, model.subsBusy == nil else { return }
+        let active = model.currentConfigName
+        if !active.isEmpty, targets.contains(where: { "\($0.name).yaml" == active }) {
+            pending = UpdateRequest(targets: targets)
+        } else {
+            Task { await model.updateSubscriptions(targets) }
+        }
+    }
+
+    /// sheet 里不能用系统 `alert`：锚点会算错，有时干脆不显示（v1.28.21 踩过）。
+    @ViewBuilder
+    private var confirmLayer: some View {
+        if let request = pending {
+            SheetOverlay(onDismiss: { pending = nil }) {
+                SheetOverlayCard {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("会重启内核")
+                            .font(.headline)
+                        Text("正在用的配置在这一批里。更新后会重启 OpenClash，正在走的连接会断一下（约 5 秒）。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    HStack(spacing: 10) {
+                        SheetOverlayButton(title: "取消") { pending = nil }
+                        SheetOverlayButton(title: "仍然更新", tint: .blue) {
+                            let targets = request.targets
+                            pending = nil
+                            Task { await model.updateSubscriptions(targets, restart: true) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 添加 / 编辑订阅。和列表同在弹窗的导航栈里，push 进来，不另开 sheet。
+///
+/// 保存写的是一整条 UCI 段（名称、地址、UA、启用），提交后回列表；
+/// 下载不在保存时做——「立即更新」与「全部更新」才真正去拉。
+private struct SubscriptionEditView: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+
+    let subscription: ProxySubscription?
+
+    @State private var name: String
+    @State private var address: String
+    @State private var ua: String
+    @State private var enabled: Bool
+    @State private var saving = false
+
+    init(subscription: ProxySubscription?) {
+        self.subscription = subscription
+        _name = State(initialValue: subscription?.name ?? "")
+        _address = State(initialValue: subscription?.address ?? "")
+        _ua = State(initialValue: subscription?.ua ?? "clash-verge/v2.4.5")
+        _enabled = State(initialValue: subscription?.enabled ?? true)
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                HStack(spacing: 8) {
+                    Text("名称")
+                        .frame(width: 72, alignment: .leading)
+                    TextField("例如 吹雪云", text: $name)
+                        .multilineTextAlignment(.trailing)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("订阅地址")
+                    TextEditor(text: $address)
+                        .font(.footnote.monospaced())
+                        .frame(minHeight: 76)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .scrollContentBackground(.hidden)
+                        .overlay(alignment: .topLeading) {
+                            if address.isEmpty {
+                                Text("一行一个地址")
+                                    .font(.footnote)
+                                    .foregroundStyle(.tertiary)
+                                    .padding(.top, 8)
+                                    .allowsHitTesting(false)
+                            }
+                        }
+                }
+
+                HStack(spacing: 8) {
+                    Text("User-Agent")
+                        .frame(width: 96, alignment: .leading)
+                    TextField("clash-verge/v2.4.5", text: $ua)
+                        .font(.caption.monospaced())
+                        .multilineTextAlignment(.trailing)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                }
+            } header: {
+                Text("订阅")
+            } footer: {
+                Text("一行一个地址。名称会成为配置文件名（如 吹雪云.yaml），不能带引号或斜杠，也不能和已有订阅重名。")
+            }
+
+            Section {
+                Toggle("启用", isOn: $enabled)
+            } footer: {
+                Text("关掉只是不参与「全部更新」，已下载的配置和当前运行状态都不受影响。")
+            }
+
+            if subscription != nil {
+                Section {
+                    Button {
+                        Task { await saveThenUpdate() }
+                    } label: {
+                        HStack {
+                            Text("立即更新这个订阅")
+                            Spacer()
+                            if model.subsBusy != nil {
+                                ProgressView().controlSize(.mini)
+                            }
+                        }
+                    }
+                    .disabled(model.subsBusy != nil || (!canSave && edited))
+                } footer: {
+                    Text("先保存再下载：从路由器上拉取并转成 Clash 配置，约 10~30 秒。")
+                }
+            }
+        }
+        .navigationTitle(subscription == nil ? "添加订阅" : "编辑订阅")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("保存") {
+                    Task { await save() }
+                }
+                .disabled(!canSave || saving)
+            }
+        }
+    }
+
+    // MARK: - 保存
+
+    private var trimmedName: String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var trimmedAddress: String {
+        address.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var edited: Bool {
+        guard let subscription else { return true }
+        return trimmedName != subscription.name || trimmedAddress != subscription.address
+    }
+
+    /// 名称的三个硬条件：非空、不带引号斜杠、不和别的订阅重名。
+    private var nameProblem: String? {
+        guard !trimmedName.isEmpty else { return "名称不能为空" }
+        if trimmedName.contains("'") || trimmedName.contains("/") || trimmedName.contains("\\") {
+            return "名称不能带引号或斜杠"
+        }
+        if model.subscriptionNameTaken(trimmedName, excluding: subscription?.id) {
+            return "已经有同名订阅"
+        }
+        return nil
+    }
+
+    private var canSave: Bool {
+        nameProblem == nil && !trimmedAddress.isEmpty
+    }
+
+    @discardableResult
+    private func save(keepOpen: Bool = false) async -> Bool {
+        guard canSave, !saving else { return false }
+        saving = true
+        let ok = await model.saveSubscription(id: subscription?.id, name: trimmedName,
+                                              address: trimmedAddress, ua: ua, enabled: enabled)
+        saving = false
+        if ok && !keepOpen { dismiss() }
+        return ok
+    }
+
+    /// 「立即更新」用改完的值：先落盘，再从列表里取回这一条（拿到新名字/新地址）再去下载。
+    private func saveThenUpdate() async {
+        let id = subscription?.id
+        guard await save(keepOpen: true) else { return }
+        guard let id, let fresh = model.subscriptions.first(where: { $0.id == id }) else { return }
+        await model.updateSubscriptions([fresh])
     }
 }

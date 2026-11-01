@@ -75,6 +75,12 @@ final class AppModel: ObservableObject {
     /// 状态探针正在跑（进代理页时先单独问一次，不等那条要 curl 内核的指标命令）。
     @Published private(set) var ocStateLoading = false
     @Published var ocMetrics = OpenClashMetrics()
+    /// 路由器上的订阅列表（UCI `config_subscribe`）。只在打开配置弹窗时读一次，
+    /// 不跟着轮询：订阅是低频数据，改一次才动一次。
+    @Published var subscriptions: [ProxySubscription] = []
+    /// 正在更新的订阅名；`"all"` 表示「全部更新」。nil = 空闲。
+    @Published private(set) var subsBusy: String?
+    @Published private(set) var subsLoaded = false
     @Published var accessChecks = AccessCheck.Site.allCases.map { AccessCheck(site: $0) }
     @Published var history: [HistoryPoint] = []
     @Published var profiles: [RouterProfile] = []
@@ -1044,6 +1050,131 @@ final class AppModel: ObservableObject {
                      title: "正在切换配置", subtitle: "正在应用新的配置文件…")
     }
 
+    // MARK: - 订阅
+
+    /// 正在跑的那份配置文件名（`吹雪云.yaml`）。判断「更新会不会重启内核」要用它。
+    var currentConfigName: String {
+        openClash.config.isEmpty ? "" : (openClash.config as NSString).lastPathComponent
+    }
+
+    /// 订阅名不能重复：重名会写到同一个 yaml 上，互相覆盖。
+    func subscriptionNameTaken(_ name: String, excluding id: String?) -> Bool {
+        let target = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty else { return false }
+        return subscriptions.contains {
+            $0.id != id && $0.name.caseInsensitiveCompare(target) == .orderedSame
+        }
+    }
+
+    func loadSubscriptions(silent: Bool = false) async {
+        guard connected else { return }
+        do {
+            let sections = parseSections(try await execute(subscriptionsCommand))
+            guard sections["OCSUBS"] != nil else { return }
+            subscriptions = parseSubscriptions(sections["OCSUBS"] ?? "")
+            subsLoaded = true
+        } catch {
+            if !silent { presentError(describe(error)) }
+        }
+    }
+
+    /// 新增（`id == nil`）或修改一条订阅。返回是否真的写进去了。
+    @discardableResult
+    func saveSubscription(id: String?, name: String, address: String,
+                          ua: String, enabled: Bool) async -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !body.isEmpty else { return false }
+        let agent = ua.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            let output = try await execute(subscriptionSaveCommand(
+                id: id, name: trimmed, address: body,
+                ua: agent.isEmpty ? "clash-verge/v2.4.5" : agent,
+                enabled: enabled
+            ))
+            guard output.contains("saved") else {
+                presentError("写入订阅失败，请确认路由器上装了 OpenClash")
+                return false
+            }
+            await loadSubscriptions(silent: true)
+            return true
+        } catch {
+            presentError(describe(error))
+            return false
+        }
+    }
+
+    /// 删除订阅。只删 UCI 段，**不删**已下载的配置文件——
+    /// 那份 yaml 可能正是当前在跑的配置，删掉会让 OpenClash 起不来。
+    func deleteSubscription(_ sub: ProxySubscription) async {
+        guard connected else { return }
+        do {
+            _ = try await execute(subscriptionDeleteCommand(sub))
+            await loadSubscriptions(silent: true)
+        } catch {
+            presentError(describe(error))
+        }
+    }
+
+    /// 开关只影响「全部更新」是否带上它，不改当前运行状态。
+    func setSubscriptionEnabled(_ sub: ProxySubscription, _ enabled: Bool) async {
+        guard connected else { return }
+        // 先动本地数组：开关要立刻跟手，不然等一轮 SSH 回来才跳。
+        if let index = subscriptions.firstIndex(where: { $0.id == sub.id }) {
+            subscriptions[index].enabled = enabled
+        }
+        do {
+            _ = try await execute(subscriptionEnableCommand(sub, on: enabled))
+        } catch {
+            if let index = subscriptions.firstIndex(where: { $0.id == sub.id }) {
+                subscriptions[index].enabled = !enabled
+            }
+            presentError(describe(error))
+        }
+    }
+
+    /// 更新订阅：下载丢到路由器后台跑，再用一条很轻的命令轮询结果。
+    ///
+    /// 不能同步执行——一条 `openclash.sh` 要 curl 十几秒到几分钟，
+    /// 而 SSH 通道读超时是 30 秒，同步跑必然「读取 SSH 输出超时」，
+    /// 用户在界面上等了半天，最后只看到一条超时错误。
+    func updateSubscriptions(_ targets: [ProxySubscription], restart: Bool = false) async {
+        guard !targets.isEmpty, subsBusy == nil, connected else { return }
+        subsBusy = targets.count == 1 ? targets[0].name : "all"
+        defer { subsBusy = nil }
+
+        do {
+            _ = try await execute(subscriptionUpdateStartCommand(targets.map(\.name)))
+            var code: String?
+            for _ in 0..<150 {
+                try? await Task.sleep(for: .milliseconds(1200))
+                let poll = (try? await execute(subscriptionUpdatePollCommand))?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if !poll.isEmpty, poll != "running" {
+                    code = poll
+                    break
+                }
+            }
+            guard let code else {
+                presentError("更新超时了。订阅可能还在路由器后台下载，稍后刷新看看结果。")
+                await loadSubscriptions(silent: true)
+                return
+            }
+            if code != "0" {
+                let log = ((try? await execute("tail -n 2 /tmp/oc_sub.log 2>/dev/null")) ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                presentError(log.isEmpty ? "更新失败，检查一下订阅地址或路由器的网络" : "更新失败：\(log)")
+            } else if restart {
+                // 替换的正是当前在跑的那份，内核要重启才会生效。
+                _ = try? await execute("/etc/init.d/openclash restart >/dev/null 2>&1; echo done")
+            }
+            await loadSubscriptions(silent: true)
+            await refreshOpenClash()
+        } catch {
+            presentError(describe(error))
+        }
+    }
+
     private func action(_ command: String, title: String, subtitle: String) async {
         busy = true
         activityTitle = title
@@ -1377,6 +1508,51 @@ final class AppModel: ObservableObject {
         info.dashboard = dash
         info.panelURL = buildPanelURL(info)
         return info
+    }
+
+    /// 解析 `键|值` 形式的订阅列表。`.` 是一段的结束标记。
+    private func parseSubscriptions(_ text: String) -> [ProxySubscription] {
+        var result: [ProxySubscription] = []
+        var current: ProxySubscription?
+        var address: [String] = []
+
+        func commit() {
+            guard var sub = current else { return }
+            sub.address = address.joined(separator: "\n")
+            if sub.ua.isEmpty { sub.ua = "clash-verge/v2.4.5" }
+            if !sub.name.isEmpty { result.append(sub) }
+            current = nil
+            address = []
+        }
+
+        for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = String(raw)
+            if line == "." { commit(); continue }
+            guard let bar = line.firstIndex(of: "|") else { continue }
+            let key = String(line[line.startIndex..<bar])
+            let value = String(line[line.index(after: bar)...])
+            switch key {
+            case "S":
+                commit()
+                current = ProxySubscription(id: value, name: "", address: "",
+                                            ua: "", enabled: true, updatedAt: nil)
+            case "N":
+                current?.name = value
+            case "E":
+                // 没写过这个键的段按「启用」算，和 LuCI 的默认值一致。
+                current?.enabled = (value != "0")
+            case "U":
+                current?.ua = value
+            case "A":
+                if !value.isEmpty { address.append(value) }
+            case "T":
+                current?.updatedAt = Double(value).map { Date(timeIntervalSince1970: $0) }
+            default:
+                break
+            }
+        }
+        commit()
+        return result
     }
 
     private func buildPanelURL(_ info: OpenClashInfo) -> URL? {
@@ -1992,6 +2168,97 @@ private extension AppModel {
         lines.append("sleep 1")
         lines.append("true")
         return lines.joined(separator: "; ")
+    }
+
+    /// 把任意字符串塞进 shell 的单引号里。值里可能有中文、空格、`$`、甚至换行。
+    func shQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// 读订阅列表。
+    ///
+    /// 不用 `uci show` 整段解析：多行地址在那种格式里是**跨行**的单引号值，
+    /// 一个地址换了行，后面的键值全跟着错位。这里逐段 `uci get`，
+    /// 输出成 `键|值` 的行，Swift 侧只按第一个 `|` 切，天然不怕换行。
+    var subscriptionsCommand: String {
+        lowPriority("""
+        echo @@OCSUBS
+        for s in $(uci -q show openclash 2>/dev/null | grep '=config_subscribe$' | cut -d= -f1 | cut -d. -f2-); do
+          echo "S|$s"
+          echo "N|$(uci -q get "openclash.$s.name" 2>/dev/null)"
+          echo "E|$(uci -q get "openclash.$s.enabled" 2>/dev/null)"
+          echo "U|$(uci -q get "openclash.$s.sub_ua" 2>/dev/null)"
+          uci -q get "openclash.$s.address" 2>/dev/null | while IFS= read -r line; do [ -n "$line" ] && echo "A|$line"; done
+          n=$(uci -q get "openclash.$s.name" 2>/dev/null)
+          if [ -n "$n" ] && [ -f "/etc/openclash/config/$n.yaml" ]; then
+            echo "T|$(stat -c %Y "/etc/openclash/config/$n.yaml" 2>/dev/null)"
+          fi
+          echo "."
+        done
+        true
+
+        """)
+    }
+
+    /// 新增（`id == nil`）或覆盖一条订阅。`uci add` 会把新段名打在标准输出上。
+    func subscriptionSaveCommand(id: String?, name: String, address: String,
+                                 ua: String, enabled: Bool) -> String {
+        var lines: [String] = []
+        if let id, !id.isEmpty {
+            lines.append("S=\(shQuote(id))")
+        } else {
+            lines.append("S=$(uci -q add openclash config_subscribe)")
+        }
+        lines.append("uci -q set \"openclash.$S.name\"=\(shQuote(name))")
+        lines.append("uci -q set \"openclash.$S.address\"=\(shQuote(address))")
+        lines.append("uci -q set \"openclash.$S.sub_ua\"=\(shQuote(ua))")
+        lines.append("uci -q set \"openclash.$S.enabled\"=\(shQuote(enabled ? "1" : "0"))")
+        lines.append("uci -q commit openclash && echo saved")
+        lines.append("true")
+        return lowPriority(lines.joined(separator: "; "))
+    }
+
+    func subscriptionDeleteCommand(_ sub: ProxySubscription) -> String {
+        lowPriority("""
+        uci -q delete \(shQuote("openclash.\(sub.id)"))
+        uci -q commit openclash && echo deleted
+        true
+
+        """)
+    }
+
+    func subscriptionEnableCommand(_ sub: ProxySubscription, on: Bool) -> String {
+        lowPriority("""
+        uci -q set \(shQuote("openclash.\(sub.id).enabled"))=\(shQuote(on ? "1" : "0"))
+        uci -q commit openclash && echo saved
+        true
+
+        """)
+    }
+
+    /// 把「下载 + 转换」丢到路由器后台，命令本身立刻返回。
+    ///
+    /// 后台进程没有分配 PTY，通道关掉不会被 SIGHUP 带走；但仍先试 `nohup`，
+    /// 部分固件的 dropbear 会清理会话进程组。
+    func subscriptionUpdateStartCommand(_ names: [String]) -> String {
+        let list = names.map { "echo \(shQuote($0));" }.joined(separator: " ")
+        return lowPriority("""
+        rm -f /tmp/oc_sub.log /tmp/oc_sub_rc /tmp/oc_sub_list
+        { \(list) } > /tmp/oc_sub_list
+        if command -v nohup >/dev/null 2>&1; then N=nohup; else N=; fi
+        $N sh -c 'R=0; while IFS= read -r n; do [ -n "$n" ] || continue; sh /usr/share/openclash/openclash.sh "$n" norestart >>/tmp/oc_sub.log 2>&1 || R=1; done < /tmp/oc_sub_list; echo $R >/tmp/oc_sub_rc' </dev/null >/dev/null 2>&1 &
+        echo started
+
+        """)
+    }
+
+    /// 轮询后台任务：写完了 rc 文件就吐出退出码，否则回一行 `running`。
+    var subscriptionUpdatePollCommand: String {
+        lowPriority("""
+        if [ -f /tmp/oc_sub_rc ]; then cat /tmp/oc_sub_rc 2>/dev/null; else echo running; fi
+        true
+
+        """)
     }
 
     /// 每个数据项对应一段脚本。同一档里的项用换行拼成一条命令，交给同一个 shell 跑完，
