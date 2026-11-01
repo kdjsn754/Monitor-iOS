@@ -281,20 +281,32 @@ struct ErrorBanner: View {
     }
 }
 
-struct GlassProminentButtonStyle: ButtonStyle {
-    /// 用不了的时候（比如「没有待应用的改动」）换成灰底灰字。
-    ///
-    /// 别用 `.opacity(0.45)` 代替：那会把白字也一起压成半透明，白字压在半透明蓝底上
-    /// 对比度只剩 1.x:1，按钮上根本读不出字来（v1.28.28 出预览图时才发现的）。
-    /// 灰底 + 次要色文字是系统里「不可用主按钮」的样子，一眼就知道是灰的、也能读清。
-    var dimmed = false
+// MARK: - 液态玻璃按钮
 
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .foregroundStyle(dimmed ? AnyShapeStyle(Color.secondary) : AnyShapeStyle(Color.white))
-            .background(dimmed ? AnyShapeStyle(Color(.tertiarySystemFill)) : AnyShapeStyle(Color.blue),
-                        in: Capsule())
-            .opacity(configuration.isPressed ? 0.82 : 1)
+/// 全 App 的按钮统一走 iOS 26 原生液态玻璃。
+///
+/// 为什么推翻自绘（v2.1.9，用户：「能把按钮都改成使用 ios 原生液态玻璃那种吗」）：
+/// 这里原来有个叫 `GlassProminentButtonStyle` 的结构体——名字带 Glass，画出来的却是
+/// **实色蓝胶囊 + 白字**，和玻璃没有半点关系。iOS 26 系统自带 `.glass` 与 `.glassProminent`
+/// 两个 ButtonStyle，玻璃会把背后的卡片、渐变折进按钮里，按下还有形变，是自绘做不出来的。
+///
+/// 四条硬约束（系统定的，绕了就会变形）：
+/// 1. **别给 label 加 `.background` / `.padding`**：玻璃自带约 13pt 内边距，
+///    形状由 `.buttonBorderShape` 决定。再叠一层底色就变成「玻璃壳里塞了块色块」。
+/// 2. **别用带圈的 SF Symbol**（`plus.circle.fill` 这种）：玻璃壳本身就是容器，
+///    套两层圈显得笨重。要圆就用 `.buttonBorderShape(.circle)`。
+/// 3. **禁用交给 `.disabled()`**：玻璃按钮自己会变灰变淡，别再手动 `.opacity()`——
+///    那会把文字一起压透（v1.28.28 踩过）。
+/// 4. **别在滚动容器里堆玻璃**：Form / List 里放一两个没关系，一屏七八块会持续重算折射。
+extension View {
+    /// 主按钮：着色的玻璃。`tint` 只接受纯色，系统不支持渐变。
+    func glassPrimaryButton(_ tint: Color = .blue) -> some View {
+        self.buttonStyle(.glassProminent).tint(tint)
+    }
+
+    /// 次要按钮：中性玻璃，不上色。
+    func glassSecondaryButton() -> some View {
+        self.buttonStyle(.glass)
     }
 }
 
@@ -349,27 +361,35 @@ struct SheetOverlayCard<Content: View>: View {
     }
 }
 
-/// 浮层卡片底部的等宽按钮。`tint` 为空是次要按钮（浅灰底黑字），
-/// 传了颜色就是主按钮（实色底白字），删除用 `.red`。
+/// 浮层卡片底部的等宽按钮。`tint` 为空是次要按钮（中性玻璃），
+/// 传了颜色就是主按钮（着色玻璃），删除用 `.red`。
+///
+/// v2.1.9 起不再自绘圆角色块：外壳交给系统的玻璃，圆角通过
+/// `.buttonBorderShape(.roundedRectangle(radius: 12))` 指定。
 struct SheetOverlayButton: View {
     let title: String
     var tint: Color? = nil
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            Text(title)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(tint == nil ? Color(uiColor: .label) : Color.white)
-                .frame(maxWidth: .infinity)
-                .frame(height: 44)
-                .background(
-                    tint ?? Color(.tertiarySystemFill),
-                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-                )
-                .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        Group {
+            if let tint {
+                Button(action: action) {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                }
+                .glassPrimaryButton(tint)
+            } else {
+                Button(action: action) {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                }
+                .glassSecondaryButton()
+            }
         }
-        .buttonStyle(.plain)
+        .buttonBorderShape(.roundedRectangle(radius: 12))
     }
 }
 

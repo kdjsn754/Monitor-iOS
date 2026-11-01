@@ -368,10 +368,10 @@ struct FanControlView: View {
                 Text(model.fanBusy ? "正在应用…" : "应用到路由器")
                     .font(.subheadline.weight(.semibold))
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
             }
             // 没有改动时按钮是灰的：它本身就是「有没有东西等着写进去」的信号。
-            .buttonStyle(GlassProminentButtonStyle(dimmed: !canApply))
+            // 变灰由 `.disabled()` 交给玻璃自己做，不再传 dimmed。
+            .glassPrimaryButton()
             .disabled(!canApply)
 
             Button {
@@ -379,12 +379,10 @@ struct FanControlView: View {
             } label: {
                 Text("恢复插件默认配置")
                     .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.red)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
             }
-            .buttonStyle(.plain)
-            .rowTile(radius: 12)
+            .glassSecondaryButton()
+            .tint(.red)
             .disabled(model.fanBusy)
         }
         .padding(.top, 2)

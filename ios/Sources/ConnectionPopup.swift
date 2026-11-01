@@ -219,9 +219,8 @@ struct ConnectionPopupView: View {
                     Text("停止连接")
                         .font(.subheadline.weight(.semibold))
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
                 }
-                .buttonStyle(.bordered)
+                .glassSecondaryButton()
                 .tint(.red)
 
                 Button {
@@ -243,9 +242,8 @@ struct ConnectionPopupView: View {
                     Text("重试")
                         .font(.subheadline.weight(.semibold))
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 11)
                 }
-                .buttonStyle(GlassProminentButtonStyle())
+                .glassPrimaryButton()
 
                 Button {
                     onDismiss()
