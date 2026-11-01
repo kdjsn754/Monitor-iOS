@@ -88,7 +88,14 @@ name: Build unsigned iOS IPA
 #   以后真想加快，正确做法是只缓存 build/spm 那一个小目录（源码包，几十 MB），
 #   别缓存 DerivedData。
 #
+# ── 触发方式（2026-11-02 加 push 自动触发）──────────────────────────────────
+#   之前只有 workflow_dispatch，b89 那次 push 后 CI 一直没跑才发现：每版都得
+#   手动 API dispatch 一次。现在 push 到 main 直接自动构建，dispatch 保留——
+#   想手动换运行器排查时还能用。push 触发时 inputs 为空，下面的
+#   `inputs.runner || 'auto'` 兜底正好落到 xcode-27，不需要别的处理。
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       runner:
