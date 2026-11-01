@@ -81,6 +81,10 @@ final class AppModel: ObservableObject {
     /// 正在更新的订阅名；`"all"` 表示「全部更新」。nil = 空闲。
     @Published private(set) var subsBusy: String?
     @Published private(set) var subsLoaded = false
+    /// 弹窗里的操作结果（成功/失败/进行中的说明）。见 `Notice` 的注释：
+    /// 弹窗里没有系统 alert 可用，`errorMessage` 又只在登录页/设置页渲染，
+    /// 所以订阅相关的每一步都必须往这里写一条，否则界面看起来「什么都没发生」。
+    @Published var notice: Notice?
     @Published var accessChecks = AccessCheck.Site.allCases.map { AccessCheck(site: $0) }
     @Published var history: [HistoryPoint] = []
     @Published var profiles: [RouterProfile] = []
@@ -461,13 +465,21 @@ final class AppModel: ObservableObject {
         let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         errorMessage = text
+        // 顺手镜像一份到弹窗提示：登录页之外没有视图渲染 errorMessage，
+        // 在 sheet 里报错就等于静音（v2.1.0「点更新没反应」的根因）。
+        notice = Notice(kind: .fail, title: "出错了", detail: text)
         errorExpiry?.cancel()
         errorExpiry = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(Int(seconds * 1000)))
             guard !Task.isCancelled else { return }
             guard let self else { return }
             if self.errorMessage == text { self.errorMessage = nil }
+            if self.notice?.detail == text { self.notice = nil }
         }
+    }
+
+    func clearNotice() {
+        notice = nil
     }
 
     func clearError() {
@@ -1078,29 +1090,38 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// 新增（`id == nil`）或修改一条订阅。返回是否真的写进去了。
-    @discardableResult
+    /// 新增（`id == nil`）或修改一条订阅。写成功就返回**重新读回来的那一条**
+    /// （新段名由 `uci add` 生成，调用方拿不到），失败返回 nil。
+    ///
+    /// 早先这里返回 Bool，调用方只能拿旧 id 去列表里翻，翻不到就静默 `return`；
+    /// 现在直接把结果递回去，不给「点了没反应」留口子。
     func saveSubscription(id: String?, name: String, address: String,
-                          ua: String, enabled: Bool) async -> Bool {
+                          ua: String, enabled: Bool,
+                          keywords: [String], excludeKeywords: [String]) async -> ProxySubscription? {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let body = address.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !body.isEmpty else { return false }
+        guard !trimmed.isEmpty, !body.isEmpty else {
+            presentError("名称和订阅地址都不能为空")
+            return nil
+        }
         let agent = ua.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             let output = try await execute(subscriptionSaveCommand(
                 id: id, name: trimmed, address: body,
                 ua: agent.isEmpty ? "clash-verge/v2.4.5" : agent,
-                enabled: enabled
+                enabled: enabled,
+                keywords: keywords, excludeKeywords: excludeKeywords
             ))
             guard output.contains("saved") else {
                 presentError("写入订阅失败，请确认路由器上装了 OpenClash")
-                return false
+                return nil
             }
             await loadSubscriptions(silent: true)
-            return true
+            if let id, let hit = subscriptions.first(where: { $0.id == id }) { return hit }
+            return subscriptions.first { $0.name == trimmed }
         } catch {
             presentError(describe(error))
-            return false
+            return nil
         }
     }
 
@@ -1111,6 +1132,8 @@ final class AppModel: ObservableObject {
         do {
             _ = try await execute(subscriptionDeleteCommand(sub))
             await loadSubscriptions(silent: true)
+            notice = Notice(kind: .ok, title: "已删除「\(sub.name)」",
+                            detail: "只删了路由器上的订阅条目，已下载的配置文件还在。")
         } catch {
             presentError(describe(error))
         }
@@ -1140,7 +1163,10 @@ final class AppModel: ObservableObject {
     /// 用户在界面上等了半天，最后只看到一条超时错误。
     func updateSubscriptions(_ targets: [ProxySubscription], restart: Bool = false) async {
         guard !targets.isEmpty, subsBusy == nil, connected else { return }
+        let label = targets.count == 1 ? targets[0].name : "\(targets.count) 个订阅"
         subsBusy = targets.count == 1 ? targets[0].name : "all"
+        notice = Notice(kind: .info, title: "正在更新「\(label)」",
+                        detail: "已交给路由器后台下载，通常 10~30 秒。")
         defer { subsBusy = nil }
 
         do {
@@ -1156,21 +1182,33 @@ final class AppModel: ObservableObject {
                 }
             }
             guard let code else {
-                presentError("更新超时了。订阅可能还在路由器后台下载，稍后刷新看看结果。")
+                notice = Notice(kind: .fail, title: "「\(label)」更新超时",
+                                detail: "订阅可能还在路由器后台下载，过一会儿回列表刷新看看。")
                 await loadSubscriptions(silent: true)
                 return
             }
+            // 不管成败都翻一下日志：成功时能看出「替换了」还是「没变化」，
+            // 失败时直接把最后两行摊给用户，省得再 SSH 上去看。
+            let log = ((try? await execute("tail -n 2 /tmp/oc_sub.log 2>/dev/null")) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             if code != "0" {
-                let log = ((try? await execute("tail -n 2 /tmp/oc_sub.log 2>/dev/null")) ?? "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                presentError(log.isEmpty ? "更新失败，检查一下订阅地址或路由器的网络" : "更新失败：\(log)")
-            } else if restart {
-                // 替换的正是当前在跑的那份，内核要重启才会生效。
-                _ = try? await execute("/etc/init.d/openclash restart >/dev/null 2>&1; echo done")
+                notice = Notice(kind: .fail, title: "「\(label)」更新失败",
+                                detail: log.isEmpty ? "检查订阅地址，或者路由器能不能上网" : log)
+            } else {
+                var detail = log.contains("No Change")
+                    ? "没有变化，配置文件没被替换"
+                    : "配置文件已替换"
+                if restart {
+                    // 替换的正是当前在跑的那份，内核不重启就不会生效。
+                    _ = try? await execute("/etc/init.d/openclash restart >/dev/null 2>&1; echo done")
+                    detail += "；内核已重启"
+                }
+                notice = Notice(kind: .ok, title: "「\(label)」更新完成", detail: detail)
             }
             await loadSubscriptions(silent: true)
             await refreshOpenClash()
         } catch {
+            notice = Notice(kind: .fail, title: "「\(label)」更新中断", detail: describe(error))
             presentError(describe(error))
         }
     }
@@ -1515,14 +1553,20 @@ final class AppModel: ObservableObject {
         var result: [ProxySubscription] = []
         var current: ProxySubscription?
         var address: [String] = []
+        var keywords: [String] = []
+        var excludes: [String] = []
 
         func commit() {
             guard var sub = current else { return }
             sub.address = address.joined(separator: "\n")
+            sub.keywords = keywords
+            sub.excludeKeywords = excludes
             if sub.ua.isEmpty { sub.ua = "clash-verge/v2.4.5" }
             if !sub.name.isEmpty { result.append(sub) }
             current = nil
             address = []
+            keywords = []
+            excludes = []
         }
 
         for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
@@ -1545,6 +1589,10 @@ final class AppModel: ObservableObject {
                 current?.ua = value
             case "A":
                 if !value.isEmpty { address.append(value) }
+            case "K":
+                if !value.isEmpty { keywords.append(value) }
+            case "X":
+                if !value.isEmpty { excludes.append(value) }
             case "T":
                 current?.updatedAt = Double(value).map { Date(timeIntervalSince1970: $0) }
             default:
@@ -2189,6 +2237,9 @@ private extension AppModel {
           echo "E|$(uci -q get "openclash.$s.enabled" 2>/dev/null)"
           echo "U|$(uci -q get "openclash.$s.sub_ua" 2>/dev/null)"
           uci -q get "openclash.$s.address" 2>/dev/null | while IFS= read -r line; do [ -n "$line" ] && echo "A|$line"; done
+          # 节点筛选：keyword / ex_keyword 都是 UCI 列表，uci get 一次吐一行。
+          uci -q get "openclash.$s.keyword" 2>/dev/null | while IFS= read -r line; do [ -n "$line" ] && echo "K|$line"; done
+          uci -q get "openclash.$s.ex_keyword" 2>/dev/null | while IFS= read -r line; do [ -n "$line" ] && echo "X|$line"; done
           n=$(uci -q get "openclash.$s.name" 2>/dev/null)
           if [ -n "$n" ] && [ -f "/etc/openclash/config/$n.yaml" ]; then
             echo "T|$(stat -c %Y "/etc/openclash/config/$n.yaml" 2>/dev/null)"
@@ -2201,8 +2252,13 @@ private extension AppModel {
     }
 
     /// 新增（`id == nil`）或覆盖一条订阅。`uci add` 会把新段名打在标准输出上。
+    ///
+    /// 节点筛选的两个字段是 **UCI 列表**（`list keyword '香港'`），不是普通字符串：
+    /// 每次保存先 `delete` 再逐条 `add_list`，否则旧关键词会一直挂在后面，
+    /// 改一次多一条，越改越脏。
     func subscriptionSaveCommand(id: String?, name: String, address: String,
-                                 ua: String, enabled: Bool) -> String {
+                                 ua: String, enabled: Bool,
+                                 keywords: [String], excludeKeywords: [String]) -> String {
         var lines: [String] = []
         if let id, !id.isEmpty {
             lines.append("S=\(shQuote(id))")
@@ -2213,6 +2269,21 @@ private extension AppModel {
         lines.append("uci -q set \"openclash.$S.address\"=\(shQuote(address))")
         lines.append("uci -q set \"openclash.$S.sub_ua\"=\(shQuote(ua))")
         lines.append("uci -q set \"openclash.$S.enabled\"=\(shQuote(enabled ? "1" : "0"))")
+
+        lines.append("uci -q delete \"openclash.$S.keyword\" 2>/dev/null; true")
+        for k in keywords {
+            lines.append("uci -q add_list \"openclash.$S.keyword\"=\(shQuote(k))")
+        }
+        lines.append("uci -q delete \"openclash.$S.ex_keyword\" 2>/dev/null; true")
+        for k in excludeKeywords {
+            lines.append("uci -q add_list \"openclash.$S.ex_keyword\"=\(shQuote(k))")
+        }
+        // 两个列表都空的时候**不碰** keyword_option：网页后台可能特意关掉了筛选，
+        // 这里硬写 1 会让它在用户没察觉的情况下开始过滤节点。
+        if !keywords.isEmpty || !excludeKeywords.isEmpty {
+            lines.append("uci -q set \"openclash.$S.keyword_option\"='1'")
+        }
+
         lines.append("uci -q commit openclash && echo saved")
         lines.append("true")
         return lowPriority(lines.joined(separator: "; "))

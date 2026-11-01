@@ -711,6 +711,12 @@ private struct ProxyConfigSheet: View {
                     .listRowBackground(Color.clear)
                 }
 
+                if let notice = model.notice {
+                    Section {
+                        NoticeRow(notice: notice)
+                    }
+                }
+
                 if tab == .configs {
                     configSection
                     applySection
@@ -742,7 +748,10 @@ private struct ProxyConfigSheet: View {
             .navigationDestination(item: $editing) { sub in
                 SubscriptionEditView(subscription: sub)
             }
-            .task { await model.loadSubscriptions(silent: true) }
+            .task {
+                model.clearNotice()
+                await model.loadSubscriptions(silent: true)
+            }
         }
         .overlay { confirmLayer }
     }
@@ -1000,6 +1009,8 @@ private struct SubscriptionEditView: View {
     @State private var address: String
     @State private var ua: String
     @State private var enabled: Bool
+    @State private var keywords: String
+    @State private var excludeKeywords: String
     @State private var saving = false
 
     init(subscription: ProxySubscription?) {
@@ -1008,6 +1019,8 @@ private struct SubscriptionEditView: View {
         _address = State(initialValue: subscription?.address ?? "")
         _ua = State(initialValue: subscription?.ua ?? "clash-verge/v2.4.5")
         _enabled = State(initialValue: subscription?.enabled ?? true)
+        _keywords = State(initialValue: (subscription?.keywords ?? []).joined(separator: "\n"))
+        _excludeKeywords = State(initialValue: (subscription?.excludeKeywords ?? []).joined(separator: "\n"))
     }
 
     var body: some View {
@@ -1056,28 +1069,61 @@ private struct SubscriptionEditView: View {
                 Text("一行一个地址。名称会成为配置文件名（如 吹雪云.yaml），不能带引号或斜杠，也不能和已有订阅重名。")
             }
 
+            // 节点筛选：关键词可能写三四行，塞在编辑页里只能看见两行，所以单独一页。
+            Section {
+                NavigationLink {
+                    KeywordEditor(title: "包含关键词",
+                                  hint: "命中才保留。留空就是不筛，所有节点都留下。",
+                                  placeholder: "每行一个，例如 香港",
+                                  text: $keywords)
+                } label: {
+                    summary("包含关键词", keywords)
+                }
+                NavigationLink {
+                    KeywordEditor(title: "排除关键词",
+                                  hint: "命中就丢掉。留空就是不排除。",
+                                  placeholder: "每行一个，例如 过期",
+                                  text: $excludeKeywords)
+                } label: {
+                    summary("排除关键词", excludeKeywords)
+                }
+            } header: {
+                Text("节点筛选")
+            } footer: {
+                Text("一行一个关键词；用 & 连接表示必须同时包含（新加坡&奈飞）；多行之间是「或」，不区分大小写。"
+                     + "筛选发生在路由器下载完之后，所以要重新更新一次订阅才看得到效果。")
+            }
+
             Section {
                 Toggle("启用", isOn: $enabled)
             } footer: {
-                Text("关掉只是不参与「全部更新」，已下载的配置和当前运行状态都不受影响。")
+                Text("关掉只是不参与「全部更新」，已下载的配置和当前运行状态都不受影响。"
+                     + "点右上角「" + (subscription == nil ? "添加" : "保存")
+                     + "」后会立刻从路由器下载一次，约 10~30 秒。")
             }
 
             if subscription != nil {
                 Section {
                     Button {
-                        Task { await saveThenUpdate() }
+                        Task { await saveAndUpdate(keepOpen: true) }
                     } label: {
                         HStack {
-                            Text("立即更新这个订阅")
+                            Text(model.subsBusy != nil ? "正在从路由器下载…" : "重新下载一次")
                             Spacer()
                             if model.subsBusy != nil {
                                 ProgressView().controlSize(.mini)
                             }
                         }
                     }
-                    .disabled(model.subsBusy != nil || (!canSave && edited))
+                    .disabled(model.subsBusy != nil || saving || !canSave)
                 } footer: {
-                    Text("先保存再下载：从路由器上拉取并转成 Clash 配置，约 10~30 秒。")
+                    Text("改完不点右上角也行：这里同样会先保存再下载。约 10~30 秒。")
+                }
+            }
+
+            if let notice = model.notice {
+                Section {
+                    NoticeRow(notice: notice)
                 }
             }
         }
@@ -1085,12 +1131,29 @@ private struct SubscriptionEditView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button("保存") {
-                    Task { await save() }
+                // 新添加的那条：这个按钮同时会把配置下载下来，叫「添加」更贴近实际动作。
+                Button(subscription == nil ? "添加" : "保存") {
+                    Task { await saveAndUpdate(keepOpen: false) }
                 }
-                .disabled(!canSave || saving)
+                .disabled(!canSave || saving || model.subsBusy != nil)
             }
         }
+        .onAppear { model.clearNotice() }
+    }
+
+    /// 筛选摘要：右侧只给条数，不下拉一长串关键词——那一列太窄，写不下也看不清。
+    private func summary(_ title: String, _ text: String) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            Text(countLabel(text))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func countLabel(_ text: String) -> String {
+        let n = keywordLines(text).count
+        return n == 0 ? "空" : "\(n) 条"
     }
 
     // MARK: - 保存
@@ -1103,9 +1166,10 @@ private struct SubscriptionEditView: View {
         address.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private var edited: Bool {
-        guard let subscription else { return true }
-        return trimmedName != subscription.name || trimmedAddress != subscription.address
+    private func keywordLines(_ text: String) -> [String] {
+        text.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
     }
 
     /// 名称的三个硬条件：非空、不带引号斜杠、不和别的订阅重名。
@@ -1124,22 +1188,110 @@ private struct SubscriptionEditView: View {
         nameProblem == nil && !trimmedAddress.isEmpty
     }
 
-    @discardableResult
-    private func save(keepOpen: Bool = false) async -> Bool {
-        guard canSave, !saving else { return false }
+    /// 保存并立刻重新下载一次。
+    ///
+    /// 用户定的规矩是「保存后就自动重新下载」，因为筛的是下载下来的节点：
+    /// 只写进 UCI 不下载，界面上什么都看不出变化——这正是 v2.1.0「点了没反应」的观感。
+    /// 保存成功就关页面回列表（列表里能看到「刚刚更新」）；失败则留在本页，把原因摊在下面。
+    private func saveAndUpdate(keepOpen: Bool) async {
+        guard canSave, !saving else { return }
         saving = true
-        let ok = await model.saveSubscription(id: subscription?.id, name: trimmedName,
-                                              address: trimmedAddress, ua: ua, enabled: enabled)
+        let saved = await model.saveSubscription(
+            id: subscription?.id, name: trimmedName, address: trimmedAddress,
+            ua: ua, enabled: enabled,
+            keywords: keywordLines(keywords), excludeKeywords: keywordLines(excludeKeywords)
+        )
         saving = false
-        if ok && !keepOpen { dismiss() }
-        return ok
+        guard let saved else { return }
+
+        // 替换的正是当前在跑的那份：不重启内核等于白更新。
+        let isActive = "\(saved.name).yaml" == model.currentConfigName
+        await model.updateSubscriptions([saved], restart: isActive)
+        if !keepOpen, model.notice?.kind != .fail { dismiss() }
+    }
+}
+
+/// 关键词编辑页：整页一个大输入框，够写、看得清。
+private struct KeywordEditor: View {
+    let title: String
+    let hint: String
+    let placeholder: String
+    @Binding var text: String
+
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        Form {
+            Section {
+                TextEditor(text: $text)
+                    .frame(minHeight: 160)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                    .focused($focused)
+                    .overlay(alignment: .topLeading) {
+                        if text.isEmpty {
+                            Text(placeholder)
+                                .foregroundStyle(.tertiary)
+                                .padding(.top, 8)
+                                .padding(.leading, 5)
+                                .allowsHitTesting(false)
+                        }
+                    }
+            } header: {
+                Text(title)
+            } footer: {
+                Text(hint)
+            }
+
+            Section {
+                Text("新加坡&奈飞")
+                    .font(.callout.monospaced())
+                Text("名字里同时有这两个词，才保留")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("写法")
+            } footer: {
+                Text("多行之间是「或」。改完点返回，再点上一页的「保存」才会写进路由器。")
+            }
+        }
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear { focused = true }
+    }
+}
+
+/// 弹窗里的结果条。不用系统 alert / 横幅：sheet 里锚点会算错，而且它盖不住键盘。
+struct NoticeRow: View {
+    let notice: Notice
+
+    private var tint: Color {
+        switch notice.kind {
+        case .ok: return .green
+        case .fail: return .red
+        case .info: return .secondary
+        }
     }
 
-    /// 「立即更新」用改完的值：先落盘，再从列表里取回这一条（拿到新名字/新地址）再去下载。
-    private func saveThenUpdate() async {
-        let id = subscription?.id
-        guard await save(keepOpen: true) else { return }
-        guard let id, let fresh = model.subscriptions.first(where: { $0.id == id }) else { return }
-        await model.updateSubscriptions([fresh])
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Label {
+                Text(notice.title)
+                    .font(.footnote.weight(.semibold))
+            } icon: {
+                Image(systemName: notice.symbol)
+                    .font(.footnote)
+            }
+            .foregroundStyle(tint)
+
+            if !notice.detail.isEmpty {
+                Text(notice.detail)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 2)
     }
 }

@@ -138,6 +138,14 @@ struct ProxySubscription: Identifiable, Hashable {
     var enabled: Bool
     /// 已下载配置文件的修改时间；还没下载过就是 nil。
     var updatedAt: Date?
+    /// 节点筛选：命中这些关键词的节点才保留（UCI `keyword`，是个列表）。
+    /// 一行一个；一行里用 `&` 连接表示「必须同时包含」，多行之间是「或」，都不区分大小写。
+    var keywords: [String] = []
+    /// 排除关键词（UCI `ex_keyword`），命中就丢掉，写法同上。
+    var excludeKeywords: [String] = []
+
+    /// 有没有配过筛选。空 = 不筛，全部节点都留下。
+    var hasFilters: Bool { !keywords.isEmpty || !excludeKeywords.isEmpty }
 
     var lines: [String] {
         address.split(whereSeparator: \.isNewline)
@@ -167,6 +175,27 @@ struct ProxySubscription: Identifiable, Hashable {
         let formatter = DateFormatter()
         formatter.dateFormat = "M 月 d 日更新"
         return formatter.string(from: date)
+    }
+}
+
+/// 一次操作的结果，摊在弹窗里给人看。
+///
+/// 为什么不用系统 `alert`：sheet 里系统弹窗的锚点会算错、有时干脆不显示（v1.28.21 踩过）。
+/// 为什么必须有它：`errorMessage` 只在登录页和设置页渲染，弹窗里调 `presentError`
+/// 等于把错误丢进黑洞——v2.1.0 用户点「立即更新」毫无反应就是这么来的。
+struct Notice: Equatable {
+    enum Kind { case ok, fail, info }
+
+    var kind: Kind
+    var title: String
+    var detail: String = ""
+
+    var symbol: String {
+        switch kind {
+        case .ok: return "checkmark.circle.fill"
+        case .fail: return "exclamationmark.triangle.fill"
+        case .info: return "info.circle.fill"
+        }
     }
 }
 
