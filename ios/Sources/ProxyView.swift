@@ -63,9 +63,11 @@ struct ProxyView: View {
             // 只会显示一个光秃秃的返回箭头（还可能显示英文 Back）。标题设了但栏是隐的，
             // 本页看不出任何变化。
             .navigationTitle("代理")
-            .refreshable {
-                await model.manualRefresh()
-            }
+            // 不挂 .refreshable（v2.1.8）：导航栏整条被隐藏之后，系统下拉刷新控件
+            // 没有导航栏可以依附，顶部 inset 只能由滚动视图自己估，于是下拉时内容
+            // 被推下去约 60pt、松手再弹回，观感就是「页面跳一下」。这一页顶部本来
+            // 就有一颗刷新按钮（PageHeader 的 arrow.clockwise），下拉是重复入口。
+            // 刷新只在右上角按钮里做。
             // 订阅条数要显示在配置卡的副标题里，进页面就先读一次；
             // 刚连上时状态还没到、上面这一次会直接返回，所以再挂一个 onChange 补读。
             .task { await model.loadSubscriptions(silent: true) }
@@ -676,18 +678,14 @@ struct ProxyView: View {
     }
 }
 
-/// 配置文件 + 订阅 的独立页（v2.1.7 之前是弹窗）。
+/// 代理配置页：只管配置文件。
 ///
-/// v1.28.29 把这里换成和「新建连接」同一套系统表单：`NavigationStack` + `Form`，
-/// 「关闭」在导航栏左上、标题居中，列表是原生分组卡与缩进分隔线。
-///
-/// v2.1.0 把「订阅」并进来（用户选了 C 方案）：顶部一段分段控件，
-/// **不新增入口、不多一层 sheet**；点订阅进编辑页是同一条栈里的 push。
-/// 订阅本身存在路由器 UCI 的 `config_subscribe` 段里，这里只做读写与触发更新。
-///
-/// v2.1.7 两处形态都变了：从代理页 push 进来（不再是 sheet，左上交给系统返回），
-/// 分段移出 `Form` 固定在导航栏下面，两页用 `TabView(.page)` 承载、可左右滑。
-/// 行内左滑删除同时取消——它会和翻页抢横向手势，删除改走长按菜单。
+/// 演变：v1.28.29 从自绘弹窗换成系统 `Form`；v2.1.0 把订阅并进来做成分段；
+/// v2.1.7 把分段固定到导航栏下面、两页用 `TabView(.page)` 左右滑；
+/// **v2.1.8 又把订阅整页拆出去**（用户：「订阅移到这个页面的右上角成按钮」）。
+/// 现在这一页只有一件事——选一份配置并应用；订阅在右上角的按钮里。
+/// 分段、`TabView(.page)`、`Tab` 枚举、`sectionTitle` 全部删掉：拿掉横向分页之后，
+/// 页面结构比上一版简单，也不必再为翻页手避让行内手势。
 private struct ProxyConfigView: View {
     @State private var configs: [String]
     private let applied: String
@@ -697,22 +695,6 @@ private struct ProxyConfigView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var picked: String
-    @State private var editing: ProxySubscription?
-    @State private var pending: UpdateRequest?
-    @State private var tab: Tab = .configs
-
-    /// 管理页顶部的分段：配置文件和订阅各占一页，不再挤在一页里滚。
-    enum Tab: String, CaseIterable, Identifiable {
-        case configs = "配置文件"
-        case subs = "订阅"
-        var id: String { rawValue }
-    }
-
-    /// 待确认的一次更新：里面带着「要不要重启内核」。
-    struct UpdateRequest: Identifiable {
-        let id = UUID()
-        let targets: [ProxySubscription]
-    }
 
     init(configs: [String], applied: String, onApply: @escaping (String) -> Void) {
         _configs = State(initialValue: configs)
@@ -723,28 +705,12 @@ private struct ProxyConfigView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            // 分段不再放进 Form（v2.1.7）：它原来跟着列表一起滚，滚到下半页就找不到
-            // 切页入口了。现在固定在导航栏下面，两页交给 .page 的 TabView 承载，
-            // 点分段和左右滑互相同步。
-            Picker("", selection: $tab) {
-                ForEach(Tab.allCases) { item in
-                    Text(sectionTitle(item)).tag(item)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding(.horizontal, 16)
-            .padding(.top, 10)
-            .padding(.bottom, 8)
-
-            TabView(selection: $tab) {
-                configPage.tag(Tab.configs)
-                subsPage.tag(Tab.subs)
-            }
-            .tabViewStyle(.page(indexDisplayMode: .never))
+        Form {
+            noticeSection
+            configSection
+            applySection
         }
-        .background(Color(uiColor: .systemGroupedBackground))
+        .listSectionSpacing(.compact)
         .navigationTitle("代理配置")
         .navigationBarTitleDisplayMode(.inline)
         // 代理页把整条导航栏藏了，push 进来的页必须自己显式要回来，
@@ -752,49 +718,28 @@ private struct ProxyConfigView: View {
         .toolbar(.visible, for: .navigationBar)
         // 二级页收起底栏，和风扇控制页一致。
         .toolbar(.hidden, for: .tabBar)
-        .navigationDestination(item: $editing) { sub in
-            SubscriptionEditView(subscription: sub)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                // 用 NavigationLink 而不是再挂一个 navigationDestination(isPresented:)：
+                // 同一层挂两个 destination 有「点一个两个都跳」的隐患（交接 7.1）。
+                // 订阅页返回箭头上会写「代理配置」，不需要额外设标题。
+                NavigationLink {
+                    SubscriptionListView()
+                } label: {
+                    Text("订阅")
+                }
+            }
         }
-        .task {
-            model.clearNotice()
-            await model.loadSubscriptions(silent: true)
-        }
-        .overlay { confirmLayer }
+        .task { model.clearNotice() }
     }
 
-    /// 配置文件页：系统 Form，单独一页，滚动位置与订阅页互不影响。
-    private var configPage: some View {
-        Form {
-            noticeSection
-            configSection
-            applySection
-        }
-        .listSectionSpacing(.compact)
-    }
-
-    private var subsPage: some View {
-        Form {
-            noticeSection
-            subscriptionSection
-            updateSection
-        }
-        .listSectionSpacing(.compact)
-    }
-
-    /// 操作结果条：两页都放一份——结果属于哪一页，就在哪一页看见。
+    /// 操作结果条：这条结果属于哪一页，就在哪一页出现。
     @ViewBuilder
     private var noticeSection: some View {
         if let notice = model.notice {
             Section {
                 NoticeRow(notice: notice)
             }
-        }
-    }
-
-    private func sectionTitle(_ item: Tab) -> String {
-        switch item {
-        case .configs: return "配置文件 \(configs.count)"
-        case .subs: return "订阅 \(model.subscriptions.count)"
         }
     }
 
@@ -920,6 +865,69 @@ private struct ProxyConfigView: View {
         canApply ? "应用「\(picked)」" : "已在使用 \(appliedName)"
     }
 
+}
+
+/// 订阅列表页（v2.1.8 从「代理配置」的分段里拆出来）。
+///
+/// 入口在代理配置页导航栏右上角的「订阅」，这一页右上再放「添加」进编辑页。
+/// 订阅存在路由器 UCI 的 `config_subscribe` 段里，这里只做读写与触发更新。
+///
+/// 删除仍然只在长按菜单里，没有左滑：左滑和系统边缘返回手势同一侧，
+/// 误触代价比长按高一档；这一页也不是高频删除的地方。
+private struct SubscriptionListView: View {
+    @EnvironmentObject private var model: AppModel
+
+    @State private var editing: ProxySubscription?
+    @State private var pending: UpdateRequest?
+
+    /// 待确认的一次更新：里面带着「要不要重启内核」。
+    struct UpdateRequest: Identifiable {
+        let id = UUID()
+        let targets: [ProxySubscription]
+    }
+
+    var body: some View {
+        Form {
+            noticeSection
+            subscriptionSection
+            updateSection
+        }
+        .listSectionSpacing(.compact)
+        .navigationTitle("订阅")
+        .navigationBarTitleDisplayMode(.inline)
+        // 上层都设过 .toolbar(.visible)，这里再写一次是不依赖调用顺序；
+        // 底栏照二级页惯例收起。
+        .toolbar(.visible, for: .navigationBar)
+        .toolbar(.hidden, for: .tabBar)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                NavigationLink {
+                    SubscriptionEditView(subscription: nil)
+                } label: {
+                    Text("添加")
+                }
+            }
+        }
+        .navigationDestination(item: $editing) { sub in
+            SubscriptionEditView(subscription: sub)
+        }
+        .task {
+            model.clearNotice()
+            await model.loadSubscriptions(silent: true)
+        }
+        .overlay { confirmLayer }
+    }
+
+    /// 操作结果条：这条结果属于哪一页，就在哪一页出现。
+    @ViewBuilder
+    private var noticeSection: some View {
+        if let notice = model.notice {
+            Section {
+                NoticeRow(notice: notice)
+            }
+        }
+    }
+
     // MARK: - 订阅
 
     private var subscriptionSection: some View {
@@ -930,7 +938,7 @@ private struct ProxyConfigView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     if model.subsLoaded {
-                        Text("要新建，返回代理页点「添加」。")
+                        Text("要新建，点右上角「添加」。")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
