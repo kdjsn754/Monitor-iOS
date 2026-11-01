@@ -252,8 +252,10 @@ struct FlashInfo {
 /// 速度曲线上的一个点。只保留画图要用的两个值，
 /// 以前还顺带存了 cpu / memory，但没有任何视图读它——每 2 秒多存两份 Double，
 /// 只为了让整个数组多一次拷贝。
-struct HistoryPoint: Identifiable {
-    let id = UUID()
+/// 速度曲线的一个采样点。
+/// 以前是 `Identifiable` + `id = UUID()`，但全仓没有任何 `ForEach` 用它——
+/// 每 2 秒白生成一个 UUID，数组还因为 id 不同没法直接比较（v2.1.13 去掉）。
+struct HistoryPoint {
     let date: Date
     let download: Double
     let upload: Double

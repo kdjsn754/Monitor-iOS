@@ -8,6 +8,9 @@ struct OverviewView: View {
     /// 风扇控制页（点「风扇」那块打开，见 hardwareSection）。
     /// v1.28.28 起是 push 进来的独立页面，不再是半屏面板。
     @State private var showFanControl = false
+    /// 手动刷新的进行中标记。只用来把右上角按钮换成转圈 + 拦住连点，
+    /// 不参与数据逻辑（数据真伪一律以 model 为准）。
+    @State private var refreshing = false
 
     var body: some View {
         NavigationStack {
@@ -17,8 +20,17 @@ struct OverviewView: View {
                 // 收回，于是「松手跳一下」。换成 VStack 后高度一次算清，不会再跳。
                 VStack(spacing: 14) {
                     PageHeader("概览") {
-                        HeaderButton("arrow.clockwise") {
-                            Task { await model.manualRefresh() }
+                        // 刷新期间按钮原地换成转圈（尺寸不变，避免标题行左右跳），
+                        // 同时拦掉连点——连点会让 SSH 串行队列里排满采集任务，
+                        // 表现就是「点了好几下才动一下」。
+                        if refreshing {
+                            ProgressView()
+                                .controlSize(.small)
+                                .frame(width: 38, height: 38)
+                        } else {
+                            HeaderButton("arrow.clockwise") {
+                                Task { await refresh() }
+                            }
                         }
                     }
                     header
@@ -33,9 +45,13 @@ struct OverviewView: View {
             .background(Color.clear)
             // 标题画在内容里了，导航栏整条不要：留着它状态栏下面会空出一整条。
             .toolbar(.hidden, for: .navigationBar)
-            .refreshable {
-                await model.manualRefresh()
-            }
+            // 这里曾经有 `.refreshable`（下拉刷新），v2.1.13 删掉。
+            // 和代理页 v2.1.8 同一个根因：导航栏被 `.toolbar(.hidden)` 藏掉之后，
+            // 系统的刷新控件没有导航栏可依附，顶部 inset 只能自己估——下拉时整页内容
+            // 被推下去约 60pt、松手再弹回，手感就是「卡住又跳一下」。
+            // 更糟的是它一下拉就触发一整轮 SSH 采集（`/traffic` 是流式接口，至少一秒才吐第一行），
+            // 采集回来又是一次全页重排，正好撞在手指还在拖的那几帧上。
+            // 刷新入口保留在右上角按钮（见 PageHeader），功能不缺。
             .sheet(isPresented: $showAllDevices) {
                 DeviceListView()
             }
@@ -47,6 +63,15 @@ struct OverviewView: View {
                     .toolbar(.hidden, for: .tabBar)
             }
         }
+    }
+
+    /// 右上角刷新按钮的动作：只负责「转圈 + 防连点」。
+    /// 采集逻辑全在 `model.manualRefresh()` 里，别在这儿另开一条采集路径。
+    private func refresh() async {
+        guard !refreshing else { return }
+        refreshing = true
+        await model.manualRefresh()
+        refreshing = false
     }
 
     private var header: some View {
