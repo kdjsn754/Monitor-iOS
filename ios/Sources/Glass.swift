@@ -206,8 +206,7 @@ extension PageHeader where Trailing == EmptyView {
 ///
 /// iOS 26 起用系统液态玻璃（`glassEffect`）：玻璃会自己把背后的页面渐变、卡片
 /// 折进按钮里，按下还有回弹式的形变，和系统自己的玻璃按钮一致。
-/// 之前的「蓝线 + 5% 蓝底」在 iOS 26 的页面上显得很平，像贴上去的贴纸。
-/// 低于 iOS 26 的机器退回原来那枚浅蓝圆钮，不会掉成灰按钮。
+/// 最低版本即 iOS 26，不再为低版本做浅蓝圆钮退回。
 struct HeaderButton: View {
     let systemImage: String
     let label: String
@@ -234,14 +233,9 @@ struct HeaderButton: View {
 }
 
 private struct HeaderButtonSurface: ViewModifier {
-    @ViewBuilder
     func body(content: Content) -> some View {
-        if #available(iOS 26.0, *) {
-            // interactive：按下时玻璃会被按下去一点，松手弹回，不用自己写按压态。
-            content.glassEffect(.regular.interactive(), in: Circle())
-        } else {
-            content.softTile(.blue, in: Circle())
-        }
+        // interactive：按下时玻璃会被按下去一点，松手弹回，不用自己写按压态。
+        content.glassEffect(.regular.interactive(), in: Circle())
     }
 }
 

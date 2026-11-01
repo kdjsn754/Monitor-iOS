@@ -2,7 +2,7 @@ name: OpenWrtMonitor
 options:
   bundleIdPrefix: com.catmint
   deploymentTarget:
-    iOS: "17.0"
+    iOS: "26.0"
   projectFormat: xcode15_3
   xcodeVersion: "26.0"
   createIntermediateGroups: true
@@ -57,9 +57,9 @@ targets:
         PRODUCT_MODULE_NAME: OpenWrtMonitor
         PRODUCT_BUNDLE_IDENTIFIER: com.catmint.openwrtmonitor
         MARKETING_VERSION: 2.1.5
-        CURRENT_PROJECT_VERSION: 86
+        CURRENT_PROJECT_VERSION: 87
         SWIFT_VERSION: 5.9
-        IPHONEOS_DEPLOYMENT_TARGET: 17.0
+        IPHONEOS_DEPLOYMENT_TARGET: 26.0
         CODE_SIGN_STYLE: Manual
         CODE_SIGNING_ALLOWED: NO
         CODE_SIGNING_REQUIRED: NO

@@ -336,25 +336,12 @@ extension AppTabBar {
 
 /// 导航栏的玻璃底：iOS 26 用系统「液态玻璃」(`glassEffect`)，
 /// 胶囊会实时把背后的页面渐变、卡片折进玻璃里，滑动时内容滑到栏下会被自然模糊，
-/// 既看得到「底下还有东西」，又不会被硬生生切断。低于 iOS 26 退回 `ultraThinMaterial`
-/// 毛玻璃 + 一圈细边，照样是半透明的悬浮胶囊。
+/// 既看得到「底下还有东西」，又不会被硬生生切断。
+/// 最低版本即 iOS 26，不再为低版本做毛玻璃退回。
 struct TabBarGlass: ViewModifier {
-    @ViewBuilder
     func body(content: Content) -> some View {
-        if #available(iOS 26.0, *) {
-            content
-                .glassEffect(.regular, in: Capsule(style: .continuous))
-        } else {
-            content
-                .background {
-                    Capsule(style: .continuous)
-                        .fill(.ultraThinMaterial)
-                        .overlay {
-                            Capsule(style: .continuous)
-                                .strokeBorder(Color(.separator).opacity(0.45), lineWidth: 0.5)
-                        }
-                }
-        }
+        content
+            .glassEffect(.regular, in: Capsule(style: .continuous))
     }
 }
 
