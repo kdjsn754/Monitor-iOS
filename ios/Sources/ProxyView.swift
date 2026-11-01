@@ -740,7 +740,7 @@ private struct ProxyConfigSheet: View {
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
-                    .listRowInsets(EdgeInsets(top: -8, leading: 16, bottom: 4, trailing: 16))
+                    .listRowInsets(EdgeInsets(top: -24, leading: 16, bottom: 6, trailing: 16))
                     .listRowBackground(Color.clear)
                 }
                 .listSectionSpacing(0)
