@@ -59,6 +59,10 @@ struct ProxyView: View {
             .background(Color.clear)
             // 见 OverviewView：标题画在内容里，导航栏整条不要。
             .toolbar(.hidden, for: .navigationBar)
+            // 这一句只为 push 出去的页服务：根视图没有标题时，二级页左上角
+            // 只会显示一个光秃秃的返回箭头（还可能显示英文 Back）。标题设了但栏是隐的，
+            // 本页看不出任何变化。
+            .navigationTitle("代理")
             .refreshable {
                 await model.manualRefresh()
             }
@@ -74,20 +78,18 @@ struct ProxyView: View {
                     PanelView(url: url)
                 }
             }
-            .sheet(isPresented: $showConfigPicker) {
-                ProxyConfigSheet(configs: oc.configs, applied: oc.config) { name in
+            // 两个弹窗都改成 push 独立页（v2.1.7）：本页本来就跑在自己的 NavigationStack 里，
+            // 弹窗会把底栏整个盖住，也让「返回」多一层圆角卡片的边界感。
+            // 目的地必须挂在本 NavigationStack 内部这一层，否则点了没反应（交接 7.1）。
+            .navigationDestination(isPresented: $showConfigPicker) {
+                ProxyConfigView(configs: oc.configs, applied: oc.config) { name in
                     Task { await model.switchConfig(name); await model.refreshOpenClash() }
                 }
-                // sheet 不一定继承 EnvironmentObject：显式再注入一次，避免运行时崩。
-                .environmentObject(model)
             }
-            .sheet(isPresented: $showAddSubscription) {
+            .navigationDestination(isPresented: $showAddSubscription) {
                 // 「添加」是独立的一页，不再藏在管理页的右上角：
                 // 两件事（看/改已有的、加新的）从入口就分开。
-                NavigationStack {
-                    SubscriptionEditView(subscription: nil, standalone: true)
-                }
-                .environmentObject(model)
+                SubscriptionEditView(subscription: nil)
             }
         }
     }
@@ -512,7 +514,7 @@ struct ProxyView: View {
         guard model.ocStateLoaded else { return "正在读取配置文件列表" }
         guard !oc.configs.isEmpty else { return "没有可用配置" }
         var text = "\(oc.configs.count) 个配置文件"
-        // 订阅也在这个弹窗里（v2.1.0 并进来的），顺手把条数带上，
+        // 订阅也在一起（v2.1.0 并进来的），顺手把条数带上，
         // 否则外面看不出里面还有东西。
         if !model.subscriptions.isEmpty {
             text += " · \(model.subscriptions.count) 个订阅"
@@ -674,15 +676,19 @@ struct ProxyView: View {
     }
 }
 
-/// 配置文件 + 订阅 弹窗。
+/// 配置文件 + 订阅 的独立页（v2.1.7 之前是弹窗）。
 ///
-/// v1.28.29 把这里换成和「新建连接」同一套系统表单弹窗：`NavigationStack` + `Form`，
+/// v1.28.29 把这里换成和「新建连接」同一套系统表单：`NavigationStack` + `Form`，
 /// 「关闭」在导航栏左上、标题居中，列表是原生分组卡与缩进分隔线。
 ///
 /// v2.1.0 把「订阅」并进来（用户选了 C 方案）：顶部一段分段控件，
 /// **不新增入口、不多一层 sheet**；点订阅进编辑页是同一条栈里的 push。
 /// 订阅本身存在路由器 UCI 的 `config_subscribe` 段里，这里只做读写与触发更新。
-private struct ProxyConfigSheet: View {
+///
+/// v2.1.7 两处形态都变了：从代理页 push 进来（不再是 sheet，左上交给系统返回），
+/// 分段移出 `Form` 固定在导航栏下面，两页用 `TabView(.page)` 承载、可左右滑。
+/// 行内左滑删除同时取消——它会和翻页抢横向手势，删除改走长按菜单。
+private struct ProxyConfigView: View {
     @State private var configs: [String]
     private let applied: String
     private let onApply: (String) -> Void
@@ -717,55 +723,72 @@ private struct ProxyConfigSheet: View {
     }
 
     var body: some View {
-        NavigationStack {
-            Form {
-                if let notice = model.notice {
-                    Section {
-                        NoticeRow(notice: notice)
-                    }
+        VStack(spacing: 0) {
+            // 分段不再放进 Form（v2.1.7）：它原来跟着列表一起滚，滚到下半页就找不到
+            // 切页入口了。现在固定在导航栏下面，两页交给 .page 的 TabView 承载，
+            // 点分段和左右滑互相同步。
+            Picker("", selection: $tab) {
+                ForEach(Tab.allCases) { item in
+                    Text(sectionTitle(item)).tag(item)
                 }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 16)
+            .padding(.top, 10)
+            .padding(.bottom, 8)
 
-                // 顶部分段：配置文件 / 订阅 各一页。
-                // top 用负值，吃掉 Form 首段到导航栏之间那段默认空白，
-                // 否则分段控件和标题「代理配置」中间隔着一大块白。
-                Section {
-                    Picker("", selection: $tab) {
-                        ForEach(Tab.allCases) { item in
-                            Text(sectionTitle(item)).tag(item)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .listRowInsets(EdgeInsets(top: -8, leading: 16, bottom: 4, trailing: 16))
-                    .listRowBackground(Color.clear)
-                }
-                .listSectionSpacing(0)
-
-                if tab == .configs {
-                    configSection
-                    applySection
-                } else {
-                    subscriptionSection
-                    updateSection
-                }
+            TabView(selection: $tab) {
+                configPage.tag(Tab.configs)
+                subsPage.tag(Tab.subs)
             }
-            .listSectionSpacing(.compact)
-            .navigationTitle("代理配置")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("关闭") { dismiss() }
-                }
-            }
-            .navigationDestination(item: $editing) { sub in
-                SubscriptionEditView(subscription: sub)
-            }
-            .task {
-                model.clearNotice()
-                await model.loadSubscriptions(silent: true)
-            }
+            .tabViewStyle(.page(indexDisplayMode: .never))
+        }
+        .background(Color(uiColor: .systemGroupedBackground))
+        .navigationTitle("代理配置")
+        .navigationBarTitleDisplayMode(.inline)
+        // 代理页把整条导航栏藏了，push 进来的页必须自己显式要回来，
+        // 否则会被上层的隐藏状态带下去（交接 7.1）。
+        .toolbar(.visible, for: .navigationBar)
+        // 二级页收起底栏，和风扇控制页一致。
+        .toolbar(.hidden, for: .tabBar)
+        .navigationDestination(item: $editing) { sub in
+            SubscriptionEditView(subscription: sub)
+        }
+        .task {
+            model.clearNotice()
+            await model.loadSubscriptions(silent: true)
         }
         .overlay { confirmLayer }
+    }
+
+    /// 配置文件页：系统 Form，单独一页，滚动位置与订阅页互不影响。
+    private var configPage: some View {
+        Form {
+            noticeSection
+            configSection
+            applySection
+        }
+        .listSectionSpacing(.compact)
+    }
+
+    private var subsPage: some View {
+        Form {
+            noticeSection
+            subscriptionSection
+            updateSection
+        }
+        .listSectionSpacing(.compact)
+    }
+
+    /// 操作结果条：两页都放一份——结果属于哪一页，就在哪一页看见。
+    @ViewBuilder
+    private var noticeSection: some View {
+        if let notice = model.notice {
+            Section {
+                NoticeRow(notice: notice)
+            }
+        }
     }
 
     private func sectionTitle(_ item: Tab) -> String {
@@ -785,7 +808,7 @@ private struct ProxyConfigSheet: View {
         } header: {
             Text("当前用 \(appliedName)")
         } footer: {
-            Text("切换会重启内核，正在走的连接会断一下。左滑删除。")
+            Text("切换会重启内核，正在走的连接会断一下。长按一行可删除。")
         }
     }
 
@@ -840,7 +863,17 @@ private struct ProxyConfigSheet: View {
             .accessibilityLabel("选择 \(name)")
         }
         .padding(.vertical, 6)
-        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+        // 长按菜单（v2.1.7）：行内左滑删除和「左右滑翻页」抢同一个横向手势，
+        // 手指落在行上永远被删除吃掉，翻页只能从空白处起手。改成按住一行出菜单。
+        // 配置文件没有编辑页，所以这里给的是「设为使用中」而不是「编辑」。
+        .contextMenu {
+            if !isApplied {
+                Button {
+                    picked = name
+                } label: {
+                    Label("设为使用中", systemImage: "checkmark.circle")
+                }
+            }
             Button(role: .destructive) {
                 Task { await remove(name) }
             } label: {
@@ -850,7 +883,7 @@ private struct ProxyConfigSheet: View {
     }
 
     /// 删掉路由器上的这份配置。列表是本页自己的快照，删完得手动摘掉一行，
-    /// 否则要关掉弹窗再进来才看不到它。
+    /// 否则要退出这一页再进来才看不到它。
     private func remove(_ name: String) async {
         await model.deleteConfigFile(name)
         // 没删成功（权限、网络）时详情条里是红的，这一行就别动。
@@ -897,7 +930,7 @@ private struct ProxyConfigSheet: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     if model.subsLoaded {
-                        Text("要新建，关掉本页回代理页点「添加」。")
+                        Text("要新建，返回代理页点「添加」。")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
@@ -914,7 +947,7 @@ private struct ProxyConfigSheet: View {
                  ? "存在路由器上"
                  : "订阅")
         } footer: {
-            Text("点一行编辑，左滑删除。")
+            Text("点一行编辑，长按可编辑或删除。")
         }
     }
 
@@ -960,7 +993,13 @@ private struct ProxyConfigSheet: View {
             }
         }
         .padding(.vertical, 4)
-        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+        // 长按菜单：编辑 / 删除。左滑删除已取消（见 configSection 那行的说明）。
+        .contextMenu {
+            Button {
+                editing = sub
+            } label: {
+                Label("编辑", systemImage: "square.and.pencil")
+            }
             Button(role: .destructive) {
                 Task { await model.deleteSubscription(sub) }
             } label: {
@@ -1031,7 +1070,8 @@ private struct ProxyConfigSheet: View {
     }
 }
 
-/// 添加 / 编辑订阅。和列表同在弹窗的导航栈里，push 进来，不另开 sheet。
+/// 添加 / 编辑订阅。v2.1.7 起两个入口都是 push 进来的独立页（原来是弹窗），
+/// 左上角交给系统返回箭头，不再自绘「取消」。
 ///
 /// 保存写的是一整条 UCI 段（名称、地址、UA、启用），提交后回列表；
 /// 下载不在保存时做——「立即更新」与「全部更新」才真正去拉。
@@ -1040,9 +1080,6 @@ private struct SubscriptionEditView: View {
     @Environment(\.dismiss) private var dismiss
 
     let subscription: ProxySubscription?
-    /// 独立成一页（从代理页的「添加」直接进来）时，要自己给一颗「取消」；
-    /// 在管理页里是 push 进来的，左上角已经有系统返回，不用再加。
-    let standalone: Bool
 
     @State private var name: String
     @State private var address: String
@@ -1052,9 +1089,8 @@ private struct SubscriptionEditView: View {
     @State private var excludeKeywords: String
     @State private var saving = false
 
-    init(subscription: ProxySubscription?, standalone: Bool = false) {
+    init(subscription: ProxySubscription?) {
         self.subscription = subscription
-        self.standalone = standalone
         _name = State(initialValue: subscription?.name ?? "")
         _address = State(initialValue: subscription?.address ?? "")
         _ua = State(initialValue: subscription?.ua ?? "clash-verge/v2.4.5")
@@ -1169,12 +1205,11 @@ private struct SubscriptionEditView: View {
         }
         .navigationTitle(subscription == nil ? "添加订阅" : "编辑订阅")
         .navigationBarTitleDisplayMode(.inline)
+        // 与「代理配置」页同样两件事：把被上层藏起来的导航栏要回来（右滑返回才在），
+        // 顺便收起底栏。
+        .toolbar(.visible, for: .navigationBar)
+        .toolbar(.hidden, for: .tabBar)
         .toolbar {
-            if standalone {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("取消") { dismiss() }
-                }
-            }
             ToolbarItem(placement: .topBarTrailing) {
                 // 新添加的那条：这个按钮同时会把配置下载下来，叫「添加」更贴近实际动作。
                 Button(subscription == nil ? "添加" : "保存") {
