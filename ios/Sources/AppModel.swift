@@ -1125,6 +1125,33 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 删除路由器上的一个配置文件（`/etc/openclash/config/xxx.yaml`）。
+    ///
+    /// 和删订阅是两条独立的路：订阅段删掉之后 yaml 还留着，想重新拉一份又怕
+    /// 旧文件里的节点混进来，就得能单独把它清掉。删的正好是当前在用的那份时
+    /// 会一并清掉 `config_path`，否则 OpenClash 重启会找不到文件。
+    func deleteConfigFile(_ name: String) async {
+        guard connected else { return }
+        let wasActive = name == currentConfigName
+        do {
+            let output = try await execute(configDeleteCommand(name))
+            guard output.contains("deleted") else {
+                presentError("删除「\(name)」失败，确认路由器上这个文件有写权限")
+                return
+            }
+            await refreshOpenClash()
+            notice = Notice(
+                kind: .ok,
+                title: "已删除「\(name)」",
+                detail: wasActive
+                    ? "它正是当前在用的配置，已把 OpenClash 的配置指针清空，去「配置文件」里重新选一份。"
+                    : "路由器上的配置文件已经删掉，订阅条目没动。"
+            )
+        } catch {
+            presentError(describe(error))
+        }
+    }
+
     /// 删除订阅。只删 UCI 段，**不删**已下载的配置文件——
     /// 那份 yaml 可能正是当前在跑的配置，删掉会让 OpenClash 起不来。
     func deleteSubscription(_ sub: ProxySubscription) async {
@@ -1189,11 +1216,27 @@ final class AppModel: ObservableObject {
             }
             // 不管成败都翻一下日志：成功时能看出「替换了」还是「没变化」，
             // 失败时直接把最后两行摊给用户，省得再 SSH 上去看。
-            let log = ((try? await execute("tail -n 2 /tmp/oc_sub.log 2>/dev/null")) ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let diag = ((try? await execute(subscriptionDiagCommand)) ?? "")
+            let head = diag.components(separatedBy: "@@ENV")
+            let rest = head.count > 1 ? head[1].components(separatedBy: "@@OCLOG") : []
+            let log = head[0].trimmingCharacters(in: .whitespacesAndNewlines)
+            let env = rest.isEmpty ? "" : rest[0].trimmingCharacters(in: .whitespacesAndNewlines)
+            let ocLog = rest.count > 1 ? rest[1].trimmingCharacters(in: .whitespacesAndNewlines) : ""
             if code != "0" {
-                notice = Notice(kind: .fail, title: "「\(label)」更新失败",
-                                detail: log.isEmpty ? "检查订阅地址，或者路由器能不能上网" : log)
+                // 三种情况分开说，别一律糊成「检查订阅地址」：
+                // 有 stderr 就是脚本自己报的错；插件日志里有记录说明脚本跑到了；
+                // 两边都空才是「压根没跑起来」。
+                let reason: String
+                if !log.isEmpty {
+                    reason = log
+                } else if ocLog.contains(label) {
+                    reason = ocLog
+                } else if !env.isEmpty {
+                    reason = "路由器没跑起来更新脚本（\(env.replacingOccurrences(of: "\n", with: "，"))）"
+                } else {
+                    reason = "路由器没有返回任何输出，检查订阅地址，或者路由器能不能上网"
+                }
+                notice = Notice(kind: .fail, title: "「\(label)」更新失败", detail: reason)
             } else {
                 var detail = log.contains("No Change")
                     ? "没有变化，配置文件没被替换"
@@ -2269,6 +2312,13 @@ private extension AppModel {
         lines.append("uci -q set \"openclash.$S.address\"=\(shQuote(address))")
         lines.append("uci -q set \"openclash.$S.sub_ua\"=\(shQuote(ua))")
         lines.append("uci -q set \"openclash.$S.enabled\"=\(shQuote(enabled ? "1" : "0"))")
+        // 新建时把 `sub_convert` 固定成 0（地址本身就是 Clash 配置，不做订阅转换）。
+        // 空值会让 openclash.sh 里的 `[ "$sub_convert" -eq 0 ]` 报
+        // 「integer expression expected」，那行错误会混进 /tmp/oc_sub.log，
+        // 让真正的原因更难认。编辑时不覆盖，交给网页后台。
+        if id == nil || id?.isEmpty == true {
+            lines.append("uci -q set \"openclash.$S.sub_convert\"='0'")
+        }
 
         lines.append("uci -q delete \"openclash.$S.keyword\" 2>/dev/null; true")
         for k in keywords {
@@ -2314,11 +2364,30 @@ private extension AppModel {
     func subscriptionUpdateStartCommand(_ names: [String]) -> String {
         let list = names.map { "echo \(shQuote($0));" }.joined(separator: " ")
         return lowPriority("""
-        rm -f /tmp/oc_sub.log /tmp/oc_sub_rc /tmp/oc_sub_list
+        rm -f /tmp/oc_sub.log /tmp/oc_sub_rc /tmp/oc_sub_list /tmp/oc_sub_env
         { \(list) } > /tmp/oc_sub_list
+        { printf 'bash=%s\\n' "$(command -v bash 2>/dev/null || echo none)"; \
+          printf 'script=%s\\n' "$([ -f /usr/share/openclash/openclash.sh ] && echo ok || echo missing)"; } > /tmp/oc_sub_env 2>&1
         if command -v nohup >/dev/null 2>&1; then N=nohup; else N=; fi
-        $N sh -c 'R=0; while IFS= read -r n; do [ -n "$n" ] || continue; sh /usr/share/openclash/openclash.sh "$n" norestart >>/tmp/oc_sub.log 2>&1 || R=1; done < /tmp/oc_sub_list; echo $R >/tmp/oc_sub_rc' </dev/null >/dev/null 2>&1 &
+        $N sh -c 'R=0; B=/bin/bash; [ -x "$B" ] || B=$(command -v bash 2>/dev/null); [ -n "$B" ] || B=sh; while IFS= read -r n; do [ -n "$n" ] || continue; "$B" /usr/share/openclash/openclash.sh "$n" norestart >>/tmp/oc_sub.log 2>&1 || R=1; done < /tmp/oc_sub_list; echo $R >/tmp/oc_sub_rc' </dev/null >/dev/null 2>&1 &
         echo started
+
+        """)
+    }
+
+    /// 失败时一次性取回「脚本自己的输出」和「环境探测结果」。
+    ///
+    /// `openclash.sh` 的日志写 `/tmp/openclash.log`，而它的 stdout/stderr 才进
+    /// `/tmp/oc_sub.log`；光看后者是空的时候分不清「脚本没跑」还是「跑了没说话」，
+    /// 所以再把 bash / 脚本路径的探测结果一起带回来。
+    var subscriptionDiagCommand: String {
+        lowPriority("""
+        tail -n 3 /tmp/oc_sub.log 2>/dev/null
+        echo @@ENV
+        cat /tmp/oc_sub_env 2>/dev/null
+        echo @@OCLOG
+        tail -n 2 /tmp/openclash.log 2>/dev/null
+        true
 
         """)
     }
@@ -2327,6 +2396,29 @@ private extension AppModel {
     var subscriptionUpdatePollCommand: String {
         lowPriority("""
         if [ -f /tmp/oc_sub_rc ]; then cat /tmp/oc_sub_rc 2>/dev/null; else echo running; fi
+        true
+
+        """)
+    }
+
+    /// 删掉路由器上的一个配置文件。
+    ///
+    /// 和订阅是两回事：订阅段存在 UCI 里，配置文件是 `/etc/openclash/config/` 下的
+    /// yaml。删订阅不会删文件（那可能正是内核在跑的那份），所以清理残留得单独来一次。
+    ///
+    /// 如果删的正好是 `config_path` 指向的那份，就把这个键一起删掉：留着一个指向
+    /// 不存在文件的指针，OpenClash 下次启动会直接起不来。
+    func configDeleteCommand(_ name: String) -> String {
+        let path = "/etc/openclash/config/\(name)"
+        return lowPriority("""
+        p=\(shQuote(path))
+        rm -f "$p" 2>/dev/null
+        if [ "$(uci -q get openclash.config.config_path 2>/dev/null)" = "$p" ]; then
+          uci -q delete openclash.config.config_path
+          uci -q commit openclash
+          echo cleared
+        fi
+        if [ -f "$p" ]; then echo failed; else echo deleted; fi
         true
 
         """)

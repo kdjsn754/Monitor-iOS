@@ -663,9 +663,9 @@ struct ProxyView: View {
 /// **不新增入口、不多一层 sheet**；点订阅进编辑页是同一条栈里的 push。
 /// 订阅本身存在路由器 UCI 的 `config_subscribe` 段里，这里只做读写与触发更新。
 private struct ProxyConfigSheet: View {
-    let configs: [String]
-    let applied: String
-    let onApply: (String) -> Void
+    @State private var configs: [String]
+    private let applied: String
+    private let onApply: (String) -> Void
 
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
@@ -689,7 +689,7 @@ private struct ProxyConfigSheet: View {
     }
 
     init(configs: [String], applied: String, onApply: @escaping (String) -> Void) {
-        self.configs = configs
+        _configs = State(initialValue: configs)
         self.applied = applied
         self.onApply = onApply
         let initial = configs.contains(applied) ? applied : (configs.first ?? "")
@@ -773,7 +773,7 @@ private struct ProxyConfigSheet: View {
         } header: {
             Text("共 \(configs.count) 个 · 当前用 \(appliedName)")
         } footer: {
-            Text("打开开关只是选中，点下方按钮才会真正切换。切换后 OpenClash 会重启内核，正在走的连接会断一下。")
+            Text("打开开关只是选中，点下方按钮才会真正切换。切换后 OpenClash 会重启内核，正在走的连接会断一下。左滑可以删掉路由器上这个配置文件。")
         }
     }
 
@@ -799,7 +799,7 @@ private struct ProxyConfigSheet: View {
     }
 
     private func row(_ name: String) -> some View {
-        let isApplied = name == applied
+        let isApplied = name == liveApplied
         return HStack(spacing: 10) {
             Text(name)
                 .font(.body)
@@ -828,6 +828,30 @@ private struct ProxyConfigSheet: View {
             .accessibilityLabel("选择 \(name)")
         }
         .padding(.vertical, 6)
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button(role: .destructive) {
+                Task { await remove(name) }
+            } label: {
+                Label("删除", systemImage: "trash")
+            }
+        }
+    }
+
+    /// 删掉路由器上的这份配置。列表是本页自己的快照，删完得手动摘掉一行，
+    /// 否则要关掉弹窗再进来才看不到它。
+    private func remove(_ name: String) async {
+        await model.deleteConfigFile(name)
+        // 没删成功（权限、网络）时详情条里是红的，这一行就别动。
+        guard model.notice?.kind == .ok else { return }
+        configs.removeAll { $0 == name }
+        if picked == name { picked = configs.first ?? "" }
+    }
+
+    /// 实时取「现在跑的是哪份」。`applied` 是打开弹窗那一刻的快照，
+    /// 切过或删过之后它就过期了，界面上会出现「使用中」和实际不一致。
+    private var liveApplied: String {
+        let live = model.currentConfigName
+        return live.isEmpty ? applied : live
     }
 
     private func apply() {
@@ -840,11 +864,11 @@ private struct ProxyConfigSheet: View {
     }
 
     private var appliedName: String {
-        applied.isEmpty ? "默认配置" : (applied as NSString).lastPathComponent
+        liveApplied.isEmpty ? "默认配置" : (liveApplied as NSString).lastPathComponent
     }
 
     private var canApply: Bool {
-        !picked.isEmpty && picked != applied
+        !picked.isEmpty && picked != liveApplied
     }
 
     private var actionTitle: String {
@@ -1207,7 +1231,17 @@ private struct SubscriptionEditView: View {
         // 替换的正是当前在跑的那份：不重启内核等于白更新。
         let isActive = "\(saved.name).yaml" == model.currentConfigName
         await model.updateSubscriptions([saved], restart: isActive)
-        if !keepOpen, model.notice?.kind != .fail { dismiss() }
+        // 注意：走到这里订阅已经写进路由器了，红字说的是「下载」这一步没成。
+        // 以前保留原样，用户看到「更新失败」就以为整条没加上，于是反复重填。
+        if model.notice?.kind == .fail, let current = model.notice {
+            model.notice = Notice(
+                kind: .fail,
+                title: "已保存「\(saved.name)」，但下载失败",
+                detail: current.detail + " —— 回列表点「全部更新」可以重试，条目不会丢。"
+            )
+            return
+        }
+        if !keepOpen { dismiss() }
     }
 }
 
