@@ -60,9 +60,10 @@ struct PollSettingsView: View {
                     // 玻璃壳本身就是容器，符号不再自带圆圈（原来用 minus.circle.fill）。
                     Image(systemName: "minus")
                         .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(seconds > PollConfiguration.range.lowerBound
+                                         ? Color.accentColor : Color(.tertiaryLabel))
                 }
-                .glassSecondaryButton()
-                .tint(seconds > PollConfiguration.range.lowerBound ? Color.blue : nil)
+                .glassButton()
                 .buttonBorderShape(.circle)
                 .disabled(seconds <= PollConfiguration.range.lowerBound)
 
@@ -82,9 +83,10 @@ struct PollSettingsView: View {
                 } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(seconds < PollConfiguration.range.upperBound
+                                         ? Color.accentColor : Color(.tertiaryLabel))
                 }
-                .glassSecondaryButton()
-                .tint(seconds < PollConfiguration.range.upperBound ? Color.blue : nil)
+                .glassButton()
                 .buttonBorderShape(.circle)
                 .disabled(seconds >= PollConfiguration.range.upperBound)
             }
@@ -128,8 +130,7 @@ struct PollSettingsView: View {
             }
             .frame(maxWidth: .infinity)
         }
-        .glassSecondaryButton()
-        .tint(selected ? Color.blue : nil)
+        .glassButton()
         .buttonBorderShape(.roundedRectangle(radius: 14))
         .accessibilityLabel("\(preset.title)，每 \(preset.id) 秒")
         .accessibilityAddTraits(selected ? [.isSelected] : [])

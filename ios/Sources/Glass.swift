@@ -287,8 +287,12 @@ struct ErrorBanner: View {
 ///
 /// 为什么推翻自绘（v2.1.9，用户：「能把按钮都改成使用 ios 原生液态玻璃那种吗」）：
 /// 这里原来有个叫 `GlassProminentButtonStyle` 的结构体——名字带 Glass，画出来的却是
-/// **实色蓝胶囊 + 白字**，和玻璃没有半点关系。iOS 26 系统自带 `.glass` 与 `.glassProminent`
-/// 两个 ButtonStyle，玻璃会把背后的卡片、渐变折进按钮里，按下还有形变，是自绘做不出来的。
+/// **实色蓝胶囊 + 白字**，和玻璃没有半点关系。系统自带的玻璃按钮会把背后的卡片、
+/// 渐变折进按钮里，按下还有形变，这是自绘做不出来的。
+///
+/// 只用一个样式：`.glass`。`glassProminent`（着色玻璃）试过一版，用户回「不要色块，
+/// 就用原生白色透明那种」——着色玻璃在浅色页面上看仍是一块颜色。所以现在
+/// **没有任何按钮带底色**，颜色只出现在文字上。
 ///
 /// 四条硬约束（系统定的，绕了就会变形）：
 /// 1. **别给 label 加 `.background` / `.padding`**：玻璃自带约 13pt 内边距，
@@ -299,13 +303,16 @@ struct ErrorBanner: View {
 ///    那会把文字一起压透（v1.28.28 踩过）。
 /// 4. **别在滚动容器里堆玻璃**：Form / List 里放一两个没关系，一屏七八块会持续重算折射。
 extension View {
-    /// 主按钮：着色的玻璃。`tint` 只接受纯色，系统不支持渐变。
-    func glassPrimaryButton(_ tint: Color = .blue) -> some View {
-        self.buttonStyle(.glassProminent).tint(tint)
-    }
-
-    /// 次要按钮：中性玻璃，不上色。
-    func glassSecondaryButton() -> some View {
+    /// 全 App 唯一的按钮外壳：系统中性玻璃，不上色。
+    ///
+    /// 为什么不留着色版（v2.1.10，用户：「不要色块就用原生白色透明那种」）：
+    /// 上一版用 `.glassProminent` + `.tint()` 做主按钮，画出来仍是**有色玻璃**——
+    /// 在浅色页面上看就是「一块蓝」，和原来自己画的实色胶囊差别很小，等于没换成玻璃。
+    /// 现在统一走 `.glass`：玻璃只做折射和高光，不携带任何底色，
+    /// **主次不靠底色区分，靠字重、字号和位置**。
+    /// 需要强调的颜色一律写在 label 的 `foregroundStyle` 上（红字删除、蓝字选中），
+    /// 那是文字，不是色块。
+    func glassButton() -> some View {
         self.buttonStyle(.glass)
     }
 }
@@ -361,34 +368,21 @@ struct SheetOverlayCard<Content: View>: View {
     }
 }
 
-/// 浮层卡片底部的等宽按钮。`tint` 为空是次要按钮（中性玻璃），
-/// 传了颜色就是主按钮（着色玻璃），删除用 `.red`。
-///
-/// v2.1.9 起不再自绘圆角色块：外壳交给系统的玻璃，圆角通过
-/// `.buttonBorderShape(.roundedRectangle(radius: 12))` 指定。
+/// 浮层卡片底部的等宽按钮。全部是中性玻璃，`tint` 只决定**文字颜色**
+/// （删除给红、确认给蓝），不再当作底色——v2.1.10 起没有色块了。
 struct SheetOverlayButton: View {
     let title: String
     var tint: Color? = nil
     let action: () -> Void
 
     var body: some View {
-        Group {
-            if let tint {
-                Button(action: action) {
-                    Text(title)
-                        .font(.subheadline.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                }
-                .glassPrimaryButton(tint)
-            } else {
-                Button(action: action) {
-                    Text(title)
-                        .font(.subheadline.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                }
-                .glassSecondaryButton()
-            }
+        Button(action: action) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(tint ?? Color(uiColor: .label))
+                .frame(maxWidth: .infinity)
         }
+        .glassButton()
         .buttonBorderShape(.roundedRectangle(radius: 12))
     }
 }

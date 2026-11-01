@@ -146,7 +146,7 @@ struct SettingsView: View {
                 }
                 .frame(maxWidth: .infinity)
             }
-            .glassPrimaryButton()
+            .glassButton()
             .controlSize(.large)
             .buttonBorderShape(.roundedRectangle(radius: 14))
             .disabled(!canOpenWeb)
@@ -258,11 +258,11 @@ struct SettingsView: View {
                         } label: {
                             Label(option.title, systemImage: option.icon)
                                 .font(.subheadline.weight(themeMode == option.id ? .semibold : .regular))
+                                .foregroundStyle(themeMode == option.id ? Color.accentColor : Color.primary)
                                 .frame(maxWidth: .infinity)
                         }
-                        // 选中不再画淡蓝胶囊：给玻璃上色即可，未选中回到中性玻璃。
-                        .glassSecondaryButton()
-                        .tint(themeMode == option.id ? Color.blue : nil)
+                        // 选中只改文字颜色，不铺底色。
+                        .glassButton()
                         .buttonBorderShape(.capsule)
                     }
                 }
@@ -404,10 +404,10 @@ struct SettingsView: View {
             } label: {
                 Text("断开并清除密码")
                     .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.red)
                     .frame(maxWidth: .infinity)
             }
-            .glassSecondaryButton()
-            .tint(.red)
+            .glassButton()
             .buttonBorderShape(.capsule)
 
             Text("清空后需要重新输入密码才能连接，保存的监控设置不会丢。")

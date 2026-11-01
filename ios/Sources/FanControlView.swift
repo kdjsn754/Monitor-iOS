@@ -371,7 +371,7 @@ struct FanControlView: View {
             }
             // 没有改动时按钮是灰的：它本身就是「有没有东西等着写进去」的信号。
             // 变灰由 `.disabled()` 交给玻璃自己做，不再传 dimmed。
-            .glassPrimaryButton()
+            .glassButton()
             .disabled(!canApply)
 
             Button {
@@ -379,10 +379,10 @@ struct FanControlView: View {
             } label: {
                 Text("恢复插件默认配置")
                     .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.red)
                     .frame(maxWidth: .infinity)
             }
-            .glassSecondaryButton()
-            .tint(.red)
+            .glassButton()
             .disabled(model.fanBusy)
         }
         .padding(.top, 2)

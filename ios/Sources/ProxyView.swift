@@ -206,7 +206,7 @@ struct ProxyView: View {
                     }
                     .frame(maxWidth: .infinity)
                 }
-                .glassPrimaryButton()
+                .glassButton()
                 .buttonBorderShape(.roundedRectangle(radius: 12))
                 .disabled(!canOpenPanel)
             }
@@ -249,12 +249,11 @@ struct ProxyView: View {
         } label: {
             Text(title)
                 .font(.subheadline.weight(selected ? .semibold : .regular))
+                // 选中只改文字颜色，不铺底色：玻璃上一律不留色块。
+                .foregroundStyle(selected ? Color.accentColor : Color.primary)
                 .frame(maxWidth: .infinity)
         }
-        // 选中态不再画淡蓝底 + 蓝描边：给玻璃上色就是选中。
-        // `.tint(nil)` 是「不着色」，未选中那颗回到中性玻璃。
-        .glassSecondaryButton()
-        .tint(selected ? Color.blue : nil)
+        .glassButton()
         .buttonBorderShape(.roundedRectangle(radius: 10))
     }
 
@@ -269,10 +268,10 @@ struct ProxyView: View {
                 Text(title)
                     .font(.caption.weight(.medium))
             }
+            .foregroundStyle(color)
             .frame(maxWidth: .infinity)
         }
-        .glassSecondaryButton()
-        .tint(color)
+        .glassButton()
         .buttonBorderShape(.capsule)
     }
 
@@ -463,7 +462,7 @@ struct ProxyView: View {
                             }
                             .frame(maxWidth: .infinity)
                         }
-                        .glassPrimaryButton()
+                        .glassButton()
                         .buttonBorderShape(.roundedRectangle(radius: 12))
                         .disabled(model.busy)
 
@@ -473,10 +472,10 @@ struct ProxyView: View {
                         } label: {
                             Text("管理")
                                 .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.blue)
                                 .frame(maxWidth: .infinity)
                         }
-                        .glassSecondaryButton()
-                        .tint(.blue)
+                        .glassButton()
                         .buttonBorderShape(.roundedRectangle(radius: 12))
                         .disabled(oc.configs.isEmpty || model.busy)
                     }
@@ -558,10 +557,10 @@ struct ProxyView: View {
                         Text(isChecking ? "检测中…" : "重新检测")
                             .font(.caption.weight(.medium))
                     }
+                    .foregroundStyle(.blue)
                     .frame(maxWidth: .infinity)
                 }
-                .glassSecondaryButton()
-                .tint(.blue)
+                .glassButton()
                 .buttonBorderShape(.capsule)
                 .disabled(isChecking || model.busy)
             }
@@ -749,7 +748,7 @@ private struct ProxyConfigView: View {
                     .minimumScaleFactor(0.8)
                     .frame(maxWidth: .infinity)
             }
-            .glassPrimaryButton()
+            .glassButton()
             .disabled(!canApply)
             .listRowBackground(Color.clear)
             .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))

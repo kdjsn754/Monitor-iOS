@@ -458,7 +458,7 @@ struct LoginView: View {
         }
         // 玻璃按钮自带内边距与高度，这里不再写 frame(height:)，也不再手动压 opacity
         // 表示禁用——`.disabled()` 之后玻璃自己会变灰（见 Glass.swift 的注释）。
-        .glassPrimaryButton()
+        .glassButton()
         .controlSize(.large)
         .disabled(model.connecting)
         .padding(.top, 4)
