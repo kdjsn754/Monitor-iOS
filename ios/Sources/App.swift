@@ -188,16 +188,26 @@ struct MainTabs: View {
         // v2.1.6 起直接用系统原生底栏（iOS 26 自带液态玻璃与形变动画）。
         // 之前的自绘胶囊（AppTabBar 274x62 + TabBarGlass）整套删掉，
         // 想找回旧样子：备份在 E:/WorkBuddyJob/tmp/backup-tabbar-b87。
+        // 图标跟着 selection 换空心/实心：这是自绘底栏时代就有的选中反馈
+        // （旧 TabGlyph 的 filled 参数），换原生 TabView 后得靠 SF Symbol 的 fill
+        // 变体补回来，否则选中/未选中只剩系统着色一点差别，扫一眼分不清在哪页。
+        // 盾牌选中用 checkmark.shield.fill——旧实心盾就是中间挖一枚对勾，含义一致。
         TabView(selection: $selection) {
             OverviewView()
                 .tag(0)
-                .tabItem { Label("概览", systemImage: "square.grid.2x2") }
+                .tabItem {
+                    Label("概览", systemImage: selection == 0 ? "square.grid.2x2.fill" : "square.grid.2x2")
+                }
             ProxyView()
                 .tag(1)
-                .tabItem { Label("代理", systemImage: "shield") }
+                .tabItem {
+                    Label("代理", systemImage: selection == 1 ? "checkmark.shield.fill" : "shield")
+                }
             SettingsView()
                 .tag(2)
-                .tabItem { Label("设置", systemImage: "gearshape") }
+                .tabItem {
+                    Label("设置", systemImage: selection == 2 ? "gearshape.fill" : "gearshape")
+                }
         }
         // 采集跟着页面走：切到哪一页就只采那一页要用的数据，设置页完全不采。
         .onChange(of: selection) { _, value in
