@@ -730,6 +730,8 @@ private struct ProxyConfigSheet: View {
                 }
 
                 // 顶部分段：配置文件 / 订阅 各一页。
+                // top 用负值，吃掉 Form 首段到导航栏之间那段默认空白，
+                // 否则分段控件和标题「代理配置」中间隔着一大块白。
                 Section {
                     Picker("", selection: $tab) {
                         ForEach(Tab.allCases) { item in
@@ -738,7 +740,7 @@ private struct ProxyConfigSheet: View {
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
-                    .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
+                    .listRowInsets(EdgeInsets(top: -8, leading: 16, bottom: 4, trailing: 16))
                     .listRowBackground(Color.clear)
                 }
                 .listSectionSpacing(0)
