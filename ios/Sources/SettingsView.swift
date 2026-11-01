@@ -257,11 +257,10 @@ struct SettingsView: View {
                             themeMode = option.id
                         } label: {
                             Label(option.title, systemImage: option.icon)
+                                // 选中只靠字重，没有底色也没有彩色字。
                                 .font(.subheadline.weight(themeMode == option.id ? .semibold : .regular))
-                                .foregroundStyle(themeMode == option.id ? Color.accentColor : Color.primary)
                                 .frame(maxWidth: .infinity)
                         }
-                        // 选中只改文字颜色，不铺底色。
                         .glassButton()
                         .buttonBorderShape(.capsule)
                     }

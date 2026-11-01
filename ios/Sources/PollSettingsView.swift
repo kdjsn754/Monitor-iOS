@@ -60,8 +60,9 @@ struct PollSettingsView: View {
                     // 玻璃壳本身就是容器，符号不再自带圆圈（原来用 minus.circle.fill）。
                     Image(systemName: "minus")
                         .font(.system(size: 17, weight: .semibold))
+                        // 到边界只是变淡，不上色。
                         .foregroundStyle(seconds > PollConfiguration.range.lowerBound
-                                         ? Color.accentColor : Color(.tertiaryLabel))
+                                         ? Color.primary : Color(.tertiaryLabel))
                 }
                 .glassButton()
                 .buttonBorderShape(.circle)
@@ -84,7 +85,7 @@ struct PollSettingsView: View {
                     Image(systemName: "plus")
                         .font(.system(size: 17, weight: .semibold))
                         .foregroundStyle(seconds < PollConfiguration.range.upperBound
-                                         ? Color.accentColor : Color(.tertiaryLabel))
+                                         ? Color.primary : Color(.tertiaryLabel))
                 }
                 .glassButton()
                 .buttonBorderShape(.circle)

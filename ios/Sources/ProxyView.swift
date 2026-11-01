@@ -133,13 +133,13 @@ struct ProxyView: View {
                 .opacity(oc.running ? 1 : 0.55)
 
                 HStack(spacing: 8) {
-                    actionChip("启动", icon: "play.fill", color: .blue) {
+                    actionChip("启动", icon: "play.fill") {
                         await model.startOpenClash()
                     }
-                    actionChip("关闭", icon: "stop.fill", color: .red) {
+                    actionChip("关闭", icon: "stop.fill") {
                         await model.stopOpenClash()
                     }
-                    actionChip("重启", icon: "arrow.clockwise", color: .blue) {
+                    actionChip("重启", icon: "arrow.clockwise") {
                         await model.restartOpenClash()
                     }
                 }
@@ -248,16 +248,17 @@ struct ProxyView: View {
             }
         } label: {
             Text(title)
+                // 选中只靠字重：没有底色，也没有彩色字。
                 .font(.subheadline.weight(selected ? .semibold : .regular))
-                // 选中只改文字颜色，不铺底色：玻璃上一律不留色块。
-                .foregroundStyle(selected ? Color.accentColor : Color.primary)
                 .frame(maxWidth: .infinity)
         }
         .glassButton()
         .buttonBorderShape(.roundedRectangle(radius: 10))
     }
 
-    private func actionChip(_ title: String, icon: String, color: Color,
+    /// 启动 / 关闭 / 重启。三颗外观完全一样，靠图标和文字区分——
+    /// 不再用绿 / 红 / 蓝着色（v2.1.11 去掉了所有彩色字）。
+    private func actionChip(_ title: String, icon: String,
                             action: @escaping () async -> Void) -> some View {
         Button {
             Task { await action() }
@@ -268,7 +269,6 @@ struct ProxyView: View {
                 Text(title)
                     .font(.caption.weight(.medium))
             }
-            .foregroundStyle(color)
             .frame(maxWidth: .infinity)
         }
         .glassButton()
@@ -472,7 +472,6 @@ struct ProxyView: View {
                         } label: {
                             Text("管理")
                                 .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(.blue)
                                 .frame(maxWidth: .infinity)
                         }
                         .glassButton()
@@ -557,7 +556,6 @@ struct ProxyView: View {
                         Text(isChecking ? "检测中…" : "重新检测")
                             .font(.caption.weight(.medium))
                     }
-                    .foregroundStyle(.blue)
                     .frame(maxWidth: .infinity)
                 }
                 .glassButton()
@@ -1043,7 +1041,7 @@ private struct SubscriptionListView: View {
 
                     HStack(spacing: 10) {
                         SheetOverlayButton(title: "取消") { pending = nil }
-                        SheetOverlayButton(title: "仍然更新", tint: .blue) {
+                        SheetOverlayButton(title: "仍然更新") {
                             let targets = request.targets
                             pending = nil
                             Task { await model.updateSubscriptions(targets, restart: true) }
