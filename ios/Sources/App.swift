@@ -188,25 +188,37 @@ struct MainTabs: View {
         // v2.1.6 起直接用系统原生底栏（iOS 26 自带液态玻璃与形变动画）。
         // 之前的自绘胶囊（AppTabBar 274x62 + TabBarGlass）整套删掉，
         // 想找回旧样子：备份在 E:/WorkBuddyJob/tmp/backup-tabbar-b87。
-        // 图标跟着 selection 换空心/实心：这是自绘底栏时代就有的选中反馈
-        // （旧 TabGlyph 的 filled 参数），换原生 TabView 后得靠 SF Symbol 的 fill
-        // 变体补回来，否则选中/未选中只剩系统着色一点差别，扫一眼分不清在哪页。
-        // 盾牌选中用 checkmark.shield.fill——旧实心盾就是中间挖一枚对勾，含义一致。
+        // 图标走自绘路径渲染的 UIImage（TabGlyphImage）：未选中空心、选中实心，
+        // 和旧自绘底栏同一套图形。b89 用 SF Symbol fill 变体被否了——那是另一套
+        // 形状，不是原来的空心→填充。原生 tabItem 只认 Image，所以把旧 TabGlyph
+        // 的 Path 画进 UIImage（.alwaysTemplate），颜色交给系统底栏上。
         TabView(selection: $selection) {
             OverviewView()
                 .tag(0)
                 .tabItem {
-                    Label("概览", systemImage: selection == 0 ? "square.grid.2x2.fill" : "square.grid.2x2")
+                    Label {
+                        Text("概览")
+                    } icon: {
+                        Image(uiImage: TabGlyphImage.image(.overview, selected: selection == 0))
+                    }
                 }
             ProxyView()
                 .tag(1)
                 .tabItem {
-                    Label("代理", systemImage: selection == 1 ? "checkmark.shield.fill" : "shield")
+                    Label {
+                        Text("代理")
+                    } icon: {
+                        Image(uiImage: TabGlyphImage.image(.proxy, selected: selection == 1))
+                    }
                 }
             SettingsView()
                 .tag(2)
                 .tabItem {
-                    Label("设置", systemImage: selection == 2 ? "gearshape.fill" : "gearshape")
+                    Label {
+                        Text("设置")
+                    } icon: {
+                        Image(uiImage: TabGlyphImage.image(.settings, selected: selection == 2))
+                    }
                 }
         }
         // 采集跟着页面走：切到哪一页就只采那一页要用的数据，设置页完全不采。

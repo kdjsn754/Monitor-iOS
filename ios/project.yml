@@ -57,7 +57,7 @@ targets:
         PRODUCT_MODULE_NAME: OpenWrtMonitor
         PRODUCT_BUNDLE_IDENTIFIER: com.catmint.openwrtmonitor
         MARKETING_VERSION: 2.1.6
-        CURRENT_PROJECT_VERSION: 89
+        CURRENT_PROJECT_VERSION: 90
         SWIFT_VERSION: 5.9
         IPHONEOS_DEPLOYMENT_TARGET: 26.0
         CODE_SIGN_STYLE: Manual
