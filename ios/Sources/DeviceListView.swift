@@ -261,7 +261,7 @@ struct DeviceListView: View {
 
             HStack(spacing: 10) {
                 SheetOverlayButton(title: "取消") { closeModals() }
-                SheetOverlayButton(title: "保存") { commitRename(device) }
+                SheetOverlayButton(title: "保存", tint: .blue) { commitRename(device) }
             }
         }
     }

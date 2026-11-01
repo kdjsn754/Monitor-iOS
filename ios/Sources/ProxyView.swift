@@ -133,13 +133,13 @@ struct ProxyView: View {
                 .opacity(oc.running ? 1 : 0.55)
 
                 HStack(spacing: 8) {
-                    actionChip("启动", icon: "play.fill") {
+                    actionChip("启动", icon: "play.fill", color: .blue) {
                         await model.startOpenClash()
                     }
-                    actionChip("关闭", icon: "stop.fill") {
+                    actionChip("关闭", icon: "stop.fill", color: .red) {
                         await model.stopOpenClash()
                     }
-                    actionChip("重启", icon: "arrow.clockwise") {
+                    actionChip("重启", icon: "arrow.clockwise", color: .blue) {
                         await model.restartOpenClash()
                     }
                 }
@@ -205,9 +205,15 @@ struct ProxyView: View {
                             .font(.subheadline.weight(.semibold))
                     }
                     .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(
+                        canOpenPanel ? Color.blue : Color.blue.opacity(0.14),
+                        in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    )
+                    .foregroundStyle(canOpenPanel ? Color.white : Color.secondary)
+                    .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
-                .glassButton()
-                .buttonBorderShape(.roundedRectangle(radius: 12))
+                .buttonStyle(.plain)
                 .disabled(!canOpenPanel)
             }
         }
@@ -248,17 +254,26 @@ struct ProxyView: View {
             }
         } label: {
             Text(title)
-                // 选中只靠字重：没有底色，也没有彩色字。
                 .font(.subheadline.weight(selected ? .semibold : .regular))
                 .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(
+                    selected ? Color.blue.opacity(0.16) : Color.blue.opacity(0.05),
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(
+                            selected ? Color.blue.opacity(0.55) : Color.blue.opacity(0.15),
+                            lineWidth: 1
+                        )
+                }
+                .foregroundStyle(selected ? Color.blue : Color.primary)
         }
-        .glassButton()
-        .buttonBorderShape(.roundedRectangle(radius: 10))
+        .buttonStyle(.plain)
     }
 
-    /// 启动 / 关闭 / 重启。三颗外观完全一样，靠图标和文字区分——
-    /// 不再用绿 / 红 / 蓝着色（v2.1.11 去掉了所有彩色字）。
-    private func actionChip(_ title: String, icon: String,
+    private func actionChip(_ title: String, icon: String, color: Color,
                             action: @escaping () async -> Void) -> some View {
         Button {
             Task { await action() }
@@ -270,9 +285,11 @@ struct ProxyView: View {
                     .font(.caption.weight(.medium))
             }
             .frame(maxWidth: .infinity)
+            .padding(.vertical, 9)
+            .foregroundStyle(color)
+            .background(color.opacity(0.12), in: Capsule())
         }
-        .glassButton()
-        .buttonBorderShape(.capsule)
+        .buttonStyle(.plain)
     }
 
     // MARK: - 实时状态（流量 + 内核）
@@ -461,9 +478,11 @@ struct ProxyView: View {
                                     .font(.subheadline.weight(.semibold))
                             }
                             .frame(maxWidth: .infinity)
+                            .padding(.vertical, 11)
+                            .background(Color.blue, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .foregroundStyle(.white)
                         }
-                        .glassButton()
-                        .buttonBorderShape(.roundedRectangle(radius: 12))
+                        .buttonStyle(.plain)
                         .disabled(model.busy)
 
                         Button {
@@ -473,9 +492,11 @@ struct ProxyView: View {
                             Text("管理")
                                 .font(.subheadline.weight(.semibold))
                                 .frame(maxWidth: .infinity)
+                                .padding(.vertical, 11)
+                                .background(Color.blue.opacity(0.14), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .foregroundStyle(.blue)
                         }
-                        .glassButton()
-                        .buttonBorderShape(.roundedRectangle(radius: 12))
+                        .buttonStyle(.plain)
                         .disabled(oc.configs.isEmpty || model.busy)
                     }
                 }
@@ -557,9 +578,12 @@ struct ProxyView: View {
                             .font(.caption.weight(.medium))
                     }
                     .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .plainTile(in: Capsule())
+                    .foregroundStyle(.blue)
+                    .contentShape(Capsule())
                 }
-                .glassButton()
-                .buttonBorderShape(.capsule)
+                .buttonStyle(.plain)
                 .disabled(isChecking || model.busy)
             }
         }
@@ -745,8 +769,9 @@ private struct ProxyConfigView: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                     .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
             }
-            .glassButton()
+            .buttonStyle(GlassProminentButtonStyle(dimmed: !canApply))
             .disabled(!canApply)
             .listRowBackground(Color.clear)
             .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
@@ -1041,7 +1066,7 @@ private struct SubscriptionListView: View {
 
                     HStack(spacing: 10) {
                         SheetOverlayButton(title: "取消") { pending = nil }
-                        SheetOverlayButton(title: "仍然更新") {
+                        SheetOverlayButton(title: "仍然更新", tint: .blue) {
                             let targets = request.targets
                             pending = nil
                             Task { await model.updateSubscriptions(targets, restart: true) }

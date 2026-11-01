@@ -145,10 +145,15 @@ struct SettingsView: View {
                         .font(.system(size: 16, weight: .semibold))
                 }
                 .frame(maxWidth: .infinity)
+                .padding(.vertical, 15)
+                .background(
+                    canOpenWeb ? Color.blue : Color.blue.opacity(0.14),
+                    in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                )
+                .foregroundStyle(canOpenWeb ? Color.white : Color.secondary)
+                .cardTapShape()
             }
-            .glassButton()
-            .controlSize(.large)
-            .buttonBorderShape(.roundedRectangle(radius: 14))
+            .buttonStyle(.plain)
             .disabled(!canOpenWeb)
 
             // 错误提示：8 秒自动消失，也能点叉立刻收掉。
@@ -257,12 +262,27 @@ struct SettingsView: View {
                             themeMode = option.id
                         } label: {
                             Label(option.title, systemImage: option.icon)
-                                // 选中只靠字重，没有底色也没有彩色字。
                                 .font(.subheadline.weight(themeMode == option.id ? .semibold : .regular))
                                 .frame(maxWidth: .infinity)
+                                .padding(.vertical, 9)
+                                .background(
+                                    themeMode == option.id
+                                        ? Color.blue.opacity(0.16)
+                                        : Color.blue.opacity(0.05),
+                                    in: Capsule()
+                                )
+                                .overlay {
+                                    Capsule()
+                                        .strokeBorder(
+                                            themeMode == option.id
+                                                ? Color.blue.opacity(0.45)
+                                                : Color.blue.opacity(0.14),
+                                            lineWidth: 1
+                                        )
+                                }
+                                .foregroundStyle(themeMode == option.id ? Color.blue : Color.primary)
                         }
-                        .glassButton()
-                        .buttonBorderShape(.capsule)
+                        .buttonStyle(.plain)
                     }
                 }
 
@@ -405,9 +425,10 @@ struct SettingsView: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.red)
                     .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(Color.red.opacity(0.1), in: Capsule())
             }
-            .glassButton()
-            .buttonBorderShape(.capsule)
+            .buttonStyle(.plain)
 
             Text("清空后需要重新输入密码才能连接，保存的监控设置不会丢。")
                 .font(.caption2)

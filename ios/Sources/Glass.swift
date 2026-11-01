@@ -281,39 +281,20 @@ struct ErrorBanner: View {
     }
 }
 
-// MARK: - 液态玻璃按钮
-
-/// 全 App 的按钮统一走 iOS 26 原生液态玻璃。
-///
-/// 为什么推翻自绘（v2.1.9，用户：「能把按钮都改成使用 ios 原生液态玻璃那种吗」）：
-/// 这里原来有个叫 `GlassProminentButtonStyle` 的结构体——名字带 Glass，画出来的却是
-/// **实色蓝胶囊 + 白字**，和玻璃没有半点关系。系统自带的玻璃按钮会把背后的卡片、
-/// 渐变折进按钮里，按下还有形变，这是自绘做不出来的。
-///
-/// 只用一个样式：`.glass`。`glassProminent`（着色玻璃）试过一版，用户回「不要色块，
-/// 就用原生白色透明那种」——着色玻璃在浅色页面上看仍是一块颜色。所以现在
-/// **没有任何按钮带底色**，颜色只出现在文字上。
-///
-/// 四条硬约束（系统定的，绕了就会变形）：
-/// 1. **别给 label 加 `.background` / `.padding`**：玻璃自带约 13pt 内边距，
-///    形状由 `.buttonBorderShape` 决定。再叠一层底色就变成「玻璃壳里塞了块色块」。
-/// 2. **别用带圈的 SF Symbol**（`plus.circle.fill` 这种）：玻璃壳本身就是容器，
-///    套两层圈显得笨重。要圆就用 `.buttonBorderShape(.circle)`。
-/// 3. **禁用交给 `.disabled()`**：玻璃按钮自己会变灰变淡，别再手动 `.opacity()`——
-///    那会把文字一起压透（v1.28.28 踩过）。
-/// 4. **别在滚动容器里堆玻璃**：Form / List 里放一两个没关系，一屏七八块会持续重算折射。
-extension View {
-    /// 全 App 唯一的按钮外壳：系统中性玻璃，不上色。
+struct GlassProminentButtonStyle: ButtonStyle {
+    /// 用不了的时候（比如「没有待应用的改动」）换成灰底灰字。
     ///
-    /// 为什么不留着色版（v2.1.10，用户：「不要色块就用原生白色透明那种」）：
-    /// 上一版用 `.glassProminent` + `.tint()` 做主按钮，画出来仍是**有色玻璃**——
-    /// 在浅色页面上看就是「一块蓝」，和原来自己画的实色胶囊差别很小，等于没换成玻璃。
-    /// 现在统一走 `.glass`：玻璃只做折射和高光，不携带任何底色，
-    /// **主次不靠底色区分，靠字重、字号和位置**。
-    /// 需要强调的颜色一律写在 label 的 `foregroundStyle` 上（红字删除、蓝字选中），
-    /// 那是文字，不是色块。
-    func glassButton() -> some View {
-        self.buttonStyle(.glass)
+    /// 别用 `.opacity(0.45)` 代替：那会把白字也一起压成半透明，白字压在半透明蓝底上
+    /// 对比度只剩 1.x:1，按钮上根本读不出字来（v1.28.28 出预览图时才发现的）。
+    /// 灰底 + 次要色文字是系统里「不可用主按钮」的样子，一眼就知道是灰的、也能读清。
+    var dimmed = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(dimmed ? AnyShapeStyle(Color.secondary) : AnyShapeStyle(Color.white))
+            .background(dimmed ? AnyShapeStyle(Color(.tertiarySystemFill)) : AnyShapeStyle(Color.blue),
+                        in: Capsule())
+            .opacity(configuration.isPressed ? 0.82 : 1)
     }
 }
 
@@ -368,8 +349,8 @@ struct SheetOverlayCard<Content: View>: View {
     }
 }
 
-/// 浮层卡片底部的等宽按钮。全部是中性玻璃，`tint` 只决定**文字颜色**
-/// （删除给红、确认给蓝），不再当作底色——v2.1.10 起没有色块了。
+/// 浮层卡片底部的等宽按钮。`tint` 为空是次要按钮（浅灰底黑字），
+/// 传了颜色就是主按钮（实色底白字），删除用 `.red`。
 struct SheetOverlayButton: View {
     let title: String
     var tint: Color? = nil
@@ -379,11 +360,16 @@ struct SheetOverlayButton: View {
         Button(action: action) {
             Text(title)
                 .font(.subheadline.weight(.semibold))
-                .foregroundStyle(tint ?? Color(uiColor: .label))
+                .foregroundStyle(tint == nil ? Color(uiColor: .label) : Color.white)
                 .frame(maxWidth: .infinity)
+                .frame(height: 44)
+                .background(
+                    tint ?? Color(.tertiarySystemFill),
+                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
-        .glassButton()
-        .buttonBorderShape(.roundedRectangle(radius: 12))
+        .buttonStyle(.plain)
     }
 }
 

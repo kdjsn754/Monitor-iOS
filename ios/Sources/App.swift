@@ -450,17 +450,17 @@ struct LoginView: View {
                 if model.connecting {
                     ProgressView()
                         .controlSize(.small)
+                        .tint(.white)
                 }
                 Text(model.connecting ? "正在连接…" : "连接路由器")
                     .font(.system(size: 16, weight: .semibold))
             }
             .frame(maxWidth: .infinity)
+            .frame(height: 50)
         }
-        // 玻璃按钮自带内边距与高度，这里不再写 frame(height:)，也不再手动压 opacity
-        // 表示禁用——`.disabled()` 之后玻璃自己会变灰（见 Glass.swift 的注释）。
-        .glassButton()
-        .controlSize(.large)
+        .buttonStyle(GlassProminentButtonStyle())
         .disabled(model.connecting)
+        .opacity(model.connecting ? 0.65 : 1)
         .padding(.top, 4)
     }
 

@@ -57,15 +57,12 @@ struct PollSettingsView: View {
                 Button {
                     model.setPollSeconds(seconds - 1)
                 } label: {
-                    // 玻璃壳本身就是容器，符号不再自带圆圈（原来用 minus.circle.fill）。
-                    Image(systemName: "minus")
-                        .font(.system(size: 17, weight: .semibold))
-                        // 到边界只是变淡，不上色。
-                        .foregroundStyle(seconds > PollConfiguration.range.lowerBound
-                                         ? Color.primary : Color(.tertiaryLabel))
+                    Image(systemName: "minus.circle.fill")
+                        .font(.system(size: 27))
                 }
-                .glassButton()
-                .buttonBorderShape(.circle)
+                .buttonStyle(.plain)
+                .foregroundStyle(seconds > PollConfiguration.range.lowerBound
+                                 ? Color.blue : Color(.tertiaryLabel))
                 .disabled(seconds <= PollConfiguration.range.lowerBound)
 
                 VStack(spacing: 2) {
@@ -82,13 +79,12 @@ struct PollSettingsView: View {
                 Button {
                     model.setPollSeconds(seconds + 1)
                 } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(seconds < PollConfiguration.range.upperBound
-                                         ? Color.primary : Color(.tertiaryLabel))
+                    Image(systemName: "plus.circle.fill")
+                        .font(.system(size: 27))
                 }
-                .glassButton()
-                .buttonBorderShape(.circle)
+                .buttonStyle(.plain)
+                .foregroundStyle(seconds < PollConfiguration.range.upperBound
+                                 ? Color.blue : Color(.tertiaryLabel))
                 .disabled(seconds >= PollConfiguration.range.upperBound)
             }
         }
@@ -130,9 +126,22 @@ struct PollSettingsView: View {
                     .foregroundStyle(selected ? Color.blue : Color.secondary)
             }
             .frame(maxWidth: .infinity)
+            .padding(.vertical, 11)
+            .foregroundStyle(selected ? Color.blue : Color.primary)
+            .background(
+                selected ? Color.blue.opacity(0.16) : Color.blue.opacity(0.05),
+                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(
+                        selected ? Color.blue.opacity(0.5) : Color.blue.opacity(0.14),
+                        lineWidth: 1
+                    )
+            }
+            .cardTapShape()
         }
-        .glassButton()
-        .buttonBorderShape(.roundedRectangle(radius: 14))
+        .buttonStyle(.plain)
         .accessibilityLabel("\(preset.title)，每 \(preset.id) 秒")
         .accessibilityAddTraits(selected ? [.isSelected] : [])
     }
