@@ -8,6 +8,7 @@ struct ProxyView: View {
     @EnvironmentObject private var model: AppModel
     @State private var showPanel = false
     @State private var showConfigPicker = false
+    @State private var showAddSubscription = false
     @State private var isChecking = false
 
     private var oc: OpenClashInfo { model.openClash }
@@ -82,6 +83,14 @@ struct ProxyView: View {
                     Task { await model.switchConfig(name); await model.refreshOpenClash() }
                 }
                 // sheet 不一定继承 EnvironmentObject：显式再注入一次，避免运行时崩。
+                .environmentObject(model)
+            }
+            .sheet(isPresented: $showAddSubscription) {
+                // 「添加」是独立的一页，不再藏在管理页的右上角：
+                // 两件事（看/改已有的、加新的）从入口就分开。
+                NavigationStack {
+                    SubscriptionEditView(subscription: nil, standalone: true)
+                }
                 .environmentObject(model)
             }
         }
@@ -419,66 +428,79 @@ struct ProxyView: View {
     /// 现在改成一张可点的配置条 + 自绘的半屏选择器，全部用同一套卡片/胶囊样式。
     private var configCard: some View {
         SectionCard("代理配置", icon: "doc.text") {
-            VStack(spacing: 10) {
-                Button {
-                    guard !oc.configs.isEmpty, !model.busy else { return }
-                    showConfigPicker = true
-                } label: {
-                    HStack(spacing: 11) {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(Color.blue.opacity(0.12))
-                                .frame(width: 38, height: 38)
-                            Image(systemName: "doc.text.fill")
-                                .font(.system(size: 15, weight: .medium))
-                                .foregroundStyle(.blue)
+            HStack(spacing: 11) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.blue.opacity(0.12))
+                        .frame(width: 38, height: 38)
+                    Image(systemName: "doc.text.fill")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(.blue)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("当前配置文件")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                    Text(configTitle)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .foregroundStyle(.primary)
+                    Text(configDetail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        // 右边多了「添加」之后，这一行只剩 150pt 上下，
+                        // 名字长一点就会被截断；缩到九成比留个省略号强。
+                        .minimumScaleFactor(0.85)
+                }
+
+                Spacer(minLength: 4)
+
+                if !model.ocStateLoaded {
+                    // 还没读到配置列表：转圈，别先写一句「未找到」把人劝走。
+                    ProgressView()
+                        .controlSize(.mini)
+                } else {
+                    // 两个动作并排，各自独立：整行不再可点——一行点下去要同时
+                    // 表达「管理」和「添加」两件事，只会让人猜。
+                    HStack(spacing: 6) {
+                        Button {
+                            guard !oc.configs.isEmpty, !model.busy else { return }
+                            showConfigPicker = true
+                        } label: {
+                            Text("管理")
+                                .font(.caption.weight(.medium))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(Color.blue.opacity(0.12), in: Capsule())
+                                .foregroundStyle(Color.blue)
                         }
+                        .buttonStyle(.plain)
+                        .disabled(oc.configs.isEmpty || model.busy)
 
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("当前配置文件")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.secondary)
-                            Text(configTitle)
-                                .font(.subheadline.weight(.semibold))
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                                .foregroundStyle(.primary)
-                            Text(configDetail)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-
-                        Spacer(minLength: 4)
-
-                        if !model.ocStateLoaded {
-                            // 还没读到配置列表：转圈，别先写一句「未找到」把人劝走。
-                            ProgressView()
-                                .controlSize(.mini)
-                        } else if oc.configs.isEmpty {
-                            Text("未找到")
-                                .font(.caption2.weight(.medium))
-                                .foregroundStyle(.secondary)
-                        } else {
-                            HStack(spacing: 4) {
-                                Text("管理")
-                                    .font(.caption.weight(.medium))
-                                Image(systemName: "chevron.right")
+                        Button {
+                            showAddSubscription = true
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "plus")
                                     .font(.system(size: 9, weight: .bold))
+                                Text("添加")
+                                    .font(.caption.weight(.semibold))
                             }
                             .padding(.horizontal, 10)
                             .padding(.vertical, 6)
-                            .background(Color.blue.opacity(0.12), in: Capsule())
-                            .foregroundStyle(Color.blue)
+                            .background(Color.blue, in: Capsule())
+                            .foregroundStyle(.white)
                         }
+                        .buttonStyle(.plain)
+                        .disabled(model.busy)
                     }
-                    .padding(11)
-                    .plainTile(radius: 14)
-                    .cardTapShape()
                 }
-                .buttonStyle(.plain)
-                .disabled(oc.configs.isEmpty || model.busy)
             }
+            .padding(11)
+            .plainTile(radius: 14)
         }
     }
 
@@ -491,7 +513,7 @@ struct ProxyView: View {
     private var configDetail: String {
         guard model.ocStateLoaded else { return "正在读取配置文件列表" }
         guard !oc.configs.isEmpty else { return "没有可用配置" }
-        var text = "共 \(oc.configs.count) 个配置文件"
+        var text = "\(oc.configs.count) 个配置文件"
         // 订阅也在这个弹窗里（v2.1.0 并进来的），顺手把条数带上，
         // 否则外面看不出里面还有东西。
         if !model.subscriptions.isEmpty {
@@ -670,17 +692,9 @@ private struct ProxyConfigSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
 
-    @State private var tab: Tab = .configs
     @State private var picked: String
     @State private var editing: ProxySubscription?
-    @State private var adding = false
     @State private var pending: UpdateRequest?
-
-    enum Tab: String, CaseIterable, Identifiable {
-        case configs = "配置文件"
-        case subs = "订阅"
-        var id: String { rawValue }
-    }
 
     /// 待确认的一次更新：里面带着「要不要重启内核」。
     struct UpdateRequest: Identifiable {
@@ -699,31 +713,18 @@ private struct ProxyConfigSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section {
-                    Picker("", selection: $tab) {
-                        ForEach(Tab.allCases) { item in
-                            Text(sectionTitle(item)).tag(item)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 2, trailing: 16))
-                    .listRowBackground(Color.clear)
-                }
-
                 if let notice = model.notice {
                     Section {
                         NoticeRow(notice: notice)
                     }
                 }
 
-                if tab == .configs {
-                    configSection
-                    applySection
-                } else {
-                    subscriptionSection
-                    updateSection
-                }
+                // 这一页只管「已有的」：选哪份、删哪份、更新哪条。
+                // 添加订阅是另一页（卡片上的「添加」直接进去），不再用顶部分段切换。
+                configSection
+                applySection
+                subscriptionSection
+                updateSection
             }
             .navigationTitle("代理配置")
             .navigationBarTitleDisplayMode(.inline)
@@ -731,19 +732,6 @@ private struct ProxyConfigSheet: View {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("关闭") { dismiss() }
                 }
-                ToolbarItem(placement: .topBarTrailing) {
-                    if tab == .subs {
-                        Button {
-                            adding = true
-                        } label: {
-                            Image(systemName: "plus")
-                        }
-                        .accessibilityLabel("添加订阅")
-                    }
-                }
-            }
-            .navigationDestination(isPresented: $adding) {
-                SubscriptionEditView(subscription: nil)
             }
             .navigationDestination(item: $editing) { sub in
                 SubscriptionEditView(subscription: sub)
@@ -754,13 +742,6 @@ private struct ProxyConfigSheet: View {
             }
         }
         .overlay { confirmLayer }
-    }
-
-    private func sectionTitle(_ item: Tab) -> String {
-        switch item {
-        case .configs: return "配置文件 \(configs.count)"
-        case .subs: return "订阅 \(model.subscriptions.count)"
-        }
     }
 
     // MARK: - 配置文件
@@ -885,7 +866,7 @@ private struct ProxyConfigSheet: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     if model.subsLoaded {
-                        Text("点右上角 + 添加一条（名称 + 订阅地址）。")
+                        Text("要新建，关掉本页回代理页点「添加」。")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
@@ -1028,6 +1009,9 @@ private struct SubscriptionEditView: View {
     @Environment(\.dismiss) private var dismiss
 
     let subscription: ProxySubscription?
+    /// 独立成一页（从代理页的「添加」直接进来）时，要自己给一颗「取消」；
+    /// 在管理页里是 push 进来的，左上角已经有系统返回，不用再加。
+    let standalone: Bool
 
     @State private var name: String
     @State private var address: String
@@ -1037,8 +1021,9 @@ private struct SubscriptionEditView: View {
     @State private var excludeKeywords: String
     @State private var saving = false
 
-    init(subscription: ProxySubscription?) {
+    init(subscription: ProxySubscription?, standalone: Bool = false) {
         self.subscription = subscription
+        self.standalone = standalone
         _name = State(initialValue: subscription?.name ?? "")
         _address = State(initialValue: subscription?.address ?? "")
         _ua = State(initialValue: subscription?.ua ?? "clash-verge/v2.4.5")
@@ -1154,6 +1139,11 @@ private struct SubscriptionEditView: View {
         .navigationTitle(subscription == nil ? "添加订阅" : "编辑订阅")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            if standalone {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("取消") { dismiss() }
+                }
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 // 新添加的那条：这个按钮同时会把配置下载下来，叫「添加」更贴近实际动作。
                 Button(subscription == nil ? "添加" : "保存") {
