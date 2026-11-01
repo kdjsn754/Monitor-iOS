@@ -738,9 +738,10 @@ private struct ProxyConfigSheet: View {
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
-                    .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 2, trailing: 16))
+                    .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
                     .listRowBackground(Color.clear)
                 }
+                .listSectionSpacing(0)
 
                 if tab == .configs {
                     configSection
@@ -750,6 +751,7 @@ private struct ProxyConfigSheet: View {
                     updateSection
                 }
             }
+            .listSectionSpacing(.compact)
             .navigationTitle("代理配置")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
