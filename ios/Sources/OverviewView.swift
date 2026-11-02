@@ -41,14 +41,16 @@ struct OverviewView: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 4)
                 .padding(.bottom, 28)
-                // 关掉橡皮筋回弹（见 ScrollTuning.swift）：挂在 VStack 的 background 上，
-                // 不占布局，且这个 UIView 落在 UIScrollView 内部，父链能直接找到滚动视图。
-                // 用户连着两次反馈「下拉跳动」，确认后就是这段回弹本身，他要不弹。
-                .background(ScrollBounceOff())
+                // 滚动手感（见 ScrollTuning.swift，v2.1.18 起）：保留橡皮筋回弹，
+                // 只把「内容不到一屏也允许下拉」关掉——那正是「一下弹回去」的来源。
+                // 挂在 VStack 的 background 上，不占布局，父链能直接找到滚动视图。
+                .background(ScrollBounceTuning())
             }
+            // 和上面那句是同一件事的声明式写法（iOS 16.4+）：内容不足一屏时不回弹。
+            .scrollBounceBehavior(.basedOnSize)
             // 关掉顶部那层「滚动边缘效果」（iOS 26 新东西）：这页导航栏是隐藏的，
             // 默认那条逐渐变实的模糊带在内容被拖离顶部时会出现/消失，正好落在下拉那几帧里。
-            // v2.1.16 加的；v2.1.17 关掉回弹之后它已经不是必需，留着是为了别让顶部糊一层。
+            // v2.1.16 加的，v2.1.18 保留：它只管视觉，不参与回弹。
             .scrollEdgeEffectHidden(true, for: .top)
             // 本页内的控件（开关、进度条）仍然走蓝 tint：底栏为了变黑在 MainTabs 上挂了
             // `.tint(.primary)`，那是往下传的环境值，不补一句本页控件会跟着变黑。
