@@ -7,10 +7,20 @@ import SwiftUI
 /// 那是最危险的失败模式。插件的守护进程本来就跑在路由器上，掉线也不影响它，
 /// 所以这里只当它的「遥控器」：读写同一份 UCI 配置，然后让它自己重启生效。
 ///
-/// **v1.28.28 起是独立页面**（从概览的「风扇」那块 push 进来），不再是半屏面板：
-/// 面板只有半屏、内容又长，滚到下面的曲线时上面的状态永远看不到。
+/// **v1.28.28 起是独立页面**（从概览的「风扇」那块 push 进来），不再是半屏面板。
 /// 改页面之后顶部走系统导航栏（透明底）——不自己画返回钮，是为了保住 iOS 的
 /// 右滑返回手势：`.toolbar(.hidden)` 一开，interactivePopGesture 就跟着失效了。
+///
+/// **v2.3.0 重排整页布局**（用户：「风扇控制页布局重新设计，现在太丑了」）。改了什么：
+/// - 七个参数行原来每行都挂一句 12pt 灰注释（「达到即满速」「避免临界点反复启停」……），
+///   一屏铺开全是小字，参数本身反而看不见了。注释全部删掉，只留「参数名 → 当前值」。
+/// - 新增 `FanCurveChart`：把九个数字画成一条温度→转速的折线，扫一眼就知道这条曲线陡不陡，
+///   不用再靠读七个数字脑补。当前温度会在曲线上标一个点。
+/// - 「守护进程运行 / 官方温控在管」两个胶囊从控制卡里撤掉，合并进状态卡右上角那一枚状态胶囊。
+///   原来同一件事说了两遍，还白占一整行。
+/// - 「待应用」那行 10pt 橙字删掉：底部「应用」按钮本来就是「有没有东西等着写进去」的信号，
+///   没改动时它是灰的、有改动时是亮的，不需要再写一行字解释。
+/// - 手动模式的大数字放大到 40pt，「实际 PWM」收进胶囊，底下那句说明删掉。
 struct FanControlView: View {
     @Environment(AppModel.self) private var model: AppModel
 
@@ -25,7 +35,7 @@ struct FanControlView: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 12) {
+            VStack(spacing: 14) {
                 if !model.fan.loaded {
                     loadingCard
                 } else if !model.fan.installed {
@@ -44,8 +54,8 @@ struct FanControlView: View {
                 }
             }
             .padding(.horizontal, 16)
-            .padding(.top, 8)
-            .padding(.bottom, 26)
+            .padding(.top, 6)
+            .padding(.bottom, 28)
         }
         .background(Color.clear)
         .navigationTitle("风扇控制")
@@ -114,7 +124,7 @@ struct FanControlView: View {
         }
     }
 
-    // MARK: - 状态
+    // MARK: - 运行状态
 
     private var statusCard: some View {
         SectionCard("运行状态", icon: "fanblades", accessory: { controlPill }) {
@@ -158,36 +168,28 @@ struct FanControlView: View {
         .plainTile(radius: 12)
     }
 
-    /// 标题行右上角那枚小胶囊：一眼看出风扇此刻归谁管。
+    /// 标题行右上角那枚胶囊：一眼看出风扇此刻归谁管。
+    ///
+    /// v2.3.0 起它同时表达「守护进程在不在跑」——接管打开但守护进程没起来，
+    /// 转成橙色。原来这件事是控制卡里单独一枚胶囊，同一件事说了两遍。
     private var controlPill: some View {
-        let taken = model.fan.enabled
+        let enabled = model.fan.enabled
+        let running = model.fan.pluginRunning
+        let tone: Color = enabled ? (running ? .blue : .orange) : Color(.systemGray)
+        let title: String = enabled ? (running ? "插件接管" : "守护进程未运行") : "官方温控"
+
         return HStack(spacing: 4) {
             Circle()
-                .fill(taken ? Color.blue : Color(.systemGray3))
+                .fill(tone)
                 .frame(width: 5, height: 5)
-            Text(taken ? "插件接管" : "官方温控")
+            Text(title)
                 .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(taken ? Color.blue : Color.secondary)
+                .foregroundStyle(enabled ? tone : Color.secondary)
+                .lineLimit(1)
         }
         .padding(.horizontal, 9)
         .padding(.vertical, 4)
         .background(Color(.secondarySystemFill), in: Capsule())
-    }
-
-    /// 状态小胶囊（控制方式卡里那两个）。
-    /// 只写中文、只留「在不在跑」这一层信息：副词、解释、警告一律不进胶囊。
-    private func stateChip(_ title: String, tone: Color, active: Bool) -> some View {
-        HStack(spacing: 4) {
-            Circle()
-                .fill(active ? tone : Color(.systemGray3))
-                .frame(width: 5, height: 5)
-            Text(title)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(active ? tone : Color.secondary)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .softTile(active ? tone : Color(.systemGray), in: Capsule())
     }
 
     // MARK: - 控制方式（接管 + 模式）
@@ -196,11 +198,14 @@ struct FanControlView: View {
     /// （标题 + 32pt 内边距）。合成一张之后省下一套壳，逻辑也顺：谁在管、怎么管。
     private var controlCard: some View {
         SectionCard("控制方式", icon: "hand.raised") {
-            VStack(spacing: 12) {
+            VStack(spacing: 0) {
                 HStack(spacing: 8) {
                     Text("由插件接管风扇")
                         .font(.subheadline)
                     Spacer(minLength: 0)
+                    if model.fanBusy {
+                        ProgressView().controlSize(.mini)
+                    }
                     Toggle("由插件接管风扇", isOn: Binding(
                         get: { model.fan.enabled },
                         set: { value in Task { await model.setFanEnabled(value) } }
@@ -209,44 +214,24 @@ struct FanControlView: View {
                     .tint(.blue)
                     .disabled(model.fanBusy)
                 }
+                .padding(.vertical, 2)
 
-                HStack(spacing: 6) {
-                    stateChip(model.fan.pluginRunning ? "守护进程运行" : "守护进程未运行",
-                              tone: .blue,
-                              active: model.fan.pluginRunning)
-                    stateChip(model.fan.enabled ? "官方温控已停" : "官方温控在管",
-                              tone: .green,
-                              active: !model.fan.enabled)
-                    Spacer(minLength: 0)
-                    if model.fanBusy {
-                        ProgressView().controlSize(.mini)
-                    }
-                }
-
-                Divider()
+                Divider().padding(.vertical, 10)
 
                 // 分段只改**草稿**，按「应用到路由器」才真正下发（v1.28.28）。
-                VStack(alignment: .trailing, spacing: 3) {
-                    HStack(spacing: 8) {
-                        Text("风扇模式")
-                            .font(.subheadline)
-                        Spacer(minLength: 0)
-                        Picker("风扇模式", selection: $draftMode) {
-                            ForEach(FanControlState.Mode.allCases) { mode in
-                                Text(mode.title).tag(mode)
-                            }
+                HStack(spacing: 8) {
+                    Text("风扇模式")
+                        .font(.subheadline)
+                    Spacer(minLength: 0)
+                    Picker("风扇模式", selection: $draftMode) {
+                        ForEach(FanControlState.Mode.allCases) { mode in
+                            Text(mode.title).tag(mode)
                         }
-                        .pickerStyle(.segmented)
-                        .frame(width: 150)
                     }
-                    // 开关是即时的、模式是草稿的，两者不一样。这里把「选好了还没应用」
-                    // 说清楚，否则用户切到手动会以为风扇已经换模式了。
-                    if draftMode != model.fan.mode {
-                        Text("待应用")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(.orange)
-                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 156)
                 }
+                .padding(.vertical, 2)
                 .disabled(model.fanBusy || !model.fan.enabled)
                 .opacity(model.fan.enabled ? 1 : 0.45)
             }
@@ -256,24 +241,29 @@ struct FanControlView: View {
     // MARK: - 自动曲线
 
     private var curveCard: some View {
-        SectionCard("自动温控曲线", icon: "thermometer.medium") {
-            VStack(alignment: .leading, spacing: 10) {
-                groupLabel("温度")
-                paramRow("起转温度", value: $draft.startTemp, range: 35...85, unit: "°C")
-                paramRow("温度墙", value: $draft.wallTemp, range: 35...95, unit: "°C",
-                         note: "达到即满速")
-                paramRow("保护温度", value: $draft.criticalTemp, range: 35...105, unit: "°C",
-                         note: "两种模式下都强制满速")
-                paramRow("回差", value: $draft.hysteresis, range: 1...10, unit: "°C",
-                         note: "避免临界点反复启停")
+        SectionCard("温控曲线", icon: "thermometer.medium") {
+            VStack(alignment: .leading, spacing: 12) {
+                // 曲线画的是**草稿**：改一个数字，图上那条折线立刻跟着动，
+                // 不用先写到路由器再回读才知道自己调成什么样。
+                FanCurveChart(startTemp: Double(draft.startTemp),
+                              wallTemp: Double(draft.wallTemp),
+                              criticalTemp: Double(draft.criticalTemp),
+                              startPercent: Double(draft.startPercent),
+                              maxPercent: Double(draft.maxPercent),
+                              currentTemp: model.fan.temperature)
 
-                Divider().padding(.vertical, 2)
+                Divider()
 
-                groupLabel("转速")
-                paramRow("起转 PWM", value: $draft.startPercent, range: 0...100, unit: "%",
-                         note: "低了可能起转失败")
-                paramRow("最大 PWM", value: $draft.maxPercent, range: 0...100, unit: "%")
-                paramRow("轮询间隔", value: $draft.pollInterval, range: 1...30, unit: "s")
+                VStack(spacing: 0) {
+                    paramRow("起转温度", value: $draft.startTemp, range: 35...85, unit: "°C")
+                    paramRow("温度墙", value: $draft.wallTemp, range: 35...95, unit: "°C")
+                    paramRow("保护温度", value: $draft.criticalTemp, range: 35...105, unit: "°C")
+                    paramRow("回差", value: $draft.hysteresis, range: 1...10, unit: "°C")
+                    Divider().padding(.vertical, 8)
+                    paramRow("起转 PWM", value: $draft.startPercent, range: 0...100, unit: "%")
+                    paramRow("最大 PWM", value: $draft.maxPercent, range: 0...100, unit: "%")
+                    paramRow("轮询间隔", value: $draft.pollInterval, range: 1...30, unit: "s")
+                }
             }
             // 依赖关系就地夹紧：插件的校验规则是「温度墙 ≥ 起转+5、保护 ≥ 温度墙+3」，
             // 不满足时 commit 会被静默拒绝，界面却还显示着自己那套数字。
@@ -287,57 +277,55 @@ struct FanControlView: View {
         }
     }
 
-    private func groupLabel(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(.secondary)
-            .padding(.top, 2)
-    }
-
+    /// 一行参数：左边名字、右边当前值，值右边是系统的加减控件。
+    ///
+    /// 原来每行还在名字下面挂一句 12pt 注释（「达到即满速」「低了可能起转失败」……），
+    /// v2.3.0 全删——七个注释叠起来比七个数字还抢眼，用户要的是「名字 + 现在多少」。
     private func paramRow(_ title: String, value: Binding<Int>,
-                          range: ClosedRange<Int>, unit: String,
-                          note: String? = nil) -> some View {
+                          range: ClosedRange<Int>, unit: String) -> some View {
         Stepper(value: value, in: range) {
             HStack(spacing: 8) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(title)
-                        .font(.subheadline)
-                    if let note {
-                        Text(note)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
+                Text(title)
+                    .font(.subheadline)
                 Spacer(minLength: 4)
-                // 值右对齐并给一个最小宽度：以前中间空出一大段，眼睛要从左扫到最右再扫回来。
                 Text("\(value.wrappedValue)\(unit)")
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(.system(size: 15, weight: .semibold))
                     .monospacedDigit()
-                    .frame(minWidth: 52, alignment: .trailing)
+                    .frame(minWidth: 58, alignment: .trailing)
             }
         }
         .tint(.blue)
         .disabled(model.fanBusy || !model.fan.enabled)
         .opacity(model.fan.enabled ? 1 : 0.45)
+        .padding(.vertical, 2)
     }
 
     // MARK: - 手动
 
     private var manualCard: some View {
         SectionCard("手动转速", icon: "dial.medium") {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .firstTextBaseline, spacing: 5) {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text("\(Int(manualValue.rounded()))")
-                        .font(.system(size: 32, weight: .bold))
+                        .font(.system(size: 40, weight: .bold))
                         .monospacedDigit()
                     Text("%")
-                        .font(.headline)
+                        .font(.title3.weight(.semibold))
                         .foregroundStyle(.secondary)
                     Spacer(minLength: 6)
                     if let pwm = model.fan.pwmPercent {
-                        Text("实际 PWM \(pwm)%")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(Color.blue)
+                                .frame(width: 5, height: 5)
+                            Text("实际 \(pwm)%")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.blue)
+                                .monospacedDigit()
+                        }
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .background(Color(.secondarySystemFill), in: Capsule())
                     }
                 }
 
@@ -348,13 +336,6 @@ struct FanControlView: View {
                     .tint(.blue)
                     .disabled(model.fanBusy || !model.fan.enabled)
                     .opacity(model.fan.enabled ? 1 : 0.45)
-
-                Text(model.fan.enabled
-                     ? "0% 停转；1–100% 会被夹在「起转 PWM」和「最大 PWM」之间，避免低到起转失败。"
-                     : "先打开上面的「由插件接管风扇」，才能手动调速。")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -462,18 +443,11 @@ struct FanControlView: View {
                 Text("路由器上没有 gl-fanctrl")
                     .font(.subheadline.weight(.semibold))
             }
-            Text("风扇控制读写的是一份 UCI 配置（/etc/config/gl_fanctrl），需要先在路由器上装好这个插件。")
-                .font(.caption)
+            codeLine("opkg install /tmp/gl-fanctrl_0.1.0_all.ipk")
+            codeLine("apk add --allow-untrusted /tmp/gl-fanctrl-0.1.0-r1.apk")
+            Text("装好后回这页点右上角刷新。")
+                .font(.footnote)
                 .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            VStack(alignment: .leading, spacing: 6) {
-                codeLine("opkg install /tmp/gl-fanctrl_0.1.0_all.ipk")
-                codeLine("apk add --allow-untrusted /tmp/gl-fanctrl-0.1.0-r1.apk")
-            }
-            Text("opkg 用于 OpenWrt 21/22 固件，apk 用于 24.10+ 固件。装完回到这里点右上角刷新。")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -504,6 +478,120 @@ struct FanControlView: View {
         manualValue = Double(model.fan.manualPercent)
     }
 }
+
+// MARK: - 曲线图
+
+/// 温度 → 转速的折线预览（横轴 30–105 °C，纵轴 0–100 %）。
+///
+/// 插件的行为是三段：低于「起转温度」不转；起转温度到「温度墙」之间线性爬升；
+/// 温度墙以上满速（「保护温度」再强制一次满速，所以在顶上是一段平的）。
+/// 把这条线画出来，比七个数字容易判断得多：起转 PWM 一抬高，左边那段就直接翘起来。
+///
+/// 当前温度在线上标一个点——「现在 63 °C，曲线此刻给 35 %」，一眼对得上。
+/// 用 Canvas 而不是 Charts：这块只有一条折线 + 一块渐变，Charts 每次重建整套场景图
+/// 太贵（概览页的速度曲线当初就是因此换掉的）。
+private struct FanCurveChart: View {
+    let startTemp: Double
+    let wallTemp: Double
+    let criticalTemp: Double
+    let startPercent: Double
+    let maxPercent: Double
+    let currentTemp: Double?
+
+    private static let minTemp: Double = 30
+    private static let maxTemp: Double = 105
+
+    /// 当前温度落在曲线上对应的转速（三段线性插值）。
+    private var currentPercent: Double? {
+        guard let temp = currentTemp else { return nil }
+        if temp <= startTemp { return 0 }
+        if temp >= wallTemp { return maxPercent }
+        let span = max(wallTemp - startTemp, 0.1)
+        return startPercent + (maxPercent - startPercent) * (temp - startTemp) / span
+    }
+
+    var body: some View {
+        let current = currentPercent
+        return Canvas { context, size in
+            guard size.width > 4, size.height > 4 else { return }
+            let top: CGFloat = 4
+            let height = size.height - top - 2
+            let width = size.width
+
+            func point(_ temp: Double, _ percent: Double) -> CGPoint {
+                let tx = (temp - Self.minTemp) / (Self.maxTemp - Self.minTemp)
+                let ty = percent / 100
+                return CGPoint(x: CGFloat(min(max(tx, 0), 1)) * width,
+                               y: top + CGFloat(1 - min(max(ty, 0), 1)) * height)
+            }
+
+            // 0% 基线：曲线贴底时才看得出「这里是关着的」。
+            var baseline = Path()
+            baseline.move(to: CGPoint(x: 0, y: top + height))
+            baseline.addLine(to: CGPoint(x: width, y: top + height))
+            context.stroke(baseline,
+                           with: .color(Color(.separator).opacity(0.5)),
+                           style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+
+            // 三段折线。criticalTemp 只画标记，不再折一次——墙以上本来就已经是满速。
+            let start = point(startTemp, startPercent)
+            let wall = point(wallTemp, maxPercent)
+
+            var curve = Path()
+            curve.move(to: point(Self.minTemp, 0))
+            curve.addLine(to: start)
+            curve.addLine(to: wall)
+            curve.addLine(to: point(Self.maxTemp, maxPercent))
+
+            var area = curve
+            area.addLine(to: CGPoint(x: width, y: top + height))
+            area.addLine(to: CGPoint(x: 0, y: top + height))
+            area.closeSubpath()
+            context.fill(area, with: .linearGradient(
+                Gradient(colors: [Color.blue.opacity(0.18), Color.blue.opacity(0)]),
+                startPoint: CGPoint(x: 0, y: top),
+                endPoint: CGPoint(x: 0, y: top + height)
+            ))
+
+            context.stroke(curve, with: .color(.blue),
+                           style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+
+            // 两个拐点
+            for dot in [start, wall] {
+                let rect = CGRect(x: dot.x - 2.5, y: dot.y - 2.5, width: 5, height: 5)
+                context.fill(Path(ellipseIn: rect), with: .color(.blue))
+            }
+
+            // 保护温度：红色小标记，落在满速那段平线上
+            let guardPoint = point(min(criticalTemp, Self.maxTemp), maxPercent)
+            let guardRect = CGRect(x: guardPoint.x - 2, y: guardPoint.y - 2, width: 4, height: 4)
+            context.fill(Path(ellipseIn: guardRect), with: .color(.red))
+
+            // 当前温度：竖虚线 + 线上的圆点
+            if let current, let temp = currentTemp,
+               temp >= Self.minTemp, temp <= Self.maxTemp {
+                let dot = point(temp, current)
+                var marker = Path()
+                marker.move(to: CGPoint(x: dot.x, y: dot.y))
+                marker.addLine(to: CGPoint(x: dot.x, y: top + height))
+                context.stroke(marker, with: .color(Color.orange.opacity(0.45)),
+                               style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
+
+                let outer = CGRect(x: dot.x - 5, y: dot.y - 5, width: 10, height: 10)
+                context.fill(Path(ellipseIn: outer), with: .color(.orange))
+                let inner = CGRect(x: dot.x - 2.2, y: dot.y - 2.2, width: 4.4, height: 4.4)
+                context.fill(Path(ellipseIn: inner), with: .color(Color(.systemBackground)))
+            }
+        }
+        .frame(height: 86)
+        // 和概览页的速度曲线一样：Canvas 是立即模式，滚动时每一帧都会重跑这段 draw，
+        // 压成离屏图层之后滚动只做合成。这里没有文字，不会糊字。
+        .drawingGroup()
+        .accessibilityLabel("温控曲线")
+    }
+}
+
+// MARK: - 草稿
 
 /// 自动曲线在界面上的编辑副本。
 private struct FanDraft: Equatable {
