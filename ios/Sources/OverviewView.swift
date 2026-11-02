@@ -48,10 +48,11 @@ struct OverviewView: View {
             }
             // 和上面那句是同一件事的声明式写法（iOS 16.4+）：内容不足一屏时不回弹。
             .scrollBounceBehavior(.basedOnSize)
-            // 关掉顶部那层「滚动边缘效果」（iOS 26 新东西）：这页导航栏是隐藏的，
-            // 默认那条逐渐变实的模糊带在内容被拖离顶部时会出现/消失，正好落在下拉那几帧里。
-            // v2.1.16 加的，v2.1.18 保留：它只管视觉，不参与回弹。
-            .scrollEdgeEffectHidden(true, for: .top)
+            // 顶部「滚动边缘效果」（iOS 26）：内容滚到状态栏下面时由系统糊一层，
+            // 标题就不会压在时间和信号上。v2.1.16 曾用 `.scrollEdgeEffectHidden(true, for: .top)`
+            // 把它关掉（当时以为它能治下拉跳，其实不能），后果是概览页的「概览」直接叠在 15:41 上。
+            // v2.1.19 换回显式 `.soft`：锁定用户截图里那种柔和模糊，别用 automatic（随上下文变）。
+            .scrollEdgeEffectStyle(.soft, for: .top)
             // 本页内的控件（开关、进度条）仍然走蓝 tint：底栏为了变黑在 MainTabs 上挂了
             // `.tint(.primary)`，那是往下传的环境值，不补一句本页控件会跟着变黑。
             // ⚠️ 这一句**救不到 sheet / push 出来的页面**（v2.1.17 实测：模块设置、离线设备、
