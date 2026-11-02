@@ -64,7 +64,6 @@ struct ModuleSettingsView: View {
                     model.resetModules()
                 }
                 .font(.caption)
-                .navBarTint()
             }
         }
     }

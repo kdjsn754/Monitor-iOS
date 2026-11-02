@@ -45,7 +45,6 @@ struct PollSettingsView: View {
                     model.setPollSeconds(2)
                 }
                 .font(.caption)
-                .navBarTint()
             }
         }
     }
