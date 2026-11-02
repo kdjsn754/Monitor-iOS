@@ -21,6 +21,10 @@ struct PanelView: View {
                     autoLoginUser: autoLoginUser,
                     autoLoginPassword: autoLoginPassword
                 )
+                // v2.3.6：铺到屏幕最底。原来全屏后 WebView 只到「Home 指示条上沿」，
+                // 网页自己的底栏（代理/连接/日志/规则/设置）贴着那条线，下面留一条白带。
+                // 底栏是网页画的，不归 SwiftUI 管，所以只能把视口拉满、让它自己贴到底。
+                .ignoresSafeArea(.container, edges: .bottom)
                 if progress > 0 && progress < 1 {
                     ProgressView(value: progress)
                         .progressViewStyle(.linear)
@@ -77,6 +81,12 @@ private struct PanelWebView: UIViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
+        // 不让 WKWebView 自己再叠一层安全区内边距：SwiftUI 那边已经把视口拉到底，
+        // .automatic 会再缩一次，网页底栏就又浮起来、底下重新露出底色（v2.3.6）。
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        webView.isOpaque = true
+        webView.backgroundColor = .white
+        webView.scrollView.backgroundColor = .white
         context.coordinator.webView = webView
         context.coordinator.observe()
         webView.load(URLRequest(url: url))
