@@ -46,13 +46,19 @@ struct SettingsView: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 4)
                 .padding(.bottom, 32)
+                // 关掉橡皮筋回弹（见 ScrollTuning.swift）：挂在 VStack 的 background 上，
+                // 不占布局，且这个 UIView 落在 UIScrollView 内部，父链能直接找到滚动视图。
+                // 用户连着两次反馈「下拉跳动」，确认后就是这段回弹本身，他要不弹。
+                .background(ScrollBounceOff())
             }
-            // 关掉顶部那层「滚动边缘效果」（iOS 26 新东西）：默认会在内容与状态栏之间加一条
-            // 逐渐变实的模糊带，这页导航栏是隐藏的，那条带子的出现/消失全落在下拉的那几帧里，
-            // 看着就是「往下一拉，页面跳一下」。这里只关顶部，底部那侧留给玻璃底栏用。
+            // 关掉顶部那层「滚动边缘效果」（iOS 26 新东西）：这页导航栏是隐藏的，
+            // 默认那条逐渐变实的模糊带在内容被拖离顶部时会出现/消失，正好落在下拉那几帧里。
+            // v2.1.16 加的；v2.1.17 关掉回弹之后它已经不是必需，留着是为了别让顶部糊一层。
             .scrollEdgeEffectHidden(true, for: .top)
-            // 页面里的控件（开关、进度条、滑条）仍然走蓝 tint：底栏的选中色在 MainTabs 里
-            // 被改成了 label 色，那是环境值会一路传进来，不补一句的话开关会跟着变黑。
+            // 本页内的控件（开关、进度条）仍然走蓝 tint：底栏为了变黑在 MainTabs 上挂了
+            // `.tint(.primary)`，那是往下传的环境值，不补一句本页控件会跟着变黑。
+            // ⚠️ 这一句**救不到 sheet / push 出来的页面**（v2.1.17 实测：模块设置、离线设备、
+            // 订阅编辑、切换连接那几页的开关照样是黑的），那些页面的开关必须各自显式 `.tint(.blue)`。
             .tint(.blue)
             .background(Color.clear)
             // 见 OverviewView：标题画在内容里，导航栏整条不要。
@@ -617,6 +623,7 @@ private struct RouterSwitcherSheet: View {
 
             Toggle("", isOn: switchBinding(for: profile))
                 .labelsHidden()
+                .tint(.blue)
                 .accessibilityLabel("切换到 \(profile.title)")
         }
         .padding(.vertical, 4)

@@ -14,6 +14,7 @@ struct OfflineSettingsView: View {
         Form {
             Section {
                 Toggle("自动清理离线设备", isOn: $model.autoRemoveOffline)
+                    .tint(.blue)
 
                 if model.autoRemoveOffline {
                     // 时长做成菜单选择，不做滑条——「离线多久算久」是几档常识值，不是连续量。

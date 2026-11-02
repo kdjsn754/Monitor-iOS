@@ -35,6 +35,10 @@ struct ModuleSettingsView: View {
                             set: { model.setModule(module, visible: $0) }
                         ))
                         .labelsHidden()
+                        // 开关一律显式给蓝。底栏为了变黑在 MainTabs 上挂了 `.tint(.primary)`，
+                        // 那是往下传的环境值；sheet / push 出来的页面拿不到根页那句 `.tint(.blue)`，
+                        // 开关就跟着 label 色变成黑的了（v2.1.17）。
+                        .tint(.blue)
                     }
                     .padding(.vertical, 2)
                 }
