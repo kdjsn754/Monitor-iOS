@@ -44,7 +44,8 @@ struct SettingsView: View {
                     dangerCard
                 }
                 .padding(.horizontal, 16)
-                .padding(.top, 4)
+                // v2.3.2：顶部留白自己给（状态栏高度 + 4），配合下面 `.ignoresSafeArea(.container, edges: .top)`。
+                .padding(.top, 4 + SafeAreaMetrics.statusBarTop)
                 .padding(.bottom, 32)
                 // 滚动手感（见 ScrollTuning.swift，v2.1.18 起）：保留橡皮筋回弹，
                 // 只把「内容不到一屏也允许下拉」关掉——那正是「一下弹回去」的来源。
@@ -53,6 +54,9 @@ struct SettingsView: View {
             }
             // 和上面那句是同一件事的声明式写法（iOS 16.4+）：内容不足一屏时不回弹。
             .scrollBounceBehavior(.basedOnSize)
+            // v2.3.2 治「返回主页跳一下」：同 OverviewView，滚动视图不吃顶部安全区，
+            // 顶部留白由内容自己补（`.padding(.top, 4 + SafeAreaMetrics.statusBarTop)`）。
+            .ignoresSafeArea(.container, edges: .top)
             // 顶部「滚动边缘效果」（iOS 26）：内容滚到状态栏下面时由系统糊一层，
             // 标题就不会压在时间和信号上。v2.1.16 曾用 `.scrollEdgeEffectHidden(true, for: .top)`
             // 把它关掉（当时以为它能治下拉跳，其实不能），后果是概览页的「概览」直接叠在 15:41 上。

@@ -1,6 +1,37 @@
 import SwiftUI
 import UIKit
 
+// MARK: - 顶部固定留白
+/// 顶部固定留白用（v2.3.2 修「返回主页跳一下」）。
+///
+/// 三个根页的 `ScrollView` 都用 `.ignoresSafeArea(.container, edges: .top)` 顶到屏幕最上面，
+/// 内容再用这个值把留白补回来。**为什么不用 `.safeAreaPadding` / `GeometryReader.safeAreaInsets`**：
+/// 那些值会跟着「导航栏显隐」变——根页隐藏导航栏时只含状态栏，二级页显示导航栏时是
+/// 状态栏 + 导航栏高度。返回时这个值被改一次，`UIScrollView` 就重算 `adjustedContentInset`
+/// 并把 `contentOffset` 夹一下，肉眼就是「跳一下」。v2.3.0 用冻结 contentInset 的办法压住过，
+/// 代价是整片界面错位（见文件头），所以这次改成「根本不让它随导航栏变」。
+///
+/// 窗口的 `safeAreaInsets.top` 只含状态栏那一层，不随导航栏显隐变化，才拿它当常量。
+/// 值只取一次并缓存（本项目只支持竖屏 iPhone，不用管旋转/分屏）。
+@MainActor
+enum SafeAreaMetrics {
+    /// 带灵动岛的 iPhone 状态栏高度兜底值。窗口还没就绪时先用它排版，下一次 body 会改成真值。
+    private static let fallback: CGFloat = 59
+    private static var cached: CGFloat?
+
+    static var statusBarTop: CGFloat {
+        if let cached { return cached }
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+        let window = scene?.windows.first { $0.isKeyWindow } ?? scene?.windows.first
+        if let top = window?.safeAreaInsets.top, top > 0 {
+            cached = top
+            return top
+        }
+        return fallback
+    }
+}
+
 /// 调滚动手感：**保留橡皮筋回弹**，但只在「内容真的比一屏长」时才允许下拉。
 ///
 /// 历史（别踩回去）：
@@ -20,8 +51,9 @@ import UIKit
 ///   **`contentInsetAdjustmentBehavior` 和 `contentInset` 这两个东西，
 ///   SwiftUI 的 ScrollView 不能碰。** 想要什么位置就用 SwiftUI 自己的布局去要。
 ///
-/// 所以 v2.3.1 把冻结整段删了，只留下面两件纯开关。回弹收尾那 53pt 的一跳
-/// 宁可留着，也不能拿整片界面的可点性去换。
+/// 所以 v2.3.1 把冻结整段删了，只留下面两件纯开关。
+/// 那一跳（53pt）v2.3.2 换了个不动边距的办法治：根页滚动视图 `.ignoresSafeArea(.container, edges: .top)`
+/// 顶到屏幕最上面、留白由内容自己补 —— 顶部安全区再怎么随导航栏变，也影响不到它。见 `SafeAreaMetrics`。
 ///
 /// 用法：挂在**滚动内容**（`ScrollView` 里那个 `VStack`）的 background 上：
 ///
