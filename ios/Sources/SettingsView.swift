@@ -47,6 +47,13 @@ struct SettingsView: View {
                 .padding(.top, 4)
                 .padding(.bottom, 32)
             }
+            // 关掉顶部那层「滚动边缘效果」（iOS 26 新东西）：默认会在内容与状态栏之间加一条
+            // 逐渐变实的模糊带，这页导航栏是隐藏的，那条带子的出现/消失全落在下拉的那几帧里，
+            // 看着就是「往下一拉，页面跳一下」。这里只关顶部，底部那侧留给玻璃底栏用。
+            .scrollEdgeEffectHidden(true, for: .top)
+            // 页面里的控件（开关、进度条、滑条）仍然走蓝 tint：底栏的选中色在 MainTabs 里
+            // 被改成了 label 色，那是环境值会一路传进来，不补一句的话开关会跟着变黑。
+            .tint(.blue)
             .background(Color.clear)
             // 见 OverviewView：标题画在内容里，导航栏整条不要。
             .toolbar(.hidden, for: .navigationBar)
@@ -525,6 +532,7 @@ private struct RouterSwitcherSheet: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("关闭") { dismiss() }
+                        .navBarTint()
                 }
             }
         }
@@ -777,6 +785,7 @@ private struct ConnectionEditorView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("取消") { dismiss() }
+                        .navBarTint()
                 }
             }
         }

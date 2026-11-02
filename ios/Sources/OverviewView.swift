@@ -42,6 +42,13 @@ struct OverviewView: View {
                 .padding(.top, 4)
                 .padding(.bottom, 28)
             }
+            // 关掉顶部那层「滚动边缘效果」（iOS 26 新东西）：默认会在内容与状态栏之间加一条
+            // 逐渐变实的模糊带，这页导航栏是隐藏的，那条带子的出现/消失全落在下拉的那几帧里，
+            // 看着就是「往下一拉，页面跳一下」。这里只关顶部，底部那侧留给玻璃底栏用。
+            .scrollEdgeEffectHidden(true, for: .top)
+            // 页面里的控件（开关、进度条、滑条）仍然走蓝 tint：底栏的选中色在 MainTabs 里
+            // 被改成了 label 色，那是环境值会一路传进来，不补一句的话开关会跟着变黑。
+            .tint(.blue)
             .background(Color.clear)
             // 标题画在内容里了，导航栏整条不要：留着它状态栏下面会空出一整条。
             .toolbar(.hidden, for: .navigationBar)
@@ -58,9 +65,11 @@ struct OverviewView: View {
             // 返回按钮的文案取上一页的标题，这里给一个（导航栏本身是隐藏的，不会显示出来）。
             .navigationTitle("概览")
             .navigationDestination(isPresented: $showFanControl) {
-                // 风扇页收起原生底栏：不收的话「应用到路由器」会被玻璃栏压着。
+                // v2.1.16 起二级页**不再** `.toolbar(.hidden, for: .tabBar)`。
+                // 之前藏掉底栏，返回时系统要把它重新显示，那一下动画在 iOS 26 的玻璃底栏上
+                // 看着就是「闪出来」。让底栏一直存在，就没有出现动画可闪了。
+                // 内容不会被压住：滚动视图会自动让出底栏的安全区（以前那句注释是误判）。
                 FanControlView()
-                    .toolbar(.hidden, for: .tabBar)
             }
         }
     }

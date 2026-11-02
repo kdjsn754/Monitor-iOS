@@ -221,6 +221,11 @@ struct MainTabs: View {
                     }
                 }
         }
+        // 底栏选中色改走 label 色（浅色黑 / 深色白），不再跟着全局那个蓝。
+        // 为什么只加在这里：`.tint` 是往下传的环境值，加在 TabView 上能精确只影响底栏；
+        // 三个根页各自再写一句 `.tint(.blue)` 把页面里的控件（开关、进度条）还原成蓝，
+        // 不能直接改 `RootView` 的 `.tint(.blue)`——那是同一个变量管两件事。
+        .tint(.primary)
         // 采集跟着页面走：切到哪一页就只采那一页要用的数据，设置页完全不采。
         .onChange(of: selection) { _, value in
             model.setActivePage(AppPage(tab: value))

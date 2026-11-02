@@ -56,6 +56,13 @@ struct ProxyView: View {
                 .padding(.top, 4)
                 .padding(.bottom, 28)
             }
+            // 关掉顶部那层「滚动边缘效果」（iOS 26 新东西）：默认会在内容与状态栏之间加一条
+            // 逐渐变实的模糊带，这页导航栏是隐藏的，那条带子的出现/消失全落在下拉的那几帧里，
+            // 看着就是「往下一拉，页面跳一下」。这里只关顶部，底部那侧留给玻璃底栏用。
+            .scrollEdgeEffectHidden(true, for: .top)
+            // 页面里的控件（开关、进度条、滑条）仍然走蓝 tint：底栏的选中色在 MainTabs 里
+            // 被改成了 label 色，那是环境值会一路传进来，不补一句的话开关会跟着变黑。
+            .tint(.blue)
             .background(Color.clear)
             // 见 OverviewView：标题画在内容里，导航栏整条不要。
             .toolbar(.hidden, for: .navigationBar)
@@ -716,8 +723,8 @@ private struct ProxyConfigView: View {
         // 代理页把整条导航栏藏了，push 进来的页必须自己显式要回来，
         // 否则会被上层的隐藏状态带下去（交接 7.1）。
         .toolbar(.visible, for: .navigationBar)
-        // 二级页收起底栏，和风扇控制页一致。
-        .toolbar(.hidden, for: .tabBar)
+        // 不藏底栏（v2.1.16）：藏了再显示，返回时那一闪止不住，见 OverviewView 里的注释。
+        .toolbar(.visible, for: .tabBar)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 // 用 NavigationLink 而不是再挂一个 navigationDestination(isPresented:)：
@@ -728,6 +735,7 @@ private struct ProxyConfigView: View {
                 } label: {
                     Text("订阅")
                 }
+                .navBarTint()
             }
         }
         .task { model.clearNotice() }
@@ -896,9 +904,9 @@ private struct SubscriptionListView: View {
         .navigationTitle("订阅")
         .navigationBarTitleDisplayMode(.inline)
         // 上层都设过 .toolbar(.visible)，这里再写一次是不依赖调用顺序；
-        // 底栏照二级页惯例收起。
+        // 底栏同样保持显示（v2.1.16）。
         .toolbar(.visible, for: .navigationBar)
-        .toolbar(.hidden, for: .tabBar)
+        .toolbar(.visible, for: .tabBar)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 NavigationLink {
@@ -906,6 +914,7 @@ private struct SubscriptionListView: View {
                 } label: {
                     Text("添加")
                 }
+                .navBarTint()
             }
         }
         .navigationDestination(item: $editing) { sub in
@@ -1214,9 +1223,9 @@ private struct SubscriptionEditView: View {
         .navigationTitle(subscription == nil ? "添加订阅" : "编辑订阅")
         .navigationBarTitleDisplayMode(.inline)
         // 与「代理配置」页同样两件事：把被上层藏起来的导航栏要回来（右滑返回才在），
-        // 顺便收起底栏。
+        // 底栏保持显示（v2.1.16）。
         .toolbar(.visible, for: .navigationBar)
-        .toolbar(.hidden, for: .tabBar)
+        .toolbar(.visible, for: .tabBar)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 // 新添加的那条：这个按钮同时会把配置下载下来，叫「添加」更贴近实际动作。
@@ -1224,6 +1233,7 @@ private struct SubscriptionEditView: View {
                     Task { await saveAndUpdate(keepOpen: false) }
                 }
                 .disabled(!canSave || saving || model.subsBusy != nil)
+                .navBarTint()
             }
         }
         .onAppear { model.clearNotice() }

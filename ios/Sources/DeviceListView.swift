@@ -58,6 +58,7 @@ struct DeviceListView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("完成") { dismiss() }
+                        .navBarTint()
                 }
                 // 顺序就是屏幕上的先后：垃圾桶在左、齿轮在最右。
                 // 齿轮恒定出现（它是入口），垃圾桶只在有离线设备时才有。
@@ -69,6 +70,7 @@ struct DeviceListView: View {
                         } label: {
                             Image(systemName: "trash")
                         }
+                        .navBarTint()
                         .accessibilityLabel("清理离线设备")
                     }
                     Button {
@@ -76,6 +78,7 @@ struct DeviceListView: View {
                     } label: {
                         Image(systemName: "gearshape")
                     }
+                    .navBarTint()
                     .accessibilityLabel("离线设备设置")
                 }
             }
