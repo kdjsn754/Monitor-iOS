@@ -7,7 +7,7 @@ import SwiftUI
 /// 知道了「OpenClash 状态要问 7 次 uci」就少一点等待。删掉之后这一页只剩两件事：
 /// 调多快、为什么这么快也不费路由器。
 struct PollSettingsView: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model: AppModel
 
     private var seconds: Double { model.pollSeconds }
 

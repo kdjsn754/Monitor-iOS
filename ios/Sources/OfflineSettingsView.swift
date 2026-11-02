@@ -8,10 +8,13 @@ import SwiftUI
 /// 版式跟着面板本来的系统 `Form` 走，和「切换连接」「选择配置文件」两个面板是同一套；
 /// 也不做「完成」按钮——它是 push 出来的二级页，左上角自带返回。
 struct OfflineSettingsView: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model: AppModel
 
     var body: some View {
-        Form {
+        // @Observable 模型不能直接 `$model.xxx`，要先用 @Bindable 包一层
+        // 才能拿到 Binding（Toggle / Picker 用）。只在这一页有两处绑定。
+        @Bindable var model = model
+        return Form {
             Section {
                 Toggle("自动清理离线设备", isOn: $model.autoRemoveOffline)
                     .tint(.blue)

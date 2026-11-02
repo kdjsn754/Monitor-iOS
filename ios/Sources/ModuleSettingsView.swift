@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct ModuleSettingsView: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model: AppModel
     @State private var editMode: EditMode = .active
 
     private var visibleCount: Int {

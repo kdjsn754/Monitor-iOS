@@ -12,7 +12,7 @@ import SwiftUI
 /// 改页面之后顶部走系统导航栏（透明底）——不自己画返回钮，是为了保住 iOS 的
 /// 右滑返回手势：`.toolbar(.hidden)` 一开，interactivePopGesture 就跟着失效了。
 struct FanControlView: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model: AppModel
 
     /// 自动曲线的编辑副本。没按「应用」之前不碰路由器——七个 Stepper 每动一格
     /// 就 commit + 重启一次服务，路由器上的 flash 和风扇都受不了。

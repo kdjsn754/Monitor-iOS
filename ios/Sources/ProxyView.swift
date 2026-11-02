@@ -5,7 +5,7 @@ import SwiftUI
 /// 流量和内核指标原来是两张卡，v1.28.24 合成一张「实时状态」。
 /// 控制面板 v2.0.1 从「状态与操作」卡的下半段拆出来，独立成卡。
 struct ProxyView: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model: AppModel
     @State private var showPanel = false
     @State private var showConfigPicker = false
     @State private var showAddSubscription = false
@@ -707,7 +707,7 @@ private struct ProxyConfigView: View {
     private let applied: String
     private let onApply: (String) -> Void
 
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model: AppModel
     @Environment(\.dismiss) private var dismiss
 
     @State private var picked: String
@@ -893,7 +893,7 @@ private struct ProxyConfigView: View {
 /// 删除仍然只在长按菜单里，没有左滑：左滑和系统边缘返回手势同一侧，
 /// 误触代价比长按高一档；这一页也不是高频删除的地方。
 private struct SubscriptionListView: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model: AppModel
 
     @State private var editing: ProxySubscription?
     @State private var pending: UpdateRequest?
@@ -1104,7 +1104,7 @@ private struct SubscriptionListView: View {
 /// 保存写的是一整条 UCI 段（名称、地址、UA、启用），提交后回列表；
 /// 下载不在保存时做——「立即更新」与「全部更新」才真正去拉。
 private struct SubscriptionEditView: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model: AppModel
     @Environment(\.dismiss) private var dismiss
 
     let subscription: ProxySubscription?

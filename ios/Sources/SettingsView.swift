@@ -4,7 +4,7 @@ import UIKit
 /// 设置页：顶部一张「路由器」卡把当前连接、切换、新建、编辑、网页后台全收进去，
 /// 采集频率只留一行摘要，细项进二级页。
 struct SettingsView: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model: AppModel
     // v1.28.26：默认值从 "system" 改成 "light"——「跟随系统」这个选项已经删了，
     // 新装用户不该落在一个界面上不存在的状态上。老用户的 "system" 由 RootView 迁移。
     @AppStorage("themeMode") private var themeMode = "light"
@@ -72,7 +72,7 @@ struct SettingsView: View {
             }
             .sheet(isPresented: $showSwitcher) {
                 RouterSwitcherSheet()
-                    .environmentObject(model)
+                    .environment(model)
             }
             .confirmationDialog("退出后需要重新输入密码", isPresented: $confirmLogout, titleVisibility: .visible) {
                 Button("断开并清除密码", role: .destructive) {
@@ -512,7 +512,7 @@ struct SectionCard<Content: View>: View {
 /// **当前那台的开关关不掉**：关掉没有语义，`set` 里直接返回，
 /// 取值来源是 `profile.id == currentProfileID`，界面会立刻弹回原样。
 private struct RouterSwitcherSheet: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model: AppModel
     @Environment(\.dismiss) private var dismiss
 
     /// 待删除的连接。非 nil 就浮确认卡（自绘，不用系统 confirmationDialog——
@@ -707,7 +707,7 @@ private enum ConnectionEditorRoute: Identifiable {
 
 private struct ConnectionEditorView: View {
     let profile: RouterProfile?
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var label: String
     @State private var host: String

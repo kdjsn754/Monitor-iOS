@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import Observation
 
 enum AppError: LocalizedError {
     case notConnected
@@ -16,35 +17,42 @@ enum AppError: LocalizedError {
 }
 
 @MainActor
-final class AppModel: ObservableObject {
-    @Published var connected = false
-    @Published var connecting = false
-    @Published var reconnecting = false
-    @Published var activityTitle: String?
-    @Published var activitySubtitle: String?
-    @Published var busy = false
-    @Published var status = "未连接"
-    @Published var errorMessage: String?
-    @Published var stats = OverviewStats()
-    @Published var flashInfo = FlashInfo()
-    @Published var routerInfo = RouterInfo()
-    @Published var devices: [DeviceInfo] = []
+@Observable
+final class AppModel {
+    var connected = false
+    var connecting = false
+    var reconnecting = false
+    var activityTitle: String?
+    var activitySubtitle: String?
+    var busy = false
+    var status = "未连接"
+    var errorMessage: String?
+    var stats = OverviewStats()
+    var flashInfo = FlashInfo()
+    var routerInfo = RouterInfo()
+    var devices: [DeviceInfo] = []
     /// 自定义设备名：键是 MAC（租约重新下发时 IP 会变，MAC 不会），没 MAC 才退回 IP。
-    @Published var deviceAliases: [String: String] = [:]
+    var deviceAliases: [String: String] = [:]
     /// 删掉（隐藏）的离线设备。键同上，值是删掉那一刻。
     ///
     /// 路由器上的租约**不动**——那是 dnsmasq 管的文件，手机端去改容易把
     /// 「谁在用这个 IP」搞乱。这里只是本机记账，目标是把「人已经走了、
     /// 只剩一条租约」的僵尸条目从列表里清掉。设备真的回来时自动撤销隐藏，
     /// 所以不需要额外的「恢复」按钮去救它。
-    @Published private(set) var hiddenDeviceCount = 0
+    private(set) var hiddenDeviceCount = 0
     /// 自动清理离线设备。
-    @Published var autoRemoveOffline: Bool {
-        didSet { UserDefaults.standard.set(autoRemoveOffline, forKey: Self.autoRemoveKey) }
+    var autoRemoveOffline: Bool = false {
+        didSet {
+            guard autoRemoveOffline != oldValue else { return }
+            UserDefaults.standard.set(autoRemoveOffline, forKey: Self.autoRemoveKey)
+        }
     }
     /// 离线多久算「可以清掉」，默认 1 小时。
-    @Published var offlineRemoveMinutes: Int {
-        didSet { UserDefaults.standard.set(offlineRemoveMinutes, forKey: Self.offlineMinutesKey) }
+    var offlineRemoveMinutes: Int = 60 {
+        didSet {
+            guard offlineRemoveMinutes != oldValue else { return }
+            UserDefaults.standard.set(offlineRemoveMinutes, forKey: Self.offlineMinutesKey)
+        }
     }
 
     private static let hiddenDevicesKey = "hiddenDeviceKeys"
@@ -61,45 +69,48 @@ final class AppModel: ObservableObject {
 
     /// 风扇控制（gl-fanctrl 插件）。只在打开控制面板时才去问，不跟着轮询跑：
     /// 一份配置要塞十来次 uci，每 2 秒问一次纯属浪费路由器的 CPU。
-    @Published var fan = FanControlState()
+    var fan = FanControlState()
     /// 正在写风扇配置（面板里按钮转圈、同时避免连点）。
-    @Published var fanBusy = false
+    var fanBusy = false
 
-    @Published var openClash = OpenClashInfo()
+    var openClash = OpenClashInfo()
     /// OpenClash 的完整状态（装没装、代理模式、配置列表）是否已经成功问过一次。
     ///
     /// 「还没问」和「问过、确定没装」是两件事。以前两种情况都用默认值 false 表示，
     /// 于是刚进网络代理页的那几秒，界面会一口咬定「未检测到插件」，
     /// 顶部那两排按钮也跟着被整段拿掉——用户看到的就是「空白很久，按钮才蹦出来」。
-    @Published private(set) var ocStateLoaded = false
+    private(set) var ocStateLoaded = false
     /// 状态探针正在跑（进代理页时先单独问一次，不等那条要 curl 内核的指标命令）。
-    @Published private(set) var ocStateLoading = false
-    @Published var ocMetrics = OpenClashMetrics()
+    private(set) var ocStateLoading = false
+    var ocMetrics = OpenClashMetrics()
     /// 路由器上的订阅列表（UCI `config_subscribe`）。只在打开配置弹窗时读一次，
     /// 不跟着轮询：订阅是低频数据，改一次才动一次。
-    @Published var subscriptions: [ProxySubscription] = []
+    var subscriptions: [ProxySubscription] = []
     /// 正在更新的订阅名；`"all"` 表示「全部更新」。nil = 空闲。
-    @Published private(set) var subsBusy: String?
-    @Published private(set) var subsLoaded = false
+    private(set) var subsBusy: String?
+    private(set) var subsLoaded = false
     /// 弹窗里的操作结果（成功/失败/进行中的说明）。见 `Notice` 的注释：
     /// 弹窗里没有系统 alert 可用，`errorMessage` 又只在登录页/设置页渲染，
     /// 所以订阅相关的每一步都必须往这里写一条，否则界面看起来「什么都没发生」。
-    @Published var notice: Notice?
-    @Published var accessChecks = AccessCheck.Site.allCases.map { AccessCheck(site: $0) }
-    @Published var history: [HistoryPoint] = []
-    @Published var profiles: [RouterProfile] = []
-    @Published var currentProfileID: UUID?
-    @Published var moduleOrder: [OverviewModule] = OverviewModule.allCases
-    @Published var hiddenModules: Set<OverviewModule> = []
+    var notice: Notice?
+    var accessChecks = AccessCheck.Site.allCases.map { AccessCheck(site: $0) }
+    var history: [HistoryPoint] = []
+    var profiles: [RouterProfile] = []
+    var currentProfileID: UUID?
+    var moduleOrder: [OverviewModule] = OverviewModule.allCases
+    var hiddenModules: Set<OverviewModule> = []
     /// 采集配置：现在只有一个全局刷新间隔，改完立即生效。
-    @Published var pollConfig: PollConfiguration {
+    var pollConfig: PollConfiguration = PollConfiguration() {
         didSet {
+            // @Observable 下 didSet 可能被调用两次（已知问题），这里用 oldValue 挡住，
+            // 否则会重复 startPolling()，白白多发一轮 SSH 采集。
+            guard pollConfig != oldValue else { return }
             pollConfig.save()
             if connected { startPolling() }
         }
     }
     /// 当前在看的标签页。采集只跟着它走：切到设置页就完全停下。
-    @Published private(set) var activePage: AppPage = .overview
+    private(set) var activePage: AppPage = .overview
 
     private var ssh = SSHService()
     /// 正在尝试建立的新会话：成功之后才顶替掉 `ssh`，
@@ -113,17 +124,17 @@ final class AppModel: ObservableObject {
     /// 尝试序号：取消后旧任务收尾时据此判断自己是否已经过期。
     private var attemptToken = 0
     /// 上一次连接尝试是否失败（不是取消），弹窗据此决定显示失败还是成功。
-    @Published private(set) var lastConnectFailed = false
+    private(set) var lastConnectFailed = false
     /// 这次尝试的目标。失败回滚后 `currentProfile` 已经变回上一台了，
     /// 弹窗的标题和「重试」得靠它，不能用 currentProfile。
-    @Published private(set) var attemptTarget: (profile: RouterProfile, password: String)?
+    private(set) var attemptTarget: (profile: RouterProfile, password: String)?
     private var pollTask: Task<Void, Never>?
     /// 错误提示的自动消失计时器。
     private var errorExpiry: Task<Void, Never>?
     /// 网络代理页「拿到状态后跑一次访问检测」的开关，进页面置真、跑完置假。
     private var pendingAccessCheck = false
     /// 最近一次访问检测的时间，界面上用来显示「最近检测 xx:xx」。
-    @Published private(set) var lastAccessCheckAt: Date?
+    private(set) var lastAccessCheckAt: Date?
     private var activePassword: String?
     private var lastSuccessfulPoll: Date?
     private var lastReconnectAttempt: Date?

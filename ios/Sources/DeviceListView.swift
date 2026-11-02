@@ -19,7 +19,7 @@ import SwiftUI
 /// （用户原话：「删除这个弹窗弹出的位置不对，点铅笔编辑没反应」）。
 /// 自绘一层遮罩 + 卡片，位置永远落在这一屏正中，样式也和 App 的卡片统一。
 struct DeviceListView: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model: AppModel
     @Environment(\.dismiss) private var dismiss
 
     /// 正在改名的设备。非 nil 就把改名卡片浮起来。

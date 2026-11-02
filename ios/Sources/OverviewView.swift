@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct OverviewView: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model: AppModel
     /// 闪存卡的轨道色 / 图例点色要分深浅两档，所以这一页也得读主题。
     @Environment(\.colorScheme) private var colorScheme
     @State private var showAllDevices = false
@@ -562,8 +562,15 @@ struct InfoRow: View {
 private struct SpeedSparkline: View {
     let points: [HistoryPoint]
 
+    /// 峰值只跟数据有关。v2.2.0 从 draw 闭包里提到外面：闭包里算就是
+    /// 「每次重绘都做一遍 O(n)」，提到 body 里则跟着数据走（2 秒一次）。
+    private var peak: Double {
+        max(points.map { max($0.download, $0.upload) }.max() ?? 0, 1)
+    }
+
     var body: some View {
-        Canvas { context, size in
+        let peak = self.peak
+        return Canvas { context, size in
             guard size.width > 1, size.height > 1 else { return }
             guard points.count > 1 else {
                 // 刚连上还没攒够两个点：画一条淡基线，卡片高度不会跳。
@@ -575,8 +582,7 @@ private struct SpeedSparkline: View {
                 return
             }
 
-            // 两条线共用一个峰值，上下行的高低关系才看得出来。
-            let peak = max(points.map { max($0.download, $0.upload) }.max() ?? 0, 1)
+            // 两条线共用一个峰值，上下行的高低关系才看得出来（peak 在 body 里算好传进来）。
             let stepX = size.width / CGFloat(points.count - 1)
             let height = size.height - 2
 
@@ -607,6 +613,11 @@ private struct SpeedSparkline: View {
             context.stroke(path { $0.upload }, with: .color(.purple), style: line)
         }
         .frame(height: 76)
+        // v2.2.0：Canvas 是立即模式——SwiftUI 每次失效都重跑整段 draw 闭包，
+        // 滚动时 Content 位移也算失效，于是每帧都在重算两条折线 + 一块渐变。
+        // drawingGroup() 把它压成一个 Metal 离屏图层，滚动时只做位移合成。
+        // 这里没有文字，不会糊字；点数只有几十个，离屏开销可以忽略。
+        .drawingGroup()
         .accessibilityHidden(true)
     }
 }

@@ -49,9 +49,17 @@ private final class BounceTuningView: UIView {
     /// 上限：防止父链异常时死循环。
     private static let maxDepth = 12
 
+    /// 找到的滚动视图，缓存下来（弱持有：真被换掉就自动失效，重新爬链）。
+    /// v2.2.0 加的：`layoutSubviews` 在滚动/数据刷新时会被反复调用，
+    /// 每次都从 superview 往上爬三四层纯属白烧 CPU，缓存之后每次只读两个布尔值。
+    private weak var cachedScroll: UIScrollView?
+
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        guard window != nil else { return }
+        guard window != nil else {
+            cachedScroll = nil
+            return
+        }
         apply()
     }
 
@@ -63,17 +71,26 @@ private final class BounceTuningView: UIView {
     }
 
     func apply() {
+        if let scroll = cachedScroll {
+            tune(scroll)
+            return
+        }
         var node: UIView? = superview
         var depth = 0
         while let current = node, depth < Self.maxDepth {
             if let scroll = current as? UIScrollView {
-                // 只在确实需要时才写，避免每次布局都触发一次 setter。
-                if !scroll.bounces { scroll.bounces = true }
-                if scroll.alwaysBounceVertical { scroll.alwaysBounceVertical = false }
+                cachedScroll = scroll
+                tune(scroll)
                 return
             }
             node = current.superview
             depth += 1
         }
+    }
+
+    private func tune(_ scroll: UIScrollView) {
+        // 只在确实需要时才写，避免每次布局都触发一次 setter。
+        if !scroll.bounces { scroll.bounces = true }
+        if scroll.alwaysBounceVertical { scroll.alwaysBounceVertical = false }
     }
 }

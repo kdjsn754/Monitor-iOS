@@ -4,18 +4,18 @@ import UIKit
 @main
 @MainActor
 struct OpenWrtMonitorApp: App {
-    @StateObject private var model = AppModel()
+    @State private var model = AppModel()
 
     var body: some Scene {
         WindowGroup {
             RootView()
-                .environmentObject(model)
+                .environment(model)
         }
     }
 }
 
 struct RootView: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model: AppModel
     @Environment(\.scenePhase) private var scenePhase
     // v1.28.26：默认值从 "system" 改成 "light"——「跟随系统」选项已删，
     // 新装用户不该落在一个界面上根本不存在的状态上。
@@ -181,7 +181,7 @@ struct RootView: View {
 }
 
 struct MainTabs: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model: AppModel
     @State private var selection = 0
 
     var body: some View {
@@ -237,7 +237,7 @@ struct MainTabs: View {
 }
 
 struct LoginView: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model: AppModel
     @State private var label = ""
     @State private var host = ""
     @State private var port = "22"
