@@ -40,11 +40,6 @@ struct ProxyView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 14) {
-                    PageHeader("代理") {
-                        HeaderButton("arrow.clockwise") {
-                            Task { await model.manualRefresh() }
-                        }
-                    }
                     heroCard
                     liveCard
                     // 没装插件就不出现这张卡：它只会给一个必然打不开的入口。
@@ -53,9 +48,9 @@ struct ProxyView: View {
                     accessCard
                 }
                 .padding(.horizontal, 16)
-                // v2.3.2：顶部留白自己给（状态栏高度 + 4），配合下面 `.ignoresSafeArea(.container, edges: .top)`。
-                // 见 ScrollTuning.swift 的 SafeAreaMetrics：顶部安全区会随导航栏显隐变化，不能让它参与布局。
-                .padding(.top, 4 + SafeAreaMetrics.statusBarTop)
+                // v2.3.3：标题和刷新钮搬进导航栏（见 `pageChrome`），内容从栏下面开始，
+                // 这里 14 让第一张卡回到原来的 117pt。
+                .padding(.top, 14)
                 .padding(.bottom, 28)
                 // 滚动手感（见 ScrollTuning.swift，v2.1.18 起）：保留橡皮筋回弹，
                 // 只把「内容不到一屏也允许下拉」关掉——那正是「一下弹回去」的来源。
@@ -64,9 +59,6 @@ struct ProxyView: View {
             }
             // 和上面那句是同一件事的声明式写法（iOS 16.4+）：内容不足一屏时不回弹。
             .scrollBounceBehavior(.basedOnSize)
-            // v2.3.2 治「返回主页跳一下」：同 OverviewView，滚动视图不吃顶部安全区，
-            // 顶部留白由内容自己补（`.padding(.top, 4 + SafeAreaMetrics.statusBarTop)`）。
-            .ignoresSafeArea(.container, edges: .top)
             // 顶部「滚动边缘效果」（iOS 26）：内容滚到状态栏下面时由系统糊一层，
             // 标题就不会压在时间和信号上。v2.1.16 曾用 `.scrollEdgeEffectHidden(true, for: .top)`
             // 把它关掉（当时以为它能治下拉跳，其实不能），后果是概览页的「概览」直接叠在 15:41 上。
@@ -78,12 +70,12 @@ struct ProxyView: View {
             // 订阅编辑、切换连接那几页的开关照样是黑的），那些页面的开关必须各自显式 `.tint(.blue)`。
             .tint(.blue)
             .background(Color.clear)
-            // 见 OverviewView：标题画在内容里，导航栏整条不要。
-            .toolbar(.hidden, for: .navigationBar)
-            // 这一句只为 push 出去的页服务：根视图没有标题时，二级页左上角
-            // 只会显示一个光秃秃的返回箭头（还可能显示英文 Back）。标题设了但栏是隐的，
-            // 本页看不出任何变化。
-            .navigationTitle("代理")
+            // v2.3.3：同概览页，标题和刷新钮搬进导航栏，导航栏常驻（详见 Glass.swift 的 `pageChrome`）。
+            .pageChrome("代理") {
+                HeaderButton("arrow.clockwise") {
+                    Task { await model.manualRefresh() }
+                }
+            }
             // 不挂 .refreshable（v2.1.8）：导航栏整条被隐藏之后，系统下拉刷新控件
             // 没有导航栏可以依附，顶部 inset 只能由滚动视图自己估，于是下拉时内容
             // 被推下去约 60pt、松手再弹回，观感就是「页面跳一下」。这一页顶部本来

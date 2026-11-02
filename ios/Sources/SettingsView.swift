@@ -18,14 +18,6 @@ struct SettingsView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 14) {
-                    PageHeader("设置") {
-                        // 以前「重新连接」是路由器卡里的一个胶囊按钮，
-                        // 新版式跟参考图一样只留三个动作，就把它收到页头，
-                        // 和概览、网络代理两页的刷新按钮位置一致。
-                        HeaderButton("arrow.clockwise") {
-                            Task { await model.manualRefresh() }
-                        }
-                    }
                     routerCard
                         // 三个 sheet 挂在同一个视图上容易互相抢，网页后台这张挂到卡片上。
                         .sheet(isPresented: $showRouterWeb) {
@@ -44,8 +36,9 @@ struct SettingsView: View {
                     dangerCard
                 }
                 .padding(.horizontal, 16)
-                // v2.3.2：顶部留白自己给（状态栏高度 + 4），配合下面 `.ignoresSafeArea(.container, edges: .top)`。
-                .padding(.top, 4 + SafeAreaMetrics.statusBarTop)
+                // v2.3.3：标题和刷新钮搬进导航栏（见 `pageChrome`），内容从栏下面开始，
+                // 这里 14 让第一张卡回到原来的 117pt。
+                .padding(.top, 14)
                 .padding(.bottom, 32)
                 // 滚动手感（见 ScrollTuning.swift，v2.1.18 起）：保留橡皮筋回弹，
                 // 只把「内容不到一屏也允许下拉」关掉——那正是「一下弹回去」的来源。
@@ -54,9 +47,6 @@ struct SettingsView: View {
             }
             // 和上面那句是同一件事的声明式写法（iOS 16.4+）：内容不足一屏时不回弹。
             .scrollBounceBehavior(.basedOnSize)
-            // v2.3.2 治「返回主页跳一下」：同 OverviewView，滚动视图不吃顶部安全区，
-            // 顶部留白由内容自己补（`.padding(.top, 4 + SafeAreaMetrics.statusBarTop)`）。
-            .ignoresSafeArea(.container, edges: .top)
             // 顶部「滚动边缘效果」（iOS 26）：内容滚到状态栏下面时由系统糊一层，
             // 标题就不会压在时间和信号上。v2.1.16 曾用 `.scrollEdgeEffectHidden(true, for: .top)`
             // 把它关掉（当时以为它能治下拉跳，其实不能），后果是概览页的「概览」直接叠在 15:41 上。
@@ -68,8 +58,15 @@ struct SettingsView: View {
             // 订阅编辑、切换连接那几页的开关照样是黑的），那些页面的开关必须各自显式 `.tint(.blue)`。
             .tint(.blue)
             .background(Color.clear)
-            // 见 OverviewView：标题画在内容里，导航栏整条不要。
-            .toolbar(.hidden, for: .navigationBar)
+            // v2.3.3：同概览页，标题和刷新钮搬进导航栏，导航栏常驻（详见 Glass.swift 的 `pageChrome`）。
+            .pageChrome("设置") {
+                // 以前「重新连接」是路由器卡里的一个胶囊按钮，
+                // 新版式跟参考图一样只留三个动作，就把它收到页头，
+                // 和概览、网络代理两页的刷新按钮位置一致。
+                HeaderButton("arrow.clockwise") {
+                    Task { await model.manualRefresh() }
+                }
+            }
             .sheet(item: $editorRoute) { route in
                 ConnectionEditorView(profile: route.profile)
                     .id(route.id)

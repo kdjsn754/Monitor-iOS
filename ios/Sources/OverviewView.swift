@@ -19,31 +19,15 @@ struct OverviewView: View {
                 // 但滑到底部继续往上拖时，LazyVStack 会按估算高度补内容、松手再按真实高度
                 // 收回，于是「松手跳一下」。换成 VStack 后高度一次算清，不会再跳。
                 VStack(spacing: 14) {
-                    PageHeader("概览") {
-                        // 刷新期间按钮原地换成转圈（尺寸不变，避免标题行左右跳），
-                        // 同时拦掉连点——连点会让 SSH 串行队列里排满采集任务，
-                        // 表现就是「点了好几下才动一下」。
-                        if refreshing {
-                            ProgressView()
-                                .controlSize(.small)
-                                .frame(width: 38, height: 38)
-                        } else {
-                            HeaderButton("arrow.clockwise") {
-                                Task { await refresh() }
-                            }
-                        }
-                    }
                     header
                     ForEach(model.visibleModules) { module in
                         moduleView(module)
                     }
                 }
                 .padding(.horizontal, 16)
-                // v2.3.2：顶部留白自己给（状态栏高度 + 4），因为下面那句
-                // `.ignoresSafeArea(.container, edges: .top)` 让滚动视图顶到了屏幕最上面。
-                // 为什么非要把安全区摘掉：根页隐藏导航栏、二级页显示导航栏，返回时这个
-                // 顶部安全区被改了一次，UIScrollView 重算 inset 就会把内容夹一下 →「跳一下」。
-                .padding(.top, 4 + SafeAreaMetrics.statusBarTop)
+                // v2.3.3：标题和刷新钮搬进导航栏（见 `pageChrome`），内容从栏下面开始。
+                // 原来标题在内容里占到 103pt、第一张卡在 117pt，这里 14 把它顶回原处。
+                .padding(.top, 14)
                 .padding(.bottom, 28)
                 // 滚动手感（见 ScrollTuning.swift，v2.1.18 起）：保留橡皮筋回弹，
                 // 只把「内容不到一屏也允许下拉」关掉——那正是「一下弹回去」的来源。
@@ -52,12 +36,6 @@ struct OverviewView: View {
             }
             // 和上面那句是同一件事的声明式写法（iOS 16.4+）：内容不足一屏时不回弹。
             .scrollBounceBehavior(.basedOnSize)
-            // v2.3.2 治「返回主页跳一下」：滚动视图不吃顶部安全区，顶部留白由内容自己补
-            // （见上面 `.padding(.top, 4 + SafeAreaMetrics.statusBarTop)`）。
-            // 根因是 iOS 26 的 NavigationStack 在 push/pop 时改根页顶部安全区（导航栏显隐），
-            // UIScrollView 跟着重算 adjustedContentInset 并夹 contentOffset。安全区不参与布局了，
-            // 它怎么变都跟这一页无关。**别换成 `.safeAreaPadding` 或改 contentInset**（v2.3.0 的教训）。
-            .ignoresSafeArea(.container, edges: .top)
             // 顶部「滚动边缘效果」（iOS 26）：内容滚到状态栏下面时由系统糊一层，
             // 标题就不会压在时间和信号上。v2.1.16 曾用 `.scrollEdgeEffectHidden(true, for: .top)`
             // 把它关掉（当时以为它能治下拉跳，其实不能），后果是概览页的「概览」直接叠在 15:41 上。
@@ -69,20 +47,32 @@ struct OverviewView: View {
             // 订阅编辑、切换连接那几页的开关照样是黑的），那些页面的开关必须各自显式 `.tint(.blue)`。
             .tint(.blue)
             .background(Color.clear)
-            // 标题画在内容里了，导航栏整条不要：留着它状态栏下面会空出一整条。
-            .toolbar(.hidden, for: .navigationBar)
+            // v2.3.3：标题和刷新钮搬进导航栏，**导航栏必须一直显示**——
+            // 根页和二级页的顶部安全区一样大，push/pop 才没有可变的量（详见 Glass.swift 的 `pageChrome`）。
+            .pageChrome("概览") {
+                // 刷新期间按钮原地换成转圈（尺寸不变，避免标题行左右跳），
+                // 同时拦掉连点——连点会让 SSH 串行队列里排满采集任务，
+                // 表现就是「点了好几下才动一下」。
+                if refreshing {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(width: 38, height: 38)
+                } else {
+                    HeaderButton("arrow.clockwise") {
+                        Task { await refresh() }
+                    }
+                }
+            }
             // 这里曾经有 `.refreshable`（下拉刷新），v2.1.13 删掉。
             // 和代理页 v2.1.8 同一个根因：导航栏被 `.toolbar(.hidden)` 藏掉之后，
             // 系统的刷新控件没有导航栏可依附，顶部 inset 只能自己估——下拉时整页内容
             // 被推下去约 60pt、松手再弹回，手感就是「卡住又跳一下」。
             // 更糟的是它一下拉就触发一整轮 SSH 采集（`/traffic` 是流式接口，至少一秒才吐第一行），
             // 采集回来又是一次全页重排，正好撞在手指还在拖的那几帧上。
-            // 刷新入口保留在右上角按钮（见 PageHeader），功能不缺。
+            // 刷新入口保留在导航栏右上角那颗按钮（v2.3.3 起由 `pageChrome` 挂上去），功能不缺。
             .sheet(isPresented: $showAllDevices) {
                 DeviceListView()
             }
-            // 返回按钮的文案取上一页的标题，这里给一个（导航栏本身是隐藏的，不会显示出来）。
-            .navigationTitle("概览")
             .navigationDestination(isPresented: $showFanControl) {
                 // v2.1.16 起二级页**不再** `.toolbar(.hidden, for: .tabBar)`。
                 // 之前藏掉底栏，返回时系统要把它重新显示，那一下动画在 iOS 26 的玻璃底栏上

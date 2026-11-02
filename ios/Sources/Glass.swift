@@ -171,6 +171,8 @@ extension View {
 /// 系统大标题占的位置很死：状态栏 59pt + 导航栏 44pt + 标题，标题顶边要到屏幕
 /// 109pt 才出现，中间那几十 pt 全是空白。自己排之后标题顶边在 63pt 左右，
 /// 省下将近 46pt，也不会再有导航栏那条材质和内容之间的接缝。
+/// **v2.3.3 起三个根页都不再用它**（标题搬进了导航栏，见 `pageChrome`），
+/// 但版式数值留在这儿：30pt 粗体 + `tracking(-0.4)`，`pageChrome` 里那枚标题就是照它写的。
 struct PageHeader<Trailing: View>: View {
     private let title: String
     private let trailing: Trailing
@@ -199,6 +201,54 @@ struct PageHeader<Trailing: View>: View {
 extension PageHeader where Trailing == EmptyView {
     init(_ title: String) {
         self.init(title) { EmptyView() }
+    }
+}
+
+// MARK: - 页头搬进导航栏（v2.3.3）
+
+/// 三个根页（概览 / 代理 / 设置）原来把 30pt 大标题画在滚动内容里，同时用
+/// `.toolbar(.hidden, for: .navigationBar)` 把整条导航栏藏掉。
+///
+/// **v2.3.3 起改成「导航栏一直在，标题和右上角按钮挂在栏里」**：视觉几乎不动
+/// （同一枚 30pt 粗体、同一颗 `HeaderButton`、卡片起始位置照旧——原来标题在内容里占的
+/// 那 40pt，正好被 44pt 导航栏接住），但把「返回主页跳一下 / 下拉跳一下」的病根拔掉了。
+///
+/// 病根是什么：根页藏栏时顶部安全区 = 状态栏（59pt），二级页显栏时 = 59 + 44（103pt）。
+/// push/pop 之间这个值被改一次，`UIScrollView` 就重算 `adjustedContentInset` 并把
+/// `contentOffset` 夹一下 —— 一帧位移、没有过渡，看着就是「跳」。
+/// 前两版的下场记在这儿，别再走：
+/// - v2.3.0 冻结 `contentInset`：跳压住了，但整片界面触控错位（覆盖层没跟着挪）。
+/// - v2.3.2 给滚动视图加 `.ignoresSafeArea(.container, edges: .top)`：标题被 iOS 26 的
+///   顶部柔边糊掉，而且 SwiftUI 底层照样按安全区调 inset，跳还在。
+/// 现在导航栏**永远在**：根页和二级页的顶部安全区一样大，push/pop 没有可变的量。
+extension View {
+    /// 把页头标题 + 右侧按钮挂到系统导航栏上（三个根页统一用它）。
+    func pageChrome<Trailing: View>(_ title: String,
+                                    @ViewBuilder trailing: () -> Trailing) -> some View {
+        self
+            // 这串标题只用于给二级页的返回按钮取文案（左上角显示「‹ 概览」）。
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar(.visible, for: .navigationBar)
+            .toolbar {
+                // 唯一一枚标题：30pt 左对齐，和原来 `PageHeader` 里那枚完全一致。
+                ToolbarItem(placement: .topBarLeading) {
+                    Text(title)
+                        .font(.system(size: 30, weight: .bold))
+                        .tracking(-0.4)
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+                // 1×1 透明片顶在 .principal 上，把系统那枚 17pt 居中标题压掉，
+                // 否则会并排出现两个「概览」（v2.1.14 被否的原因之一就是那枚变小又居中的标题）。
+                ToolbarItem(placement: .principal) {
+                    Color.clear.frame(width: 1, height: 1)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    trailing()
+                }
+            }
     }
 }
 
