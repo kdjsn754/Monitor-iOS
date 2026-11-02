@@ -19,20 +19,6 @@ struct OverviewView: View {
                 // 但滑到底部继续往上拖时，LazyVStack 会按估算高度补内容、松手再按真实高度
                 // 收回，于是「松手跳一下」。换成 VStack 后高度一次算清，不会再跳。
                 VStack(spacing: 14) {
-                    PageHeader("概览") {
-                        // 刷新期间按钮原地换成转圈（尺寸不变，避免标题行左右跳），
-                        // 同时拦掉连点——连点会让 SSH 串行队列里排满采集任务，
-                        // 表现就是「点了好几下才动一下」。
-                        if refreshing {
-                            ProgressView()
-                                .controlSize(.small)
-                                .frame(width: 38, height: 38)
-                        } else {
-                            HeaderButton("arrow.clockwise") {
-                                Task { await refresh() }
-                            }
-                        }
-                    }
                     header
                     ForEach(model.visibleModules) { module in
                         moduleView(module)
@@ -43,20 +29,41 @@ struct OverviewView: View {
                 .padding(.bottom, 28)
             }
             .background(Color.clear)
-            // 标题画在内容里了，导航栏整条不要：留着它状态栏下面会空出一整条。
-            .toolbar(.hidden, for: .navigationBar)
-            // 这里曾经有 `.refreshable`（下拉刷新），v2.1.13 删掉。
-            // 和代理页 v2.1.8 同一个根因：导航栏被 `.toolbar(.hidden)` 藏掉之后，
-            // 系统的刷新控件没有导航栏可依附，顶部 inset 只能自己估——下拉时整页内容
-            // 被推下去约 60pt、松手再弹回，手感就是「卡住又跳一下」。
-            // 更糟的是它一下拉就触发一整轮 SSH 采集（`/traffic` 是流式接口，至少一秒才吐第一行），
-            // 采集回来又是一次全页重排，正好撞在手指还在拖的那几帧上。
-            // 刷新入口保留在右上角按钮（见 PageHeader），功能不缺。
+            // v2.1.14：导航栏不再整条藏掉，标题交给系统。
+            // 老做法（`.toolbar(.hidden)` + 自绘 PageHeader）有两个止不住的毛病：
+            // ① push 子页时导航栏是「显示」的，pop 回来父页要把它重新藏起来，
+            //    转场里就会闪一条出来；
+            // ② 导航栏一隐，滚动视图的顶部 inset 由系统自己估，下拉时内容整体
+            //    被推一下，回弹又是一下，手感就是「跳」。
+            // 让导航栏常驻，这两个问题一起消失。
+            .navigationTitle("概览")
+            // 用 inline（标题居中、17pt）而不是 large：large 的标题顶边要到屏幕 109pt
+            // 才出现，顶部会白空 56pt。inline 的导航栏 44pt 正好接住原来 PageHeader 的位置，
+            // 整体高度只多 4pt。
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    // 刷新期间按钮原地换成转圈（宽度固定，标题栏不跳），
+                    // 同时拦掉连点——连点会让 SSH 串行队列里排满采集任务，
+                    // 表现就是「点了好几下才动一下」。
+                    if refreshing {
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(width: 24, height: 24)
+                    } else {
+                        Button {
+                            Task { await refresh() }
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        .navBarTint()
+                        .accessibilityLabel("刷新")
+                    }
+                }
+            }
             .sheet(isPresented: $showAllDevices) {
                 DeviceListView()
             }
-            // 返回按钮的文案取上一页的标题，这里给一个（导航栏本身是隐藏的，不会显示出来）。
-            .navigationTitle("概览")
             .navigationDestination(isPresented: $showFanControl) {
                 // 风扇页收起原生底栏：不收的话「应用到路由器」会被玻璃栏压着。
                 FanControlView()

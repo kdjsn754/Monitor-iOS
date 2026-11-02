@@ -13,19 +13,13 @@ struct SettingsView: View {
     @State private var showRouterWeb = false
     /// 切换连接的半屏选择器（自绘，不再用系统的列表/菜单）。
     @State private var showSwitcher = false
+    /// 手动刷新的进行中标记：只用来把导航栏按钮换成转圈 + 拦连点。
+    @State private var refreshing = false
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 14) {
-                    PageHeader("设置") {
-                        // 以前「重新连接」是路由器卡里的一个胶囊按钮，
-                        // 新版式跟参考图一样只留三个动作，就把它收到页头，
-                        // 和概览、网络代理两页的刷新按钮位置一致。
-                        HeaderButton("arrow.clockwise") {
-                            Task { await model.manualRefresh() }
-                        }
-                    }
                     routerCard
                         // 三个 sheet 挂在同一个视图上容易互相抢，网页后台这张挂到卡片上。
                         .sheet(isPresented: $showRouterWeb) {
@@ -48,8 +42,28 @@ struct SettingsView: View {
                 .padding(.bottom, 32)
             }
             .background(Color.clear)
-            // 见 OverviewView：标题画在内容里，导航栏整条不要。
-            .toolbar(.hidden, for: .navigationBar)
+            // 见 OverviewView 顶部那段注释：v2.1.14 起导航栏不再隐藏。
+            // 以前「重新连接」是路由器卡里的一个胶囊按钮，版本迭代中收到了页头，
+            // 现在收进导航栏右上角，和概览、代理两页的位置一致。
+            .navigationTitle("设置")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    if refreshing {
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(width: 24, height: 24)
+                    } else {
+                        Button {
+                            Task { await refresh() }
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        .navBarTint()
+                        .accessibilityLabel("刷新")
+                    }
+                }
+            }
             .sheet(item: $editorRoute) { route in
                 ConnectionEditorView(profile: route.profile)
                     .id(route.id)
@@ -65,6 +79,15 @@ struct SettingsView: View {
                 Button("取消", role: .cancel) {}
             }
         }
+    }
+
+    /// 导航栏刷新按钮的动作：只负责「转圈 + 防连点」。
+    /// 采集逻辑全在 `model.manualRefresh()` 里，别在这儿另开一条采集路径。
+    private func refresh() async {
+        guard !refreshing else { return }
+        refreshing = true
+        await model.manualRefresh()
+        refreshing = false
     }
 
     // MARK: - 路由器（当前连接 + 三个动作 + 网页后台）
@@ -525,6 +548,7 @@ private struct RouterSwitcherSheet: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("关闭") { dismiss() }
+                        .navBarTint()
                 }
             }
         }
@@ -777,6 +801,7 @@ private struct ConnectionEditorView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("取消") { dismiss() }
+                        .navBarTint()
                 }
             }
         }

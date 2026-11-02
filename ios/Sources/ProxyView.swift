@@ -10,6 +10,8 @@ struct ProxyView: View {
     @State private var showConfigPicker = false
     @State private var showAddSubscription = false
     @State private var isChecking = false
+    /// 手动刷新的进行中标记：只用来把导航栏按钮换成转圈 + 拦连点，不参与数据逻辑。
+    @State private var refreshing = false
 
     private var oc: OpenClashInfo { model.openClash }
     private var metrics: OpenClashMetrics { model.ocMetrics }
@@ -40,11 +42,6 @@ struct ProxyView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 14) {
-                    PageHeader("代理") {
-                        HeaderButton("arrow.clockwise") {
-                            Task { await model.manualRefresh() }
-                        }
-                    }
                     heroCard
                     liveCard
                     // 没装插件就不出现这张卡：它只会给一个必然打不开的入口。
@@ -57,17 +54,31 @@ struct ProxyView: View {
                 .padding(.bottom, 28)
             }
             .background(Color.clear)
-            // 见 OverviewView：标题画在内容里，导航栏整条不要。
-            .toolbar(.hidden, for: .navigationBar)
-            // 这一句只为 push 出去的页服务：根视图没有标题时，二级页左上角
-            // 只会显示一个光秃秃的返回箭头（还可能显示英文 Back）。标题设了但栏是隐的，
-            // 本页看不出任何变化。
+            // 见 OverviewView 顶部那段注释：v2.1.14 起导航栏不再隐藏，
+            // 标题交给系统，「返回时导航栏闪一下」和「下拉跳一下」都出在这里。
             .navigationTitle("代理")
-            // 不挂 .refreshable（v2.1.8）：导航栏整条被隐藏之后，系统下拉刷新控件
-            // 没有导航栏可以依附，顶部 inset 只能由滚动视图自己估，于是下拉时内容
-            // 被推下去约 60pt、松手再弹回，观感就是「页面跳一下」。这一页顶部本来
-            // 就有一颗刷新按钮（PageHeader 的 arrow.clockwise），下拉是重复入口。
-            // 刷新只在右上角按钮里做。
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    if refreshing {
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(width: 24, height: 24)
+                    } else {
+                        Button {
+                            Task { await refresh() }
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        .navBarTint()
+                        .accessibilityLabel("刷新")
+                    }
+                }
+            }
+            // 不挂 .refreshable：v2.1.8 删它是因为导航栏被 `.toolbar(.hidden)` 藏掉后
+            // 刷新控件没有导航栏可依附、下拉时内容被推下去约 60pt 再弹回。
+            // v2.1.14 导航栏已经常驻，技术上能加回来了，但这一页的刷新入口本来就在
+            // 右上角（`arrow.clockwise`），下拉是重复入口，暂时不加。
             // 订阅条数要显示在配置卡的副标题里，进页面就先读一次；
             // 刚连上时状态还没到、上面这一次会直接返回，所以再挂一个 onChange 补读。
             .task { await model.loadSubscriptions(silent: true) }
@@ -94,6 +105,15 @@ struct ProxyView: View {
                 SubscriptionEditView(subscription: nil)
             }
         }
+    }
+
+    /// 导航栏刷新按钮的动作：只负责「转圈 + 防连点」。
+    /// 采集逻辑全在 `model.manualRefresh()` 里，别在这儿另开一条采集路径。
+    private func refresh() async {
+        guard !refreshing else { return }
+        refreshing = true
+        await model.manualRefresh()
+        refreshing = false
     }
 
     // MARK: - 状态、操作与控制面板
@@ -713,8 +733,8 @@ private struct ProxyConfigView: View {
         .listSectionSpacing(.compact)
         .navigationTitle("代理配置")
         .navigationBarTitleDisplayMode(.inline)
-        // 代理页把整条导航栏藏了，push 进来的页必须自己显式要回来，
-        // 否则会被上层的隐藏状态带下去（交接 7.1）。
+        // v2.1.14 起代理页不再隐藏导航栏，这一句已是冗余；保留是为了不依赖上层状态
+        // （以前代理页藏导航栏时，push 进来的页会被一起带下去，交接 7.1）。
         .toolbar(.visible, for: .navigationBar)
         // 二级页收起底栏，和风扇控制页一致。
         .toolbar(.hidden, for: .tabBar)
@@ -728,6 +748,7 @@ private struct ProxyConfigView: View {
                 } label: {
                     Text("订阅")
                 }
+                .navBarTint()
             }
         }
         .task { model.clearNotice() }
@@ -906,6 +927,7 @@ private struct SubscriptionListView: View {
                 } label: {
                     Text("添加")
                 }
+                .navBarTint()
             }
         }
         .navigationDestination(item: $editing) { sub in
@@ -1224,6 +1246,7 @@ private struct SubscriptionEditView: View {
                     Task { await saveAndUpdate(keepOpen: false) }
                 }
                 .disabled(!canSave || saving || model.subsBusy != nil)
+                .navBarTint()
             }
         }
         .onAppear { model.clearNotice() }

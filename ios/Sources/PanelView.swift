@@ -43,6 +43,7 @@ struct PanelView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("关闭") { dismiss() }
+                        .navBarTint()
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
@@ -50,6 +51,7 @@ struct PanelView: View {
                     } label: {
                         Image(systemName: "arrow.clockwise")
                     }
+                    .navBarTint()
                 }
             }
         }

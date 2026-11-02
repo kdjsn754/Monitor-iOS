@@ -62,6 +62,7 @@ struct FanControlView: View {
                         .font(.system(size: 15, weight: .semibold))
                 }
                 .disabled(model.fanBusy)
+                .navBarTint()
                 .accessibilityLabel("刷新风扇状态")
             }
         }
