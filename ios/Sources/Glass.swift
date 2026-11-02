@@ -232,6 +232,12 @@ extension View {
             .toolbar(.visible, for: .navigationBar)
             .toolbar {
                 // 唯一一枚标题：30pt 左对齐，和原来 `PageHeader` 里那枚完全一致。
+                //
+                // ⚠️ `.sharedBackgroundVisibility(.hidden)` 一句都不能少（iOS 26）：
+                // 系统默认会给导航栏里的每一项**自动套一层玻璃胶囊**（同一组还共用一层）。
+                // v2.3.3 第一次上机就是这个下场：30pt 的「概览」被包成一颗药丸、刷新圆钮
+                // 外面又套一圈，用户原话「这标题和刷新太丑了」。隐藏掉之后才是裸文字 / 裸圆钮，
+                // 和原来画在内容里的页头一模一样。见 7.1.2。
                 ToolbarItem(placement: .topBarLeading) {
                     Text(title)
                         .font(.system(size: 30, weight: .bold))
@@ -240,14 +246,19 @@ extension View {
                         .lineLimit(1)
                         .fixedSize()
                 }
+                .sharedBackgroundVisibility(.hidden)
+
                 // 1×1 透明片顶在 .principal 上，把系统那枚 17pt 居中标题压掉，
                 // 否则会并排出现两个「概览」（v2.1.14 被否的原因之一就是那枚变小又居中的标题）。
                 ToolbarItem(placement: .principal) {
                     Color.clear.frame(width: 1, height: 1)
                 }
+                .sharedBackgroundVisibility(.hidden)
+
                 ToolbarItem(placement: .topBarTrailing) {
                     trailing()
                 }
+                .sharedBackgroundVisibility(.hidden)
             }
     }
 }
