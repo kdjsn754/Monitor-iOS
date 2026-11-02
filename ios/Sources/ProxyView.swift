@@ -88,7 +88,9 @@ struct ProxyView: View {
                 guard loaded else { return }
                 Task { await model.loadSubscriptions(silent: true) }
             }
-            .sheet(isPresented: $showPanel) {
+            // 控制面板改 fullScreenCover（v2.3.5，用户要求全屏）：WebView 自带导航栏
+            // 和「关闭」钮，盖住底栏反而更像「进了面板」；半屏 sheet 会露出底下的页面。
+            .fullScreenCover(isPresented: $showPanel) {
                 if let url = oc.panelURL {
                     PanelView(url: url)
                 }
@@ -330,7 +332,7 @@ struct ProxyView: View {
                 // 这条橙字挂在卡底：它说的是整条内核接口（端口 / 面板密码），
                 // 流量和下面四项一起受影响，塞到任何一半下面都只说对一半。
                 if oc.running, !metrics.apiReachable {
-                    Label("读不到内核接口：端口 \(oc.panelPort) 无响应，或控制面板密码不一致。数字会停在上一次的值。",
+                    Label("面板端口 \(oc.panelPort) 无响应，或面板密码不一致，数字停在旧值。",
                           systemImage: "exclamationmark.triangle.fill")
                         .font(.caption2)
                         .foregroundStyle(.orange)

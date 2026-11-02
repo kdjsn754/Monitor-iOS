@@ -19,8 +19,9 @@ struct SettingsView: View {
             ScrollView {
                 VStack(spacing: 14) {
                     routerCard
-                        // 三个 sheet 挂在同一个视图上容易互相抢，网页后台这张挂到卡片上。
-                        .sheet(isPresented: $showRouterWeb) {
+                        // 三个弹窗挂在同一个视图上容易互相抢，网页后台这张挂到卡片上。
+                        // fullScreenCover（v2.3.5，用户要求全屏）：和代理页控制面板一致。
+                        .fullScreenCover(isPresented: $showRouterWeb) {
                             if let url = model.routerWebURL {
                                 PanelView(
                                     url: url,
