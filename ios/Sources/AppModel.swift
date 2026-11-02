@@ -86,8 +86,15 @@ final class AppModel {
     /// 路由器上的订阅列表（UCI `config_subscribe`）。只在打开配置弹窗时读一次，
     /// 不跟着轮询：订阅是低频数据，改一次才动一次。
     var subscriptions: [ProxySubscription] = []
-    /// 正在更新的订阅名；`"all"` 表示「全部更新」。nil = 空闲。
+    /// 正在更新的订阅名；nil = 空闲。
     private(set) var subsBusy: String?
+    /// 用户刚在本地改过、路由器还没确认的开关状态（键 = UCI 段名）。
+    ///
+    /// 读列表是异步的：点开关的同时如果正好有一次 `loadSubscriptions` 在飞，
+    /// 它带回来的是**改之前**的值，回来就把刚关掉的开关又打开——真机上表现为
+    /// 「第一次进这页，开关关了它自己又打开」。这里把未确认的改动压住，
+    /// 直到某次读列表真的读回同一个值才放手。
+    private var pendingEnabled: [String: Bool] = [:]
     private(set) var subsLoaded = false
     /// 弹窗里的操作结果（成功/失败/进行中的说明）。见 `Notice` 的注释：
     /// 弹窗里没有系统 alert 可用，`errorMessage` 又只在登录页/设置页渲染，
@@ -703,8 +710,8 @@ final class AppModel {
 
     // MARK: - SSH
 
-    func execute(_ command: String) async throws -> String {
-        try await ssh.execute(command)
+    func execute(_ command: String, timeout: TimeInterval = 30) async throws -> String {
+        try await ssh.execute(command, timeout: timeout)
     }
 
     // MARK: - Polling
@@ -1094,7 +1101,20 @@ final class AppModel {
         do {
             let sections = parseSections(try await execute(subscriptionsCommand))
             guard sections["OCSUBS"] != nil else { return }
-            subscriptions = parseSubscriptions(sections["OCSUBS"] ?? "")
+            var parsed = parseSubscriptions(sections["OCSUBS"] ?? "")
+            // 还没落盘的开关改动优先：读回来是旧值就按用户点的那个走，
+            // 读回来跟他点的一致说明路由器已经替我们保存好了，这才放手。
+            var confirmed: [String] = []
+            for (id, on) in pendingEnabled {
+                guard let index = parsed.firstIndex(where: { $0.id == id }) else { continue }
+                if parsed[index].enabled == on {
+                    confirmed.append(id)
+                } else {
+                    parsed[index].enabled = on
+                }
+            }
+            for id in confirmed { pendingEnabled[id] = nil }
+            subscriptions = parsed
             subsLoaded = true
         } catch {
             if !silent { presentError(describe(error)) }
@@ -1178,15 +1198,25 @@ final class AppModel {
     }
 
     /// 开关只影响「全部更新」是否带上它，不改当前运行状态。
+    ///
+    /// 顺序很讲究：先动本地数组（开关要跟手），再压一条「待确认」，
+    /// 然后才发 UCI。以前只做前两步里的一半，正好撞上异步读列表，
+    /// 旧值回来就把开关又拨回去——看着像「关了它自己又开」。
     func setSubscriptionEnabled(_ sub: ProxySubscription, _ enabled: Bool) async {
         guard connected else { return }
-        // 先动本地数组：开关要立刻跟手，不然等一轮 SSH 回来才跳。
         if let index = subscriptions.firstIndex(where: { $0.id == sub.id }) {
             subscriptions[index].enabled = enabled
         }
+        pendingEnabled[sub.id] = enabled
         do {
-            _ = try await execute(subscriptionEnableCommand(sub, on: enabled))
+            let output = try await execute(subscriptionEnableCommand(sub, on: enabled))
+            guard output.contains("saved") else {
+                throw AppError.message("路由器没有确认这次写入")
+            }
+            // 写完立刻读一次：确认落盘，也顺手把「待确认」放掉。
+            await loadSubscriptions(silent: true)
         } catch {
+            pendingEnabled[sub.id] = nil
             if let index = subscriptions.firstIndex(where: { $0.id == sub.id }) {
                 subscriptions[index].enabled = !enabled
             }
@@ -1194,77 +1224,69 @@ final class AppModel {
         }
     }
 
-    /// 更新订阅：下载丢到路由器后台跑，再用一条很轻的命令轮询结果。
+    /// 更新订阅：**一条一条地在路由器前台跑** `openclash.sh`，每条都带硬超时。
     ///
-    /// 不能同步执行——一条 `openclash.sh` 要 curl 十几秒到几分钟，
-    /// 而 SSH 通道读超时是 30 秒，同步跑必然「读取 SSH 输出超时」，
-    /// 用户在界面上等了半天，最后只看到一条超时错误。
+    /// v2.3.7 之前是「丢到路由器后台 + 轮询 `/tmp/oc_sub_rc`」。那套有两个死穴，
+    /// 正好对上真机上的两个现象：
+    ///
+    /// 1. 后台进程写完 `rc` 才算结束，可它一旦卡在 `openclash.sh` 内部的 curl 上
+    ///    （地址连不通、机场不响应），`rc` 永远不出现 —— 界面就一直转圈；
+    /// 2. 后台进程在 SSH 通道关掉后不一定活得下来（dropbear / busybox 没有 nohup 时），
+    ///    连日志都留不下，只能看到「更新超时」四个字。
+    ///
+    /// 现在每条订阅单独一条命令、前台跑完再返回：能拿到脚本的 `exit_code`
+    /// （OpenClash 就是用它告诉 LuCI 成功与否）、`/etc/openclash/config/<name>.yaml`
+    /// 的新时间戳，以及这次新增的 `/tmp/openclash.log` 原文 —— 失败原因直接摊在红条里。
+    /// 代价是这条命令会占着 SSH 通道几十秒（读超时按条放宽到 60 秒）。
     func updateSubscriptions(_ targets: [ProxySubscription], restart: Bool = false) async {
         guard !targets.isEmpty, subsBusy == nil, connected else { return }
-        let label = targets.count == 1 ? targets[0].name : "\(targets.count) 个订阅"
-        subsBusy = targets.count == 1 ? targets[0].name : "all"
-        notice = Notice(kind: .info, title: "正在更新「\(label)」",
-                        detail: "已交给路由器后台下载，通常 10~30 秒。")
         defer { subsBusy = nil }
 
-        do {
-            _ = try await execute(subscriptionUpdateStartCommand(targets.map(\.name)))
-            var code: String?
-            for _ in 0..<150 {
-                try? await Task.sleep(for: .milliseconds(1200))
-                let poll = (try? await execute(subscriptionUpdatePollCommand))?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                if !poll.isEmpty, poll != "running" {
-                    code = poll
-                    break
-                }
-            }
-            guard let code else {
-                notice = Notice(kind: .fail, title: "「\(label)」更新超时",
-                                detail: "订阅可能还在路由器后台下载，过一会儿回列表刷新看看。")
-                await loadSubscriptions(silent: true)
-                return
-            }
-            // 不管成败都翻一下日志：成功时能看出「替换了」还是「没变化」，
-            // 失败时直接把最后两行摊给用户，省得再 SSH 上去看。
-            let diag = ((try? await execute(subscriptionDiagCommand)) ?? "")
-            let head = diag.components(separatedBy: "@@ENV")
-            let rest = head.count > 1 ? head[1].components(separatedBy: "@@OCLOG") : []
-            let log = head[0].trimmingCharacters(in: .whitespacesAndNewlines)
-            let env = rest.isEmpty ? "" : rest[0].trimmingCharacters(in: .whitespacesAndNewlines)
-            let ocLog = rest.count > 1 ? rest[1].trimmingCharacters(in: .whitespacesAndNewlines) : ""
-            if code != "0" {
-                // 三种情况分开说，别一律糊成「检查订阅地址」：
-                // 有 stderr 就是脚本自己报的错；插件日志里有记录说明脚本跑到了；
-                // 两边都空才是「压根没跑起来」。
-                let reason: String
-                if !log.isEmpty {
-                    reason = log
-                } else if ocLog.contains(label) {
-                    reason = ocLog
-                } else if !env.isEmpty {
-                    reason = "路由器没跑起来更新脚本（\(env.replacingOccurrences(of: "\n", with: "，"))）"
+        var finished = 0
+        var replaced = 0
+        var problems: [String] = []
+
+        for (index, sub) in targets.enumerated() {
+            subsBusy = sub.name
+            let step = targets.count > 1 ? "（\(index + 1)/\(targets.count)）" : ""
+            notice = Notice(kind: .info,
+                            title: "正在更新「\(sub.name)」\(step)",
+                            detail: "路由器正在下载并校验配置，通常 5~30 秒。")
+            do {
+                let output = try await execute(subscriptionDownloadCommand(sub.name), timeout: 60)
+                let result = parseSubscriptionDownload(output)
+                if result.ok {
+                    finished += 1
+                    if !result.noChange { replaced += 1 }
                 } else {
-                    reason = "路由器没有返回任何输出，检查订阅地址，或者路由器能不能上网"
+                    problems.append("「\(sub.name)」\(result.reason)")
                 }
-                notice = Notice(kind: .fail, title: "「\(label)」更新失败", detail: reason)
-            } else {
-                var detail = log.contains("No Change")
-                    ? "没有变化，配置文件没被替换"
-                    : "配置文件已替换"
-                if restart {
-                    // 替换的正是当前在跑的那份，内核不重启就不会生效。
-                    _ = try? await execute("/etc/init.d/openclash restart >/dev/null 2>&1; echo done")
-                    detail += "；内核已重启"
-                }
-                notice = Notice(kind: .ok, title: "「\(label)」更新完成", detail: detail)
+            } catch {
+                problems.append("「\(sub.name)」\(describe(error))")
             }
+            // 每跑完一条就刷一次列表：成功的那条立刻从「还没下载」变成「刚刚更新」。
             await loadSubscriptions(silent: true)
-            await refreshOpenClash()
-        } catch {
-            notice = Notice(kind: .fail, title: "「\(label)」更新中断", detail: describe(error))
-            presentError(describe(error))
         }
+
+        if problems.isEmpty {
+            // 逐条跑的时候成败可能掺着来：只要有一条真的换了文件就算「已替换」。
+            var detail = replaced > 0 ? "配置文件已替换" : "配置没有变化，文件没被替换"
+            if restart {
+                // 替换的正是当前在跑的那份，内核不重启就不会生效。
+                _ = try? await execute("/etc/init.d/openclash restart >/dev/null 2>&1; echo done", timeout: 60)
+                detail += "；内核已重启"
+            }
+            notice = Notice(kind: .ok,
+                            title: targets.count == 1 ? "「\(targets[0].name)」更新完成"
+                                                      : "\(finished) 个订阅更新完成",
+                            detail: detail)
+        } else {
+            let title = targets.count == 1
+                ? "「\(targets[0].name)」更新失败"
+                : "\(problems.count) 个订阅没更新成功"
+            notice = Notice(kind: .fail, title: title, detail: problems.joined(separator: "\n"))
+        }
+        await refreshOpenClash()
     }
 
     private func action(_ command: String, title: String, subtitle: String) async {
@@ -1655,6 +1677,70 @@ final class AppModel {
         }
         commit()
         return result
+    }
+
+    /// 一次订阅下载的结果。`ok` 认的是 `openclash.sh` 的 exit_code——
+    /// 它最后那行 `exit $exit_code` 就是给 LuCI 判断成败用的，我们照抄同一套标准。
+    private struct SubscriptionDownload {
+        var ok = false
+        var noChange = false
+        var reason = ""
+    }
+
+    private func parseSubscriptionDownload(_ output: String) -> SubscriptionDownload {
+        let sections = parseSections(output)
+        func section(_ key: String) -> String {
+            (sections[key] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let code = section("RC")
+        let ocLog = section("OCLOG")
+        let subLog = section("SUBLOG")
+        if code == "0" {
+            return SubscriptionDownload(ok: true, noChange: ocLog.contains("No Change"))
+        }
+        return SubscriptionDownload(ok: false, noChange: false,
+                                    reason: subscriptionFailureReason(ocLog, subLog, code: code))
+    }
+
+    /// 把 OpenClash 的日志翻译成一句人话。
+    ///
+    /// 这些话都是 `openclash.sh` 里写死的：
+    /// - `Unable To Parse Config File` / `Format Validation Failed` → 下载回来的不是 Clash 配置；
+    /// - `Has No Proxy Field` → YAML 能读但没有 `proxies`，说明是普通订阅链接没转换；
+    /// - `Subscribed Failed` / `Update Error` → 连不上地址或被机场拒；
+    /// - `Tested Failed` → 校验配置时内核报错。
+    /// 认不出来就把日志最后两行原样贴出来，别再让用户猜。
+    private func subscriptionFailureReason(_ ocLog: String, _ subLog: String, code: String) -> String {
+        let text = (ocLog + "\n" + subLog).lowercased()
+        if code == "127" {
+            return "没在这台路由器上找到 OpenClash 的更新脚本"
+        }
+        if text.contains("unable to parse config file") || text.contains("format validation failed") {
+            return "地址返回的不是 Clash 配置（YAML 解析失败），这条多半要在网页后台打开「订阅转换」"
+        }
+        if text.contains("has no proxy field") {
+            return "配置里没有 proxies 字段，订阅链接需要先转换"
+        }
+        if text.contains("ruby works abnormally") {
+            return "路由器缺 ruby 库，配置校验没跑起来"
+        }
+        if text.contains("tested failed") {
+            return "内核校验配置没通过：" + tailLines(ocLog, 2)
+        }
+        if text.contains("subscribed failed") || text.contains("update error") {
+            return "下载失败：路由器连不上这个地址，或被机场拒绝（UA / 证书）"
+        }
+        let tail = tailLines(ocLog + "\n" + subLog, 3)
+        return tail.isEmpty ? "脚本返回 \(code)，日志里没有更多信息"
+                            : "脚本返回 \(code)：\(tail)"
+    }
+
+    /// 取最后几行非空内容，用「 / 」连起来，塞进提示条时不会撑成一长条。
+    private func tailLines(_ text: String, _ count: Int) -> String {
+        let lines = text.split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        return lines.suffix(count).joined(separator: " / ")
     }
 
     private func buildPanelURL(_ info: OpenClashInfo) -> URL? {
@@ -2295,8 +2381,18 @@ private extension AppModel {
           uci -q get "openclash.$s.keyword" 2>/dev/null | while IFS= read -r line; do [ -n "$line" ] && echo "K|$line"; done
           uci -q get "openclash.$s.ex_keyword" 2>/dev/null | while IFS= read -r line; do [ -n "$line" ] && echo "X|$line"; done
           n=$(uci -q get "openclash.$s.name" 2>/dev/null)
-          if [ -n "$n" ] && [ -f "/etc/openclash/config/$n.yaml" ]; then
-            echo "T|$(stat -c %Y "/etc/openclash/config/$n.yaml" 2>/dev/null)"
+          if [ -n "$n" ]; then
+            for ext in yaml yml; do
+              f="/etc/openclash/config/$n.$ext"
+              if [ -f "$f" ]; then
+                # stat -c 在个别固件上没有，退回 date -r；两个都拿不到就不输出，
+                # 列表里显示「还没下载」，好歹不会显示一个假时间。
+                t=$(stat -c %Y "$f" 2>/dev/null)
+                [ -n "$t" ] || t=$(date -r "$f" +%s 2>/dev/null)
+                [ -n "$t" ] && echo "T|$t"
+                break
+              fi
+            done
           fi
           echo "."
         done
@@ -2368,45 +2464,48 @@ private extension AppModel {
         """)
     }
 
-    /// 把「下载 + 转换」丢到路由器后台，命令本身立刻返回。
+    /// 前台跑一次订阅下载（`openclash.sh <名称> norestart`），把结果原样带回手机。
     ///
-    /// 后台进程没有分配 PTY，通道关掉不会被 SIGHUP 带走；但仍先试 `nohup`，
-    /// 部分固件的 dropbear 会清理会话进程组。
-    func subscriptionUpdateStartCommand(_ names: [String]) -> String {
-        let list = names.map { "echo \(shQuote($0));" }.joined(separator: " ")
+    /// 返回四段，各管一件事：
+    ///   `@@RC`     —— 脚本的 `exit_code`（OpenClash 就是用它告诉 LuCI 成没成）；
+    ///   `@@FILE`   —— `/etc/openclash/config/<名称>.yaml` 的 mtime，文件不在就是空；
+    ///   `@@OCLOG`  —— 这一次**新增**的 `/tmp/openclash.log`（脚本正文日志全在这里，
+    ///                  `LOG_OUT` 写的是文件不是 stdout，所以光看 stdout 永远是空的）；
+    ///   `@@SUBLOG` —— 脚本自己的 stdout/stderr（正常为空，脚本崩了才有）。
+    ///
+    /// 只取新增的行：先记下当前行数，跑完从 `n+1` 行开始 tail，既有来龙去脉，
+    /// 又不会把几百行历史日志整段搬回手机。
+    func subscriptionDownloadCommand(_ name: String) -> String {
+        let cfg = shQuote("/etc/openclash/config/\(name).yaml")
         return lowPriority("""
-        rm -f /tmp/oc_sub.log /tmp/oc_sub_rc /tmp/oc_sub_list /tmp/oc_sub_env
-        { \(list) } > /tmp/oc_sub_list
-        { printf 'bash=%s\\n' "$(command -v bash 2>/dev/null || echo none)"; \
-          printf 'script=%s\\n' "$([ -f /usr/share/openclash/openclash.sh ] && echo ok || echo missing)"; } > /tmp/oc_sub_env 2>&1
-        if command -v nohup >/dev/null 2>&1; then N=nohup; else N=; fi
-        $N sh -c 'R=0; B=/bin/bash; [ -x "$B" ] || B=$(command -v bash 2>/dev/null); [ -n "$B" ] || B=sh; while IFS= read -r n; do [ -n "$n" ] || continue; "$B" /usr/share/openclash/openclash.sh "$n" norestart >>/tmp/oc_sub.log 2>&1 || R=1; done < /tmp/oc_sub_list; echo $R >/tmp/oc_sub_rc' </dev/null >/dev/null 2>&1 &
-        echo started
-
-        """)
-    }
-
-    /// 失败时一次性取回「脚本自己的输出」和「环境探测结果」。
-    ///
-    /// `openclash.sh` 的日志写 `/tmp/openclash.log`，而它的 stdout/stderr 才进
-    /// `/tmp/oc_sub.log`；光看后者是空的时候分不清「脚本没跑」还是「跑了没说话」，
-    /// 所以再把 bash / 脚本路径的探测结果一起带回来。
-    var subscriptionDiagCommand: String {
-        lowPriority("""
-        tail -n 3 /tmp/oc_sub.log 2>/dev/null
-        echo @@ENV
-        cat /tmp/oc_sub_env 2>/dev/null
-        echo @@OCLOG
-        tail -n 2 /tmp/openclash.log 2>/dev/null
-        true
-
-        """)
-    }
-
-    /// 轮询后台任务：写完了 rc 文件就吐出退出码，否则回一行 `running`。
-    var subscriptionUpdatePollCommand: String {
-        lowPriority("""
-        if [ -f /tmp/oc_sub_rc ]; then cat /tmp/oc_sub_rc 2>/dev/null; else echo running; fi
+        base=$(wc -l < /tmp/openclash.log 2>/dev/null)
+        [ -n "$base" ] || base=0
+        B=/bin/bash
+        [ -x "$B" ] || B=$(command -v bash 2>/dev/null)
+        [ -n "$B" ] || B=/bin/sh
+        if [ ! -f /usr/share/openclash/openclash.sh ]; then
+          echo @@RC
+          echo 127
+          echo @@FILE
+          echo @@OCLOG
+          echo "路由器上没有 /usr/share/openclash/openclash.sh（插件没装全？）"
+          echo @@SUBLOG
+        else
+          "$B" /usr/share/openclash/openclash.sh \(shQuote(name)) norestart >/tmp/oc_sub.log 2>&1
+          sub_rc=$?
+          echo @@RC
+          echo "$sub_rc"
+          echo @@FILE
+          if [ -f \(cfg) ]; then
+            t=$(stat -c %Y \(cfg) 2>/dev/null)
+            [ -n "$t" ] || t=$(date -r \(cfg) +%s 2>/dev/null)
+            echo "$t"
+          fi
+          echo @@OCLOG
+          tail -n +$((base+1)) /tmp/openclash.log 2>/dev/null | tail -n 12
+          echo @@SUBLOG
+          tail -n 8 /tmp/oc_sub.log 2>/dev/null
+        fi
         true
 
         """)

@@ -217,7 +217,12 @@ final class SSHService {
         return fd
     }
 
-    func execute(_ command: String) async throws -> String {
+    /// 跑一条命令，把它的标准输出整段读回来。
+    ///
+    /// `timeout` 是**整条命令**的读超时（默认 30 秒）：读不到数据时按 EAGAIN
+    /// 退避重试，超过这个时间就报「读取 SSH 输出超时」。订阅下载那种要 curl
+    /// 几十秒的命令得自己把值放大，否则界面只会看到一条超时错误。
+    func execute(_ command: String, timeout: TimeInterval = 30) async throws -> String {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
             queue.async {
                 guard let session = self.session else {
@@ -268,7 +273,7 @@ final class SSHService {
                 // as EAGAIN. Back off with a sleep and a hard deadline instead of
                 // hammering the channel in a tight loop (that used to burn phone
                 // CPU and keep the router's shell busy).
-                let deadline = Date().addingTimeInterval(30)
+                let deadline = Date().addingTimeInterval(max(timeout, 5))
                 while true {
                     let read = buffer.withUnsafeMutableBufferPointer { pointer in
                         libssh2_channel_read_ex(

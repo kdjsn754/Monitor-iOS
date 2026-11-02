@@ -978,7 +978,9 @@ private struct SubscriptionListView: View {
     }
 
     private func subRow(_ sub: ProxySubscription) -> some View {
-        let busy = model.subsBusy != nil
+        let anyBusy = model.subsBusy != nil
+        // 转圈只转正在下的那一条：全部更新是逐条跑的，四条一起转等于看不出进度。
+        let rowBusy = model.subsBusy == sub.name
         return HStack(spacing: 10) {
             // 只有名字这一块能点进编辑：整行做成按钮会跟右边的开关抢点击。
             Button {
@@ -1003,9 +1005,9 @@ private struct SubscriptionListView: View {
             // 整行都会变成点击区，点开关附近也会跳走（见交接 7.1）。
             .buttonStyle(.borderless)
             // 不用 .disabled：那会把名字压淡成灰，看着像「这条坏了」。
-            .allowsHitTesting(!busy)
+            .allowsHitTesting(!anyBusy)
 
-            if busy {
+            if rowBusy {
                 ProgressView()
                     .controlSize(.mini)
             } else {
