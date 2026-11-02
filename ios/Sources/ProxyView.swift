@@ -480,45 +480,48 @@ struct ProxyView: View {
                 }
 
                 // 下半段：两个动作并排放到文字下面，各占一半宽，尺寸加大。
-                // 「添加」是主操作（蓝底白字），「管理」是次要操作（浅蓝底）。
+                // v2.3.8 起两个统一成「管理」那套浅蓝底 + 蓝字（用户要求），
+                // 主次只靠图标和文字区分，不再一个实色一个浅底。
                 if model.ocStateLoaded {
                     HStack(spacing: 10) {
-                        Button {
+                        cardAction("添加", icon: "plus", dimmed: model.busy) {
                             showAddSubscription = true
-                        } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: "plus")
-                                    .font(.system(size: 12, weight: .bold))
-                                Text("添加")
-                                    .font(.subheadline.weight(.semibold))
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 11)
-                            .background(Color.blue, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                            .foregroundStyle(.white)
                         }
-                        .buttonStyle(.plain)
-                        .disabled(model.busy)
-
-                        Button {
+                        cardAction("管理", icon: "list.bullet",
+                                   dimmed: oc.configs.isEmpty || model.busy) {
                             guard !oc.configs.isEmpty, !model.busy else { return }
                             showConfigPicker = true
-                        } label: {
-                            Text("管理")
-                                .font(.subheadline.weight(.semibold))
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 11)
-                                .background(Color.blue.opacity(0.14), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                                .foregroundStyle(.blue)
                         }
-                        .buttonStyle(.plain)
-                        .disabled(oc.configs.isEmpty || model.busy)
                     }
                 }
             }
             .padding(11)
             .plainTile(radius: 14)
         }
+    }
+
+    /// 配置卡下方的并排操作钮：浅蓝底、蓝字、图标 + 文字，各占一半宽。
+    ///
+    /// 抽出来是因为两个必须长得一模一样——尺寸、圆角、内边距只在这里定义一次，
+    /// 以后调高度也不会漏改一边。
+    private func cardAction(_ title: String,
+                            icon: String,
+                            dimmed: Bool,
+                            action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: .semibold))
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 11)
+            .background(Color.blue.opacity(0.14), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .foregroundStyle(.blue)
+        }
+        .buttonStyle(.plain)
+        .disabled(dimmed)
     }
 
     private var configTitle: String {

@@ -43,15 +43,32 @@ enum TabGlyphImage {
     private static func render(_ kind: TabGlyphKind, filled: Bool) -> UIImage {
         let format = UIGraphicsImageRendererFormat()
         format.scale = 3
+        // clear 混合模式要往 alpha 通道里擦，必须是透明底。
+        format.opaque = false
         let renderer = UIGraphicsImageRenderer(size: CGSize(width: 24, height: 24), format: format)
         let img = renderer.image { ctx in
             let cg = ctx.cgContext
-            cg.addPath(designPath(kind, filled: filled).cgPath)
+            let glyph = designPath(kind, filled: filled)
+            cg.addPath(glyph.outline.cgPath)
             if filled {
-                // even-odd：齿轮的中心孔、盾牌的对勾都是「挖」出来的，
-                // 不是叠一个白圆/白勾（深色模式下会穿帮）
+                // even-odd：齿轮的中心孔是「挖」出来的，不是叠一个白圆
+                // （深色模式下叠白色会穿帮）。
                 cg.setFillColor(UIColor.black.cgColor)
                 cg.fillPath(using: .evenOdd)
+                if let cut = glyph.cut {
+                    // 对勾不走 even-odd：它的带状轮廓在拐角处会自交，
+                    // even-odd 把重叠区少数一次，就在钩尖下漏出那一小块
+                    // （用户 2026-11-03 在底栏看到的「多一点点」）。
+                    // 改成直接擦：沿折线用 clear 描一遍，按 alpha 擦除，
+                    // 自交与否都不影响结果。
+                    cg.setBlendMode(.clear)
+                    cg.setLineWidth(2.1)
+                    cg.setLineCap(.round)
+                    cg.setLineJoin(.round)
+                    cg.addPath(cut.cgPath)
+                    cg.strokePath()
+                    cg.setBlendMode(.normal)
+                }
             } else {
                 cg.setStrokeColor(UIColor.black.cgColor)
                 cg.setLineWidth(1.7)
@@ -66,11 +83,14 @@ enum TabGlyphImage {
     // MARK: - 路径（与 backup-tabbar-b87 的 TabGlyph 同一套，只是去掉了缩放变换）
 
     /// 24 单位设计框下的原始路径。旧 View 里按显示尺寸缩放，这里固定 24pt 一次画死。
-    private static func designPath(_ kind: TabGlyphKind, filled: Bool) -> Path {
+    ///
+    /// 返回两样：`outline` 是外形（实心时整片填、空心时描边），
+    /// `cut` 是实心态要擦掉的笔画（目前只有盾牌里的对勾），空心时为 nil。
+    private static func designPath(_ kind: TabGlyphKind, filled: Bool) -> (outline: Path, cut: Path?) {
         switch kind {
-        case .overview: return overviewPath()
-        case .proxy: return proxyPath(filled: filled)
-        case .settings: return settingsPath()
+        case .overview: return (overviewPath(), nil)
+        case .proxy: return (proxyPath(), filled ? proxyCheckStroke() : nil)
+        case .settings: return (settingsPath(), nil)
         }
     }
 
@@ -98,8 +118,9 @@ enum TabGlyphImage {
     /// 代理：盾牌。上边两角圆角、两侧直下、底部收成一个圆头的尖。
     ///
     /// 选中态不是简单填满：纯色盾缩到 23pt 就只剩一团黑，分不清是盾还是水滴。
-    /// 所以实心版在中间用 even-odd 挖一枚对勾（安全/通过的含义也正好对得上「代理」）。
-    private static func proxyPath(filled: Bool) -> Path {
+    /// 所以实心版在中间擦一枚对勾（安全/通过的含义也正好对得上「代理」），
+    /// 对勾单独由 `proxyCheckStroke()` 给出，见 `render` 里的擦除逻辑。
+    private static func proxyPath() -> Path {
         var p = Path()
         let half: CGFloat = 9.15      // 半宽
         let top: CGFloat = 2.0
@@ -121,19 +142,19 @@ enum TabGlyphImage {
                    control1: CGPoint(x: 12 - half * 0.52, y: tip - 1.5),
                    control2: CGPoint(x: 12 - half, y: shoulder + 4.3))
         p.closeSubpath()
-
-        if filled {
-            // 对勾先描成带宽度的轮廓，再并进主路径交给 even-odd 挖空；
-            // 直接手算带状多边形的话，两头和拐点的圆角要另外补圆，容易画歪。
-            var check = Path()
-            check.move(to: CGPoint(x: 8.80, y: 11.25))
-            check.addLine(to: CGPoint(x: 11.10, y: 13.60))
-            check.addLine(to: CGPoint(x: 15.50, y: 8.90))
-            p.addPath(check.strokedPath(StrokeStyle(lineWidth: 2.1,
-                                                    lineCap: .round,
-                                                    lineJoin: .round)))
-        }
         return p
+    }
+
+    /// 实心盾里那枚对勾的中线（2.1 宽、圆头圆角）。
+    ///
+    /// 只给折线，不带宽度——宽度交给 `render` 描边时给，擦除才不会
+    /// 因为「带状轮廓自交」而多出一块。
+    private static func proxyCheckStroke() -> Path {
+        var check = Path()
+        check.move(to: CGPoint(x: 8.80, y: 11.25))
+        check.addLine(to: CGPoint(x: 11.10, y: 13.60))
+        check.addLine(to: CGPoint(x: 15.50, y: 8.90))
+        return check
     }
 
     /// 设置：8 齿齿轮，中间一个圆孔。

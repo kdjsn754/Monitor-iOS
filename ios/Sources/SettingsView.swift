@@ -263,9 +263,13 @@ struct SettingsView: View {
     ///
     /// 图标固定用实心版，不做「选中实心 / 未选中空心」那套：
     /// `moon` 的轮廓在 15pt 下是一条细弧，看着像个括号，认不出是月亮；
-    /// 统一实心之后形状始终一致，选中与否交给蓝底、蓝字、加粗三重提示就够。
+    /// 统一实心之后形状始终一致，选中与否交给底色和文字颜色区分。
     ///
-    /// 配色一个字没动——仍是 `blue` 16%/45% 的淡底细边 + 选中蓝字。
+    /// v2.3.8 换了整颗按钮的做法（用户：「这个风格重新设计看看预览」→ 选了无描边胶囊）：
+    /// 以前两颗都描边、未选中那颗还有一圈淡蓝边，看着像「都在待命」，分不清当前值；
+    /// 现在**去描边**，只靠底色区分——选中浅蓝底 `blue 14%` + 蓝字，
+    /// 未选中系统填充灰 `secondarySystemFill` + 次级灰字。
+    /// 灰底用语义色，深色模式自动翻，不用写两套。
     private var themeOptions: [ThemeOption] {
         [ThemeOption(id: "light", title: "浅色", icon: "sun.max.fill"),
          ThemeOption(id: "dark", title: "深色", icon: "moon.fill")]
@@ -274,7 +278,7 @@ struct SettingsView: View {
     private var appearanceCard: some View {
         SectionCard("外观", icon: "circle.lefthalf.filled") {
             VStack(spacing: 12) {
-                HStack(spacing: 6) {
+                HStack(spacing: 10) {
                     ForEach(themeOptions) { option in
                         Button {
                             themeMode = option.id
@@ -282,23 +286,14 @@ struct SettingsView: View {
                             Label(option.title, systemImage: option.icon)
                                 .font(.subheadline.weight(themeMode == option.id ? .semibold : .regular))
                                 .frame(maxWidth: .infinity)
-                                .padding(.vertical, 9)
+                                .padding(.vertical, 12)
                                 .background(
                                     themeMode == option.id
-                                        ? Color.blue.opacity(0.16)
-                                        : Color.blue.opacity(0.05),
+                                        ? Color.blue.opacity(0.14)
+                                        : Color(uiColor: .secondarySystemFill),
                                     in: Capsule()
                                 )
-                                .overlay {
-                                    Capsule()
-                                        .strokeBorder(
-                                            themeMode == option.id
-                                                ? Color.blue.opacity(0.45)
-                                                : Color.blue.opacity(0.14),
-                                            lineWidth: 1
-                                        )
-                                }
-                                .foregroundStyle(themeMode == option.id ? Color.blue : Color.primary)
+                                .foregroundStyle(themeMode == option.id ? Color.blue : Color.secondary)
                         }
                         .buttonStyle(.plain)
                     }
