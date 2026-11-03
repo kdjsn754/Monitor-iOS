@@ -248,34 +248,39 @@ struct ProxyView: View {
 
     /// 右上角那枚徽标：面板这条路到底通不通。
     ///
-    /// 分四种情况，别偷懒合成两种：
-    /// · 状态还没读到 —— 什么都不显示（先别下结论，一秒后打脸很难看）；
-    /// · 内核没在跑 —— 「未运行」，这是状态段自己说的，确定；
-    /// · 在跑、但指标第一拍还没回来 —— 也不显示：`apiReachable` 默认 false，
-    ///   这时候判「未运行」会先闪一下橙字再变绿；
-    /// · 指标读过之后 —— 通了「可打开」（绿），不通「未运行」（橙）。
-    @ViewBuilder
+    /// 只回答「现在点进去能不能用」，所以只有两态：「可打开」（绿）/「未运行」（橙）。
+    /// 样式跟上面「状态与操作」卡右边那枚运行中徽标是同一套——小圆点 + 灰字 + 白底胶囊，
+    /// 两个徽标在同一条竖线上，看上去是同一类信息，而不是两种叫不出名字的标签。
+    ///
+    /// v2.3.10 起取消「什么都不显示」的中间态（用户要求）：刚进页面、状态还没读到时
+    /// 也先写「未运行」，否则右上角空着像整块丢了。代价是内核其实在跑时会先橙一下再变绿
+    /// ——「通不通」得等第一拍指标回来才知道。要把这一闪重新压掉，就恢复
+    /// `!model.ocStateLoaded` / `!model.ocMetricsLoaded` 两条返回 `EmptyView()` 的分支。
     private var panelBadge: some View {
-        if !model.ocStateLoaded {
-            EmptyView()
-        } else if !oc.running {
-            panelBadgeLabel("未运行", tone: .orange)
-        } else if !model.ocMetricsLoaded {
-            EmptyView()
-        } else if canOpenPanel, metrics.apiReachable {
-            panelBadgeLabel("可打开", tone: .green)
-        } else {
-            panelBadgeLabel("未运行", tone: .orange)
-        }
+        panelBadgeLabel(panelOpenable ? "可打开" : "未运行",
+                        tone: panelOpenable ? .green : .orange)
     }
 
+    /// 真的能打开才叫「可打开」：状态读过、指标回来、内核在跑、面板端口应了。
+    /// 少一样都算「未运行」——这枚徽标说的是结果，不是进度。
+    private var panelOpenable: Bool {
+        model.ocStateLoaded && model.ocMetricsLoaded
+            && canOpenPanel && metrics.apiReachable
+    }
+
+    /// 和 `statusPill` 同款：圆点表状态、正文用 `secondary`，底色走 `plainTile`（白底 + 细边）。
     private func panelBadgeLabel(_ title: String, tone: Color) -> some View {
-        Text(title)
-            .font(.system(size: 10, weight: .semibold))
-            .padding(.horizontal, 7)
-            .padding(.vertical, 2)
-            .background(tone.opacity(0.14), in: Capsule())
-            .foregroundStyle(tone)
+        HStack(spacing: 5) {
+            Circle()
+                .fill(tone)
+                .frame(width: 7, height: 7)
+            Text(title)
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .plainTile(in: Capsule())
     }
 
     /// 「未运行」底下那句解释，只在「内核在跑、只是面板这条路不通」时给。
