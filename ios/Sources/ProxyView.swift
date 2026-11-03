@@ -246,26 +246,31 @@ struct ProxyView: View {
         }
     }
 
-    /// 右上角那枚徽标：面板这条路到底通不通。
+    /// 右上角那枚徽标：面板这条路现在走到哪一步。
     ///
-    /// 只回答「现在点进去能不能用」，所以只有两态：「可打开」（绿）/「未运行」（橙）。
+    /// 四种显示（v2.3.11，用户指定）——「连接中」负责两段等待，「未运行」负责两段确定：
+    /// · 状态还没读到 —— 「连接中」（灰点）：还在读，先别说结论；
+    /// · 内核没在跑 —— 「未运行」（橙点）：这是确定的事实；
+    /// · 在跑、但面板指标第一拍还没回来 —— 「连接中」（灰点）：正在探端口；
+    /// · 指标读过、端口也应了 —— 「可打开」（绿点）。
+    /// 兜底（在跑、指标也读过、端口就是不应）—— 「未运行」（橙点）。
+    ///
+    /// 两种「连接中」都只是过渡态，不会停在那儿；灰点而不是橙点，是不想让人误以为已经坏了。
     /// 样式跟上面「状态与操作」卡右边那枚运行中徽标是同一套——小圆点 + 灰字 + 白底胶囊，
-    /// 两个徽标在同一条竖线上，看上去是同一类信息，而不是两种叫不出名字的标签。
-    ///
-    /// v2.3.10 起取消「什么都不显示」的中间态（用户要求）：刚进页面、状态还没读到时
-    /// 也先写「未运行」，否则右上角空着像整块丢了。代价是内核其实在跑时会先橙一下再变绿
-    /// ——「通不通」得等第一拍指标回来才知道。要把这一闪重新压掉，就恢复
-    /// `!model.ocStateLoaded` / `!model.ocMetricsLoaded` 两条返回 `EmptyView()` 的分支。
+    /// 两个徽标在同一条竖线上，看上去是同一类信息。
+    @ViewBuilder
     private var panelBadge: some View {
-        panelBadgeLabel(panelOpenable ? "可打开" : "未运行",
-                        tone: panelOpenable ? .green : .orange)
-    }
-
-    /// 真的能打开才叫「可打开」：状态读过、指标回来、内核在跑、面板端口应了。
-    /// 少一样都算「未运行」——这枚徽标说的是结果，不是进度。
-    private var panelOpenable: Bool {
-        model.ocStateLoaded && model.ocMetricsLoaded
-            && canOpenPanel && metrics.apiReachable
+        if !model.ocStateLoaded {
+            panelBadgeLabel("连接中", tone: .gray)
+        } else if !oc.running {
+            panelBadgeLabel("未运行", tone: .orange)
+        } else if !model.ocMetricsLoaded {
+            panelBadgeLabel("连接中", tone: .gray)
+        } else if canOpenPanel, metrics.apiReachable {
+            panelBadgeLabel("可打开", tone: .green)
+        } else {
+            panelBadgeLabel("未运行", tone: .orange)
+        }
     }
 
     /// 和 `statusPill` 同款：圆点表状态、正文用 `secondary`，底色走 `plainTile`（白底 + 细边）。
