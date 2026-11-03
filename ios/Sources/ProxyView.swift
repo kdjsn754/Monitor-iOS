@@ -273,7 +273,8 @@ struct ProxyView: View {
         }
     }
 
-    /// 和 `statusPill` 同款：圆点表状态、正文用 `secondary`，底色走 `plainTile`（白底 + 细边）。
+    /// 和 `statusPill` 同款：圆点表状态、正文用 `secondary`，底色走 `plainTile`。
+    /// v2.3.12：两枚徽标都不描边（用户「去掉黑丝边框」），底色由 `plainTile` 自己换成淡灰。
     private func panelBadgeLabel(_ title: String, tone: Color) -> some View {
         HStack(spacing: 5) {
             Circle()
@@ -285,7 +286,7 @@ struct ProxyView: View {
         }
         .padding(.horizontal, 9)
         .padding(.vertical, 5)
-        .plainTile(in: Capsule())
+        .plainTile(in: Capsule(), bordered: false)
     }
 
     /// 「未运行」底下那句解释，只在「内核在跑、只是面板这条路不通」时给。
@@ -294,6 +295,7 @@ struct ProxyView: View {
         oc.running && model.ocMetricsLoaded && !metrics.apiReachable
     }
 
+    /// 状态徽标：圆点 + 文字 + 无描边淡灰胶囊（v2.3.12 起不描边，和控制面板那枚同一套）。
     private var statusPill: some View {
         HStack(spacing: 5) {
             Circle()
@@ -305,7 +307,7 @@ struct ProxyView: View {
         }
         .padding(.horizontal, 9)
         .padding(.vertical, 5)
-        .plainTile(in: Capsule())
+        .plainTile(in: Capsule(), bordered: false)
     }
 
     private func modeButton(_ title: String, value: String) -> some View {

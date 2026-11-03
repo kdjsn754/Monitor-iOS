@@ -99,28 +99,44 @@ extension View {
 struct PlainTileModifier<S: InsettableShape>: ViewModifier {
     let shape: S
 
+    /// 要不要那圈 `separator` 细边。
+    ///
+    /// 小徽标（「运行中」「可打开」这种二十来 pt 的胶囊）传 `false`（v2.3.12，用户：
+    /// 「去掉这两枚徽标的黑丝边框」）：0.75pt 的深灰边压在这么小的形状上，浅色下像一根
+    /// 黑丝，把 7pt 的圆点衬得发脏。去掉边之后底色换成 `tertiarySystemFill` 的淡灰——
+    /// 不然白底和卡片同色，胶囊会凭空消失，只剩圆点和字。
+    var bordered: Bool = true
+
     @Environment(\.colorScheme) private var colorScheme
 
     func body(content: Content) -> some View {
         content
             .background {
-                // 深色下不能用 `systemBackground`——那是纯黑（#000），压在 #1C1C1E 的卡片上
-                // 像挖了个洞，格子边框比文字还抢眼。`tertiarySystemBackground`（#2C2C2E）
-                // 比卡片亮一档，层级才对。这个坑 rowTile 已经踩过一次了。
-                shape.fill(colorScheme == .dark
-                           ? Color(.tertiarySystemBackground)
-                           : Color(.systemBackground))
+                shape.fill(fillColor)
             }
             .overlay {
-                shape.strokeBorder(Color(.separator), lineWidth: 0.75)
+                if bordered {
+                    shape.strokeBorder(Color(.separator), lineWidth: 0.75)
+                }
             }
+    }
+
+    private var fillColor: Color {
+        // 无边的版本是小徽标专用的淡灰底，深浅两色都靠系统语义色翻，不写两套。
+        if !bordered { return Color(.tertiarySystemFill) }
+        // 深色下不能用 `systemBackground`——那是纯黑（#000），压在 #1C1C1E 的卡片上
+        // 像挖了个洞，格子边框比文字还抢眼。`tertiarySystemBackground`（#2C2C2E）
+        // 比卡片亮一档，层级才对。这个坑 rowTile 已经踩过一次了。
+        return colorScheme == .dark
+            ? Color(.tertiarySystemBackground)
+            : Color(.systemBackground)
     }
 }
 
 extension View {
     /// 任意形状的白底 + 细边（胶囊按钮用这个）。
-    func plainTile<S: InsettableShape>(in shape: S) -> some View {
-        modifier(PlainTileModifier(shape: shape))
+    func plainTile<S: InsettableShape>(in shape: S, bordered: Bool = true) -> some View {
+        modifier(PlainTileModifier(shape: shape, bordered: bordered))
     }
 
     /// 圆角矩形的白底 + 细边（格子用这个）。
