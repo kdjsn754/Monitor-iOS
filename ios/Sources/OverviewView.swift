@@ -106,11 +106,9 @@ struct OverviewView: View {
                     Text(model.status)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    if !model.stats.wanDevice.isEmpty {
-                        Text("· \(model.stats.wanDevice)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                    // v2.3.14：这里原来还会跟一段「· apclii0」（WAN 设备名）。
+                    // 用户要删掉：这行是「连上没有」的结论，后面挂个网口名既不是给
+                    // 普通人看的，也让这行字变得比路由器型号还长。
                 }
             }
             Spacer()

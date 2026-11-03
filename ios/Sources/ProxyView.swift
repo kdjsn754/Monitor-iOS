@@ -10,6 +10,8 @@ struct ProxyView: View {
     @State private var showConfigPicker = false
     @State private var showAddSubscription = false
     @State private var isChecking = false
+    /// 右上角刷新的进行中标记：只用来把按钮换成转圈、拦住连点，不参与任何数据逻辑。
+    @State private var refreshing = false
 
     private var oc: OpenClashInfo { model.openClash }
     private var metrics: OpenClashMetrics { model.ocMetrics }
@@ -72,8 +74,17 @@ struct ProxyView: View {
             .background(Color.clear)
             // v2.3.3：同概览页，标题和刷新钮搬进导航栏，导航栏常驻（详见 Glass.swift 的 `pageChrome`）。
             .pageChrome("代理") {
-                HeaderButton("arrow.clockwise") {
-                    Task { await model.manualRefresh() }
+                // v2.3.14：刷新期间按钮原地换成转圈。以前这里按下去什么都不动——
+                // 因为代理页那几项（流量 / 连接数）本来就每 2 秒自己刷，界面看不出变化，
+                // 用户的原话是「点了没反应」。
+                if refreshing {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(width: 38, height: 38)
+                } else {
+                    HeaderButton("arrow.clockwise") {
+                        Task { await refresh() }
+                    }
                 }
             }
             // 不挂 .refreshable（v2.1.8）：导航栏整条被隐藏之后，系统下拉刷新控件
@@ -109,6 +120,28 @@ struct ProxyView: View {
                 SubscriptionEditView(subscription: nil)
             }
         }
+    }
+
+    // MARK: - 刷新
+
+    /// 右上角刷新：把「连接 → 当前页采集 → OpenClash 状态」整条走一遍。
+    ///
+    /// v2.3.14 修「点了没反应」：以前这里只调 `model.manualRefresh()`，而它跑的是当前页的
+    /// 采集项——代理页那几项（内核指标、连接数）本来就每 2 秒自己刷，所以按下去界面上
+    /// **一点变化都看不见**，既没有转圈也没数字跳。三处一起补：
+    /// ① 按钮原地换成转圈（`refreshing`），先让人看见「点到了」；
+    /// ② 采完再接一次 `refreshOpenClash()`——运行状态、配置文件名、面板端口这些
+    ///    **不是周期项**（`PollItem.clashState` 的 `isPeriodic == false`），只有进页面那一次才读，
+    ///    手动刷新正好补这一拍，也是最容易看出变化的一处；
+    /// ③ `refreshing` 顺手拦掉连点，免得 SSH 串行队列里排满采集任务。
+    private func refresh() async {
+        guard !refreshing else { return }
+        refreshing = true
+        defer { refreshing = false }
+        // 先跑 manualRefresh：状态过期时它内部会强制重连并直接返回，
+        // 那时再读 OpenClash 才是新会话上的数据。
+        await model.manualRefresh()
+        await model.refreshOpenClash()
     }
 
     // MARK: - 状态、操作与控制面板

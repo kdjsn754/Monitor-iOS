@@ -60,14 +60,9 @@ struct SettingsView: View {
             .tint(.blue)
             .background(Color.clear)
             // v2.3.3：同概览页，标题和刷新钮搬进导航栏，导航栏常驻（详见 Glass.swift 的 `pageChrome`）。
-            .pageChrome("设置") {
-                // 以前「重新连接」是路由器卡里的一个胶囊按钮，
-                // 新版式跟参考图一样只留三个动作，就把它收到页头，
-                // 和概览、网络代理两页的刷新按钮位置一致。
-                HeaderButton("arrow.clockwise") {
-                    Task { await model.manualRefresh() }
-                }
-            }
+            // v2.3.14：刷新钮删掉（用户要求）。这一页没有会过期的数据——连接由轮询维护，
+            // 间隔在「刷新频率」卡里改，退出登录是独立按钮；那颗刷新键按下去只是白跑一轮采集。
+            .pageChrome("设置")
             .sheet(item: $editorRoute) { route in
                 ConnectionEditorView(profile: route.profile)
                     .id(route.id)

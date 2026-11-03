@@ -222,6 +222,12 @@ extension PageHeader where Trailing == EmptyView {
 ///   顶部柔边糊掉，而且 SwiftUI 底层照样按安全区调 inset，跳还在。
 /// 现在导航栏**永远在**：根页和二级页的顶部安全区一样大，push/pop 没有可变的量。
 extension View {
+    /// 只有标题、没有右上角按钮的版本（设置页 v2.3.14 起去掉了刷新钮：
+    /// 那页没有需要手动催的数据，按钮白占一个位置）。
+    func pageChrome(_ title: String) -> some View {
+        pageChrome(title) { EmptyView() }
+    }
+
     /// 把页头标题 + 右侧按钮挂到系统导航栏上（三个根页统一用它）。
     func pageChrome<Trailing: View>(_ title: String,
                                     @ViewBuilder trailing: () -> Trailing) -> some View {
