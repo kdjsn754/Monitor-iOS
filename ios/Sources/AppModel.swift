@@ -83,6 +83,11 @@ final class AppModel {
     /// 状态探针正在跑（进代理页时先单独问一次，不等那条要 curl 内核的指标命令）。
     private(set) var ocStateLoading = false
     var ocMetrics = OpenClashMetrics()
+    /// 指标脚本有没有成功跑过一轮。
+    ///
+    /// `ocMetrics.apiReachable` 的默认值是 false，光看它分不清「面板真的不通」和
+    /// 「第一拍还没回来」。控制面板徽标要靠这个区分，否则进页面会先闪一下「未运行」再变绿。
+    private(set) var ocMetricsLoaded = false
     /// 路由器上的订阅列表（UCI `config_subscribe`）。只在打开配置弹窗时读一次，
     /// 不跟着轮询：订阅是低频数据，改一次才动一次。
     var subscriptions: [ProxySubscription] = []
@@ -397,6 +402,7 @@ final class AppModel {
         ocStateLoaded = false
         ocStateLoading = false
         ocMetrics = OpenClashMetrics()
+        ocMetricsLoaded = false
         history = []
         await bootstrapRefresh()
         startPolling()
@@ -609,6 +615,7 @@ final class AppModel {
         openClash = OpenClashInfo()
         ocStateLoaded = false
         ocStateLoading = false
+        ocMetricsLoaded = false
         if !keepPassword, let profile = currentProfile {
             KeychainStore.deletePassword(account: KeychainStore.passwordAccount(for: profile))
         }
@@ -1008,6 +1015,7 @@ final class AppModel {
         }
         value.apiReachable = reachable
         ocMetrics = value
+        ocMetricsLoaded = true
     }
 
     /// JSONSerialization 出来的数字都是 NSNumber，统一走这里取，整数也能取到。

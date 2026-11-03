@@ -198,7 +198,7 @@ struct ProxyView: View {
     /// 状态几乎是重复的）。并进去之后那张卡同时管三件事——模式切换、启停重启、面板入口，
     /// 上下两半各自带按钮，读起来像两张卡被一条细线粘在一起；而且面板入口和
     /// 「实时状态 / 代理配置 / 访问检查」一样是在回答「东西在哪儿看」，跟启停不是一类动作。
-    /// 所以再拆出来：标题行交给 `SectionCard`（`accessory` 挂「可打开 / 未就绪」），
+    /// 所以再拆出来：标题行交给 `SectionCard`（`accessory` 挂「可打开 / 未运行」），
     /// 卡里只剩地址和一枚整宽主按钮。
     private var panelCard: some View {
         SectionCard("控制面板", icon: "rectangle.on.rectangle",
@@ -209,6 +209,18 @@ struct ProxyView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+
+                // 面板不通时把原因写在这里（v2.3.9，从「实时状态」卡搬过来）：
+                // 右上角那枚「未运行」只说结论，这里补一句是端口没响应还是密码不对，
+                // 顺带点明页面上的数字为什么停着不动。
+                if showsPanelWarning {
+                    Label("面板端口 \(oc.panelPort) 无响应，或面板密码不一致，数字停在旧值。",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
 
                 Button {
                     showPanel = true
@@ -234,16 +246,42 @@ struct ProxyView: View {
         }
     }
 
+    /// 右上角那枚徽标：面板这条路到底通不通。
+    ///
+    /// 分四种情况，别偷懒合成两种：
+    /// · 状态还没读到 —— 什么都不显示（先别下结论，一秒后打脸很难看）；
+    /// · 内核没在跑 —— 「未运行」，这是状态段自己说的，确定；
+    /// · 在跑、但指标第一拍还没回来 —— 也不显示：`apiReachable` 默认 false，
+    ///   这时候判「未运行」会先闪一下橙字再变绿；
+    /// · 指标读过之后 —— 通了「可打开」（绿），不通「未运行」（橙）。
+    @ViewBuilder
     private var panelBadge: some View {
-        Text(canOpenPanel ? "可打开" : "未就绪")
+        if !model.ocStateLoaded {
+            EmptyView()
+        } else if !oc.running {
+            panelBadgeLabel("未运行", tone: .orange)
+        } else if !model.ocMetricsLoaded {
+            EmptyView()
+        } else if canOpenPanel, metrics.apiReachable {
+            panelBadgeLabel("可打开", tone: .green)
+        } else {
+            panelBadgeLabel("未运行", tone: .orange)
+        }
+    }
+
+    private func panelBadgeLabel(_ title: String, tone: Color) -> some View {
+        Text(title)
             .font(.system(size: 10, weight: .semibold))
             .padding(.horizontal, 7)
             .padding(.vertical, 2)
-            .background(
-                (canOpenPanel ? Color.green : Color.orange).opacity(0.14),
-                in: Capsule()
-            )
-            .foregroundStyle(canOpenPanel ? Color.green : Color.orange)
+            .background(tone.opacity(0.14), in: Capsule())
+            .foregroundStyle(tone)
+    }
+
+    /// 「未运行」底下那句解释，只在「内核在跑、只是面板这条路不通」时给。
+    /// 内核本来就停着的话，上面那张状态卡已经写了「已停止」，再解释一遍是重复。
+    private var showsPanelWarning: Bool {
+        oc.running && model.ocMetricsLoaded && !metrics.apiReachable
     }
 
     private var statusPill: some View {
@@ -329,17 +367,9 @@ struct ProxyView: View {
                 statsGrid
                     .padding(.top, 12)
 
-                // 这条橙字挂在卡底：它说的是整条内核接口（端口 / 面板密码），
-                // 流量和下面四项一起受影响，塞到任何一半下面都只说对一半。
-                if oc.running, !metrics.apiReachable {
-                    Label("面板端口 \(oc.panelPort) 无响应，或面板密码不一致，数字停在旧值。",
-                          systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.top, 12)
-                }
+                // v2.3.9：这条提示搬到「控制面板」卡里去了（用户要求）。
+                // 它说的是面板那条路通不通，挂在实时状态卡底看着像「这些数字坏了」，
+                // 而真正该被质疑的是面板入口——现在那里右上角也直接写「未运行」。
             }
         }
     }
