@@ -39,7 +39,7 @@ struct AdaptiveFill<S: Shape>: View {
     @AppStorage(BackgroundImageStore.opacityKey) private var opacityFlag = 0.6
 
     var body: some View {
-        shape.fill(color.opacity(forceOpaque ? 1 : SurfaceAlpha.fill(onFlag, opacityFlag)))
+        shape.fill(color.opacity(forceOpaque ? 1 : SurfaceAlpha.fill(on: onFlag, value: opacityFlag)))
     }
 }
 
@@ -59,7 +59,7 @@ struct AdaptiveBorder<S: InsettableShape>: View {
         shape.strokeBorder(
             color.opacity(strength * (forceOpaque
                                       ? 1
-                                      : SurfaceAlpha.outline(onFlag, opacityFlag))),
+                                      : SurfaceAlpha.outline(on: onFlag, value: opacityFlag))),
             lineWidth: width
         )
     }
@@ -77,7 +77,7 @@ struct AdaptiveRowBackground: View {
         (colorScheme == .dark
          ? Color(.secondarySystemGroupedBackground)
          : Color(.systemBackground))
-            .opacity(SurfaceAlpha.fill(onFlag, opacityFlag))
+            .opacity(SurfaceAlpha.fill(on: onFlag, value: opacityFlag))
     }
 }
 
