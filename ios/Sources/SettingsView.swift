@@ -14,14 +14,14 @@ struct SettingsView: View {
     @State private var showRouterWeb = false
     /// 切换连接的半屏选择器（自绘，不再用系统的列表/菜单）。
     @State private var showSwitcher = false
-    /// 自定义背景（v2.4.0）：选中的相片、是否已设、不透明度。
-    /// 图片本身在 `BackgroundImageStore` 里，这里只经手这三个小值。
+    /// 自定义背景（v2.4.0 起，v2.4.1 改成直接观察 store）。
+    /// 图片本身在 `BackgroundImageStore` 里，这里只经手「挑图 → 裁 → 交回去」。
     @State private var backgroundPick: PhotosPickerItem?
-    @AppStorage(BackgroundImageStore.onKey) private var hasCustomBackground = false
-    @AppStorage(BackgroundImageStore.opacityKey) private var backgroundOpacity = 0.35
-    @AppStorage(BackgroundImageStore.versionKey) private var backgroundVersion = 0
-    /// 卡片里的缩略图。跟 `AppBackground` 一样，读盘一次存住，别每次 body 现解。
-    @State private var backgroundThumb: UIImage?
+    /// 交给裁切页的原图（附一个 id，换一张就换一次视图）。
+    @State private var cropTask: CropTask?
+    /// 相片读不出来时给一句人话，不然点完像没反应。
+    @State private var pickError: String?
+    private var store = BackgroundImageStore.shared
 
     var body: some View {
         NavigationStack {
@@ -76,6 +76,15 @@ struct SettingsView: View {
             .sheet(item: $editorRoute) { route in
                 ConnectionEditorView(profile: route.profile)
                     .id(route.id)
+            }
+            // 裁壁纸：整屏铺满、可拖动可缩放，完成即生效（v2.4.1）。
+            .fullScreenCover(item: $cropTask) { task in
+                BackgroundCropView(image: task.image,
+                                   onCancel: { cropTask = nil },
+                                   onUse: { cropped in
+                                       store.apply(cropped: cropped, original: task.image)
+                                       cropTask = nil
+                                   })
             }
             .sheet(isPresented: $showSwitcher) {
                 RouterSwitcherSheet()
@@ -333,10 +342,11 @@ struct SettingsView: View {
 
     // MARK: - 背景（自定义图片 + 不透明度）
 
-    /// 自定义背景（v2.4.0，用户要求「可以自定义背景，可以自定义调透明度」）。
+    /// 自定义背景（v2.4.0，用户要求「可以自定义背景，可以自定义调透明度」；
+    /// v2.4.1 用户补两条：换了不起作用、不能自己裁切）。
     ///
-    /// 分工：图片的存与缩放在 `BackgroundImageStore`，真正的铺满渲染在 `AppBackground`，
-    /// 这张卡只干三件事——选图、调不透明度、移除。
+    /// 分工：图片的存与裁在 `BackgroundImageStore` / `BackgroundCropper`，
+    /// 铺满渲染在 `AppBackground`，这张卡只干四件事——选图、裁切、调不透明度、移除。
     /// 滑块调的是**图片自己的不透明度**（0% = 等于没设背景，回到默认渐变），
     /// 不是卡片的；卡片的实心程度由 `GlassCardModifier.cardOpacity` 跟着这个值算。
     private var backgroundCard: some View {
@@ -346,8 +356,8 @@ struct SettingsView: View {
                     ZStack {
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
                             .fill(Color(uiColor: .secondarySystemFill))
-                        if let backgroundThumb {
-                            Image(uiImage: backgroundThumb)
+                        if store.isOn, let thumb = store.image {
+                            Image(uiImage: thumb)
                                 .resizable()
                                 .scaledToFill()
                                 .frame(width: 54, height: 54)
@@ -361,11 +371,11 @@ struct SettingsView: View {
                     .frame(width: 54, height: 54)
 
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(hasCustomBackground ? "自定义背景" : "默认背景")
+                        Text(store.isOn ? "自定义背景" : "默认背景")
                             .font(.subheadline.weight(.medium))
-                        Text(hasCustomBackground
-                             ? "照片铺满整页，卡片会跟着透一点"
-                             : "选一张照片铺在页面最底下")
+                        Text(store.isOn
+                             ? "已按整屏比例裁好，卡片会跟着透一点"
+                             : "选一张照片铺在页面最底下，可以自己裁")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -373,26 +383,60 @@ struct SettingsView: View {
                     Spacer(minLength: 4)
                 }
 
-                if hasCustomBackground {
+                if store.isOn {
                     HStack(spacing: 10) {
                         Text("透明度")
                             .font(.subheadline)
                             .fixedSize()
-                        Slider(value: $backgroundOpacity, in: 0...1)
+                        Slider(value: Binding(get: { store.opacity },
+                                              set: { store.setOpacity($0) }),
+                               in: 0...1,
+                               onEditingChanged: { editing in
+                                   // 拖动时只改内存，松手才落盘，别一次拖动写几百遍。
+                                   if !editing { store.persistOpacity() }
+                               })
                             .tint(.blue)
-                        Text("\(Int((backgroundOpacity * 100).rounded()))%")
+                        Text("\(Int((store.opacity * 100).rounded()))%")
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
                             .frame(width: 40, alignment: .trailing)
                     }
                 }
 
-                HStack(spacing: 10) {
+                if store.isOn {
+                    // 三个等宽：换图 / 重裁 / 移除。以前「调整」和「移除」挤在一起，
+                    // 用户挑完图发现框歪了却没地方改，只能删了重选。
+                    HStack(spacing: 8) {
+                        PhotosPicker(selection: $backgroundPick, matching: .images) {
+                            backgroundActionLabel("更换", icon: "photo.on.rectangle",
+                                                  tint: .blue, fill: Color.blue.opacity(0.14))
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            openCropper()
+                        } label: {
+                            backgroundActionLabel("调整", icon: "crop",
+                                                  tint: .blue, fill: Color.blue.opacity(0.14))
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            store.remove()
+                            pickError = nil
+                        } label: {
+                            backgroundActionLabel("移除", icon: "trash",
+                                                  tint: .secondary,
+                                                  fill: Color(uiColor: .secondarySystemFill))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                } else {
                     PhotosPicker(selection: $backgroundPick, matching: .images) {
                         HStack(spacing: 6) {
                             Image(systemName: "photo.on.rectangle")
                                 .font(.system(size: 13, weight: .semibold))
-                            Text(hasCustomBackground ? "更换图片" : "选择图片")
+                            Text("选择图片")
                                 .font(.subheadline.weight(.semibold))
                         }
                         .frame(maxWidth: .infinity)
@@ -405,48 +449,66 @@ struct SettingsView: View {
                         .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     }
                     .buttonStyle(.plain)
+                }
 
-                    if hasCustomBackground {
-                        Button {
-                            BackgroundImageStore.remove()
-                            backgroundThumb = nil
-                        } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: "trash")
-                                    .font(.system(size: 13, weight: .semibold))
-                                Text("移除")
-                                    .font(.subheadline.weight(.semibold))
-                            }
-                            .frame(width: 96)
-                            .padding(.vertical, 11)
-                            .background(
-                                Color(uiColor: .secondarySystemFill),
-                                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            )
-                            .foregroundStyle(.secondary)
-                            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                    }
+                if let pickError {
+                    Text(pickError)
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         }
-        // 选完图之后不用手动等全局刷新，缩略图自己重读一次盘。
-        .task(id: backgroundVersion) {
-            backgroundThumb = hasCustomBackground ? BackgroundImageStore.load() : nil
-        }
-        // PhotosPicker 只给一个「相册里挑中的东西」，读成 Data 再交给 store 去缩放、落盘。
+        // PhotosPicker 只给一个「相册里挑中的东西」：读成图 → 摆正方向 → 进裁切页。
+        // v2.4.0 是直接存下来，所以用户没法调整取景；现在中间多了裁切这一步。
         .onChange(of: backgroundPick) { _, item in
             guard let item else { return }
             Task {
-                if let data = try? await item.loadTransferable(type: Data.self),
-                   let image = UIImage(data: data) {
-                    BackgroundImageStore.save(image)
-                    backgroundThumb = BackgroundImageStore.load()
+                pickError = nil
+                if let picked = await loadPickedImage(item) {
+                    cropTask = CropTask(image: BackgroundCropper.upright(picked, maxSide: 3000))
+                } else {
+                    // iCloud 里没下载完、或者格式解不开时，以前是静默失败——
+                    // 点完「选择图片」什么都不发生，正是「换了不起作用」的一半来源。
+                    pickError = "这张照片读不出来，换一张试试（iCloud 原图需要先下载）"
                 }
                 backgroundPick = nil
             }
         }
+    }
+
+    /// 三个小动作按钮的统一外观：图标 + 两字标题，等宽。
+    private func backgroundActionLabel(_ title: String,
+                                       icon: String,
+                                       tint: Color,
+                                       fill: Color) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .semibold))
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 11)
+        .background(fill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .foregroundStyle(tint)
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    /// 三种来源都能进裁切页：已存的原图 > 已裁的成品（老版本没有原图）。
+    private func openCropper() {
+        guard let source = store.original ?? store.image else { return }
+        cropTask = CropTask(image: source)
+    }
+
+    /// 相片读成 `UIImage`：先试 `Data`（最稳），不行再用 `UIImage` 的 Transferable。
+    /// 单独拆出来是因为这里面每一种失败都只该表现为「一句提示」，而不是崩溃或静默。
+    private func loadPickedImage(_ item: PhotosPickerItem) async -> UIImage? {
+        if let data = try? await item.loadTransferable(type: Data.self),
+           let image = UIImage(data: data) {
+            return image
+        }
+        return try? await item.loadTransferable(type: UIImage.self)
     }
 
     // MARK: - 采集与刷新（摘要，细则进二级页）
@@ -806,6 +868,15 @@ private struct RouterSwitcherSheet: View {
 /// 之前用 `showEditor` 布尔 + 单独的 `editProfile` 两个状态驱动 `.sheet(isPresented:)`，
 /// 点「编辑」时 sheet 的内容闭包可能拿到还没写入的旧值（nil），于是第一次点开
 /// 总是「新建连接」。改成用 item 驱动，数据本身决定弹窗，就不会再错位。
+/// 送去裁切页的一次任务。
+///
+/// 用 `item:` 而不是 `isPresented:`：换一张图要换一个 `id`，`fullScreenCover`
+/// 才会把裁切页整套重建（缩放、偏移回到初始），而不是复用一个停在上次的视图。
+private struct CropTask: Identifiable {
+    let id = UUID()
+    let image: UIImage
+}
+
 private enum ConnectionEditorRoute: Identifiable {
     case new
     case edit(RouterProfile)
