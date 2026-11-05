@@ -57,7 +57,7 @@ struct FanControlView: View {
             .padding(.top, 6)
             .padding(.bottom, 28)
         }
-        .background(Color.clear)
+        .themedScrollBackground()
         .navigationTitle("风扇控制")
         .navigationBarTitleDisplayMode(.inline)
         // 透明底：这页背后是 App 的渐变背景，导航栏一旦有了实心底就会切出一条横杠。
@@ -463,8 +463,8 @@ struct FanControlView: View {
             .padding(.horizontal, 9)
             .padding(.vertical, 7)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(.systemBackground),
-                        in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .adaptiveFill(Color(.systemBackground),
+                          in: RoundedRectangle(cornerRadius: 9, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .strokeBorder(Color(.separator).opacity(0.55), lineWidth: 0.5)

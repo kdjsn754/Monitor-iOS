@@ -53,6 +53,7 @@ struct DeviceListView: View {
                     Text("点右侧铅笔可改名；离线设备会变灰，也可以点垃圾桶从列表里移除。")
                 }
             }
+            .themedFormBackground()
             .navigationTitle("连接设备")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

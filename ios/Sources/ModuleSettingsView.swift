@@ -55,9 +55,8 @@ struct ModuleSettingsView: View {
             }
         }
         .environment(\.editMode, $editMode)
-        .scrollContentBackground(.hidden)
-        .listRowBackground(Color(.secondarySystemGroupedBackground))
-        .background(Color.clear)
+        // v2.4.6：行底从死白改成跟着滑块变透，页面自己铺一层壁纸。
+        .themedFormBackground()
         .navigationTitle("概览模块")
         .navigationBarTitleDisplayMode(.inline)
         // 根页面把导航栏隐藏了，这里显式要求显示，免得推上来没有返回按钮。

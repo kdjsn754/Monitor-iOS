@@ -802,6 +802,8 @@ private struct ProxyConfigView: View {
             configSection
             applySection
         }
+        // v2.4.6：二级页也吃同一套壁纸 / 透明度。
+        .themedFormBackground()
         .listSectionSpacing(.compact)
         .navigationTitle("代理配置")
         .navigationBarTitleDisplayMode(.inline)
@@ -986,6 +988,7 @@ private struct SubscriptionListView: View {
             subscriptionSection
             updateSection
         }
+        .themedFormBackground()
         .listSectionSpacing(.compact)
         .navigationTitle("订阅")
         .navigationBarTitleDisplayMode(.inline)
@@ -1310,6 +1313,7 @@ private struct SubscriptionEditView: View {
                 }
             }
         }
+        .themedFormBackground()
         .navigationTitle(subscription == nil ? "添加订阅" : "编辑订阅")
         .navigationBarTitleDisplayMode(.inline)
         // 与「代理配置」页同样两件事：把被上层藏起来的导航栏要回来（右滑返回才在），
@@ -1453,6 +1457,7 @@ private struct KeywordEditor: View {
                 Text("多行之间是「或」。改完点返回，再点上一页的「保存」才会写进路由器。")
             }
         }
+        .themedFormBackground()
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { focused = true }

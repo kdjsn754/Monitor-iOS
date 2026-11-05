@@ -34,7 +34,8 @@ struct PollSettingsView: View {
             }
             .padding(16)
         }
-        .background(Color.clear)
+        // v2.4.6：`Color.clear` 只是「不画底」，壁纸得自己铺；否则推上来是一片纯色。
+        .themedScrollBackground()
         .navigationTitle("采集与刷新")
         .navigationBarTitleDisplayMode(.inline)
         // 根页面把导航栏隐藏了，这里显式要求显示，免得推上来没有返回按钮。

@@ -91,7 +91,10 @@ struct ConnectionPopupView: View {
             .frame(width: 266)
             .padding(.horizontal, 20)
             .padding(.vertical, 22)
-            .glassCard(padding: 0, cornerRadius: 24)
+            // v2.4.6：连接弹窗是盖在主界面之上的一次性浮层，不跟背景一起透。
+            // 卡片一透，底下「硬件状态 / CPU / 内存」的字会穿上来叠在步骤上，
+            // 截图里那张「连接成功」就是这样糊成一团的。
+            .glassCard(padding: 0, cornerRadius: 24, opaque: true)
             .shadow(color: .black.opacity(0.18), radius: 26, y: 12)
         }
     }

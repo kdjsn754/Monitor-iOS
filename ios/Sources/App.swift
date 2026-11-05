@@ -84,7 +84,8 @@ struct RootView: View {
                     }
                     .frame(width: 230)
                     .padding(.vertical, 22)
-                    .glassCard(padding: 0, cornerRadius: 22)
+                    // v2.4.6：和连接弹窗同理，浮层保持不透光。
+                    .glassCard(padding: 0, cornerRadius: 22, opaque: true)
                 }
                 .transition(.opacity)
             }
@@ -419,13 +420,11 @@ struct LoginView: View {
                 }
             }
         }
-        .background(
-            Color(.secondarySystemGroupedBackground),
-            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-        )
+        .adaptiveFill(Color(.secondarySystemGroupedBackground),
+                      in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(Color(.separator).opacity(0.5), lineWidth: 0.5)
+            AdaptiveBorder(shape: RoundedRectangle(cornerRadius: 18, style: .continuous),
+                           width: 0.5, strength: 0.5)
         }
     }
 

@@ -75,6 +75,9 @@ struct OverviewView: View {
             // 刷新入口保留在导航栏右上角那颗按钮（v2.3.3 起由 `pageChrome` 挂上去），功能不缺。
             .sheet(isPresented: $showAllDevices) {
                 DeviceListView()
+                    // v2.4.6：sheet 的系统材质底换成清底，壁纸由页内的
+                    // `themedFormBackground()` 自己铺，二级页也照得到。
+                    .presentationBackground(Color.clear)
             }
             .navigationDestination(isPresented: $showFanControl) {
                 // v2.1.16 起二级页**不再** `.toolbar(.hidden, for: .tabBar)`。

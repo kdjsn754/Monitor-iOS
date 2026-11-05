@@ -52,6 +52,7 @@ struct OfflineSettingsView: View {
                 Text("离线够久就从列表里移除，不影响路由器租约。")
             }
         }
+        .themedFormBackground()
         .navigationTitle("离线设备")
         .navigationBarTitleDisplayMode(.inline)
     }

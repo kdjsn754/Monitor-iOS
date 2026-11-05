@@ -79,6 +79,8 @@ struct SettingsView: View {
             .sheet(item: $editorRoute) { route in
                 ConnectionEditorView(profile: route.profile)
                     .id(route.id)
+                    // v2.4.6：sheet 自带一层不透明材质，不清掉的话壁纸只露在收起动画里。
+                    .presentationBackground(Color.clear)
             }
             // 裁壁纸：整屏铺满、可拖动可缩放，完成即生效（v2.4.1）。
             .fullScreenCover(item: $cropTask) { task in
@@ -92,6 +94,7 @@ struct SettingsView: View {
             .sheet(isPresented: $showSwitcher) {
                 RouterSwitcherSheet()
                     .environment(model)
+                    .presentationBackground(Color.clear)
             }
             .confirmationDialog("退出后需要重新输入密码", isPresented: $confirmLogout, titleVisibility: .visible) {
                 Button("断开并清除密码", role: .destructive) {
@@ -351,7 +354,7 @@ struct SettingsView: View {
     /// 分工：图片的存与裁在 `BackgroundImageStore` / `BackgroundCropper`，
     /// 铺满渲染在 `AppBackground`，这张卡只干四件事——选图、裁切、调不透明度、移除。
     /// 滑块调的是**图片自己的不透明度**（0% = 等于没设背景，回到默认渐变），
-    /// 不是卡片的；卡片的实心程度由 `GlassCardModifier.cardOpacity` 跟着这个值算。
+    /// 不是卡片的；卡片的实心程度由 `SurfaceAlpha.fill` 跟着这个值算（v2.4.6 起 100% 即 0）。
     private var backgroundCard: some View {
         SectionCard("背景", icon: "photo") {
             VStack(spacing: 12) {
@@ -724,6 +727,7 @@ private struct RouterSwitcherSheet: View {
                     Text("打开开关即切换，面板会收起并开始连接；删除会一并清掉钥匙串里存的密码。")
                 }
             }
+            .themedFormBackground()
             .navigationTitle("切换连接")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -1049,6 +1053,7 @@ private struct ConnectionEditorView: View {
                     }
                 }
             }
+            .themedFormBackground()
             .navigationTitle(profile == nil ? "新建连接" : "编辑连接")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

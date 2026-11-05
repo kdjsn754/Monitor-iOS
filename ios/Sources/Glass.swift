@@ -1,6 +1,113 @@
 import SwiftUI
 import UIKit
 
+// MARK: - 表面透明度（v2.4.6）
+
+/// 全 App 所有「块面」共用这一张表。
+///
+/// 滑块（`BackgroundImageStore.opacityKey`）0 → 1：
+/// · 没开自定义背景 —— 恒为 1，卡片 / 格子 / 按钮还是原来的实心样子；
+/// · 开了 —— 线性降到 0，**100% 就是全透**。v2.4.5 还留着 0.25 的底板，
+///   用户两次反馈「100 也不够透」，这一版把下限整个拿掉。
+///
+/// 之前只有 `glassCard` 读这个值，`plainTile` / `rowTile` / 导航栏圆钮 /
+/// Form 行底全是死的白底，所以大卡透了、里面一整块白格子还亮着
+/// （用户 v2.4.5 实拍的四张截图）。现在全部取同一个值，才不会断层。
+enum SurfaceAlpha {
+    static func fill(on: Bool, value: Double) -> Double {
+        guard on, value > 0.01 else { return 1 }
+        return max(0, 1 - min(max(value, 0), 1))
+    }
+
+    /// 全透时仍留 0.16 的一圈轮廓：连边都不画，按钮就成了「只有字没有形状」，
+    /// 手指不知道往哪儿按。填充严格到 0，边只是描一条发丝线。
+    static func outline(on: Bool, value: Double) -> Double {
+        max(0.16, fill(on: on, value: value))
+    }
+}
+
+/// 跟着滑块实时变透的任意形状填充。
+/// `@AppStorage` 不能省：`setOpacity` 每帧写 UserDefaults，只在这里读一次
+/// UserDefaults 的话，拖动过程中底色不会跟着动。
+struct AdaptiveFill<S: Shape>: View {
+    let shape: S
+    let color: Color
+    /// 盖在内容上的一次性浮层（连接弹窗等）走 true：必须完全不透光。
+    var forceOpaque = false
+
+    @AppStorage(BackgroundImageStore.onKey) private var onFlag = false
+    @AppStorage(BackgroundImageStore.opacityKey) private var opacityFlag = 0.6
+
+    var body: some View {
+        shape.fill(color.opacity(forceOpaque ? 1 : SurfaceAlpha.fill(onFlag, opacityFlag)))
+    }
+}
+
+/// 跟着滑块一起淡下去的细边。
+struct AdaptiveBorder<S: InsettableShape>: View {
+    let shape: S
+    var color: Color = Color(.separator)
+    var width: CGFloat = 0.75
+    /// 在边框自身颜色之上再乘一个系数（卡片 0.55、蓝色按钮 0.15 之类）。
+    var strength: Double = 1
+    var forceOpaque = false
+
+    @AppStorage(BackgroundImageStore.onKey) private var onFlag = false
+    @AppStorage(BackgroundImageStore.opacityKey) private var opacityFlag = 0.6
+
+    var body: some View {
+        shape.strokeBorder(
+            color.opacity(strength * (forceOpaque
+                                      ? 1
+                                      : SurfaceAlpha.outline(onFlag, opacityFlag))),
+            lineWidth: width
+        )
+    }
+}
+
+/// Form / List 的行底：和主卡片同一套透明度。
+/// 系统默认那块 `secondarySystemGroupedBackground` 是不透明白，不换掉的话
+/// 二级页会变成「背景是壁纸、卡片还是一整块白」。
+struct AdaptiveRowBackground: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @AppStorage(BackgroundImageStore.onKey) private var onFlag = false
+    @AppStorage(BackgroundImageStore.opacityKey) private var opacityFlag = 0.6
+
+    var body: some View {
+        (colorScheme == .dark
+         ? Color(.secondarySystemGroupedBackground)
+         : Color(.systemBackground))
+            .opacity(SurfaceAlpha.fill(onFlag, opacityFlag))
+    }
+}
+
+extension View {
+    /// 任意形状底色的「跟随透明度」版本，替换 `.background(color, in: shape)`。
+    func adaptiveFill<S: Shape>(_ color: Color, in shape: S) -> some View {
+        background { AdaptiveFill(shape: shape, color: color) }
+    }
+
+    /// 二级页 / sheet 里 `Form` / `List` 的通用背景：
+    /// ① 关掉系统不透明的滚动底；② 行底换成跟着滑块变透的卡片色；
+    /// ③ 在内容树里垫一层 `AppBackground()`——和 v2.4.4 修三个根页同一个道理，
+    ///    挂到 RootView 最底层会被原生 NavigationStack / 弹窗容器整个盖住。
+    func themedFormBackground() -> some View {
+        self
+            .scrollContentBackground(.hidden)
+            .listRowBackground(AdaptiveRowBackground())
+            .toolbarBackground(.hidden, for: .navigationBar)
+            .background { AppBackground() }
+    }
+
+    /// 二级页里普通 `ScrollView` 的通用背景（没有行底可换）。
+    func themedScrollBackground() -> some View {
+        self
+            .scrollContentBackground(.hidden)
+            .toolbarBackground(.hidden, for: .navigationBar)
+            .background { AppBackground() }
+    }
+}
+
 /// Lightweight, flat surface styling. No blur/material layers, so scrolling
 /// stays smooth on older iPhones.
 ///
@@ -33,11 +140,11 @@ struct AppBackground: View {
                 }
                 .ignoresSafeArea()
                 // 图上压一层极淡的主题色：挑到深色壁纸时黑字不至于糊进图里。
-                // v2.4.5 再从 0.22/0.10 降到 0.18/0.06——用户觉得 100% 时画面
-                // 还蒙着一层白，这层蒙版也有一份责任。
+                // v2.4.6：这层蒙版改成**跟着滑块一起退**——100% 时彻底没有，
+                // 才是用户说的「全透」。40% ～ 70% 这段仍留一点点压住花纹。
                 .overlay(colorScheme == .dark
-                         ? Color.black.opacity(0.18)
-                         : Color.white.opacity(0.06))
+                         ? Color.black.opacity(0.18 * (1 - opacityFlag))
+                         : Color.white.opacity(0.06 * (1 - opacityFlag)))
                 // 这个值是「图片的不透明度」：0 = 等于没设背景，1 = 原图。
                 .opacity(opacityFlag)
                 .transition(.opacity)
@@ -77,43 +184,34 @@ struct AppBackground: View {
 struct GlassCardModifier: ViewModifier {
     let padding: CGFloat
     let cornerRadius: CGFloat
-
-    // v2.4.4：和 `AppBackground` 一样改走 `@AppStorage`，不然背景图变了卡片
-    // 却还是全实心，壁纸只能在页边距那条 16pt 的缝里露出来，看着就像没设。
-    @AppStorage(BackgroundImageStore.onKey) private var onFlag = false
-    @AppStorage(BackgroundImageStore.opacityKey) private var opacityFlag = 0.6
+    /// v2.4.6：连接弹窗这类盖在内容上的一次性浮层不跟背景一起透。
+    /// 它底下还压着一层主界面，卡片一透，后面的 CPU / 内存数字就会穿上来，
+    /// 「连接成功」四个字反而读不清。
+    let opaque: Bool
 
     func body(content: Content) -> some View {
-        content
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        return content
             .padding(padding)
-            .background(
-                Color(.secondarySystemGroupedBackground).opacity(cardOpacity),
-                in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    // 卡片越透，这圈边也跟着淡，不然背景都透出来了边还硬邦邦的。
-                    .strokeBorder(Color(.separator).opacity(0.55 * cardOpacity),
-                                  lineWidth: 0.5)
+            .background {
+                AdaptiveFill(shape: shape,
+                             color: Color(.secondarySystemGroupedBackground),
+                             forceOpaque: opaque)
             }
-    }
-
-    /// 卡片的实心程度：滑块越往右，卡片越透。
-    ///
-    /// v2.4.5：用户「透明度 100 也不够透」——下限从 0.55 直接压到 0.25，
-    /// 系数 0.5 → 0.8。默认 60% 时约 0.52（原来 0.70），拉满 100% 时 0.25
-    /// （原来 0.55），壁纸基本能整片透出来。0.25 是底线：再低，正文压在
-    /// 花纹上就没有稳定的底色了；描边也会跟着这个值一起淡下去。
-    private var cardOpacity: Double {
-        guard onFlag, opacityFlag > 0.01 else { return 1 }
-        return max(0.25, 1 - opacityFlag * 0.8)
+            .overlay {
+                AdaptiveBorder(shape: shape, width: 0.5, strength: 0.55,
+                               forceOpaque: opaque)
+            }
     }
 }
 
 extension View {
     func glassCard(padding: CGFloat = 16,
-                   cornerRadius: CGFloat = 18) -> some View {
-        modifier(GlassCardModifier(padding: padding, cornerRadius: cornerRadius))
+                   cornerRadius: CGFloat = 18,
+                   opaque: Bool = false) -> some View {
+        modifier(GlassCardModifier(padding: padding,
+                                   cornerRadius: cornerRadius,
+                                   opaque: opaque))
     }
 }
 
@@ -176,12 +274,14 @@ struct PlainTileModifier<S: InsettableShape>: ViewModifier {
                 // 深色下不能用 `systemBackground`——那是纯黑（#000），压在 #1C1C1E 的卡片上
                 // 像挖了个洞，格子边框比文字还抢眼。`tertiarySystemBackground`（#2C2C2E）
                 // 比卡片亮一档，层级才对。这个坑 rowTile 已经踩过一次了。
-                shape.fill(colorScheme == .dark
-                           ? Color(.tertiarySystemBackground)
-                           : Color(.systemBackground))
+                // v2.4.6：填充和细边都改走 `AdaptiveFill/Border`，跟主卡片同步变透。
+                AdaptiveFill(shape: shape,
+                             color: colorScheme == .dark
+                                    ? Color(.tertiarySystemBackground)
+                                    : Color(.systemBackground))
             }
             .overlay {
-                shape.strokeBorder(Color(.separator), lineWidth: 0.75)
+                AdaptiveBorder(shape: shape)
             }
     }
 }
@@ -219,12 +319,13 @@ struct RowTileModifier: ViewModifier {
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
         return content
             .background {
-                shape.fill(colorScheme == .dark
-                           ? Color(.tertiarySystemBackground)
-                           : Color(.systemBackground))
+                AdaptiveFill(shape: shape,
+                             color: colorScheme == .dark
+                                    ? Color(.tertiarySystemBackground)
+                                    : Color(.systemBackground))
             }
             .overlay {
-                shape.strokeBorder(Color(.separator), lineWidth: 0.75)
+                AdaptiveBorder(shape: shape)
             }
     }
 }
@@ -376,12 +477,13 @@ private struct HeaderButtonSurface: ViewModifier {
     func body(content: Content) -> some View {
         content
             .background {
-                Circle().fill(colorScheme == .dark
-                              ? Color(.tertiarySystemBackground)
-                              : Color(.systemBackground))
+                AdaptiveFill(shape: Circle(),
+                             color: colorScheme == .dark
+                                    ? Color(.tertiarySystemBackground)
+                                    : Color(.systemBackground))
             }
             .overlay {
-                Circle().strokeBorder(Color(.separator), lineWidth: 0.75)
+                AdaptiveBorder(shape: Circle())
             }
     }
 }
