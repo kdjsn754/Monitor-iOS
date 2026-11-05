@@ -391,13 +391,11 @@ struct SettingsView: View {
                         Text("透明度")
                             .font(.subheadline)
                             .fixedSize()
-                        // v2.4.4：每动一帧都写 UserDefaults（有内存缓存，不是刷盘），
-                        // 让 `@AppStorage` 实时驱动背景和卡片；以前只改内存、松手才落盘，
-                        // 拖动时页面纹丝不动，看着又像「没生效」。
-                        Slider(value: Binding(get: { store.opacity },
-                                              set: { store.setOpacity($0) }),
-                               in: 0...1)
-                            .tint(.blue)
+                        // v2.4.5：系统 Slider 拖到两端会露出轨道断头（见 OpacitySlider
+                        // 的注释），换成自绘。`setOpacity` 仍每帧写 UserDefaults，
+                        // 所以背景和卡片保持实时跟着动。
+                        OpacitySlider(value: Binding(get: { store.opacity },
+                                                     set: { store.setOpacity($0) }))
                         Text("\(Int((store.opacity * 100).rounded()))%")
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
@@ -883,6 +881,66 @@ private struct RouterSwitcherSheet: View {
 private struct CropTask: Identifiable {
     let id = UUID()
     let image: UIImage
+}
+
+/// 自定义不透明度滑块（v2.4.5）。
+///
+/// 系统 `Slider` 的填充色是按拇指**中心**算的，可轨道本身却画到视图边缘；
+/// 拉到 100% 时，拇指右边缘到轨道右端还差半个拇指宽，那一小截被填成蓝色，
+/// 白色拇指盖不住，就露出一颗蓝色小尾巴；拉到 0% 时左边同理，是一条蓝色
+/// 直角断头。用户截的两张图里两端都是这个毛病。
+///
+/// 自己画一遍就能把两端收干净：灰色底轨整条铺满，蓝色只画到拇指中心，
+/// 拇指圆心严格限制在 `[半径, 宽度 - 半径]`，两端蓝条完全藏在拇指底下。
+/// 轨道用 Capsule，两端天然是圆角，也不会再有方角。
+private struct OpacitySlider: View {
+    @Binding var value: Double
+
+    private let trackHeight: CGFloat = 6
+    private let thumbSize: CGFloat = 22
+
+    var body: some View {
+        GeometryReader { geo in
+            let radius = thumbSize / 2
+            let usable = max(geo.size.width - thumbSize, 1)
+            let centerX = radius + CGFloat(min(max(value, 0), 1)) * usable
+
+            ZStack(alignment: .leading) {
+                // 底轨：0% 时也能看到一条完整、圆角的浅灰槽。
+                Capsule()
+                    .fill(Color(uiColor: .tertiarySystemFill))
+                    .frame(height: trackHeight)
+                // 已填充段：只到拇指中心，两端都不会探出拇指。
+                Capsule()
+                    .fill(Color.blue)
+                    .frame(width: max(centerX, trackHeight), height: trackHeight)
+                Circle()
+                    .fill(Color.white)
+                    .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
+                    .frame(width: thumbSize, height: thumbSize)
+                    .offset(x: centerX - radius)
+            }
+            .frame(width: geo.size.width, height: geo.size.height)
+            // 整条都能拖，不只是那 6pt 的细轨；点哪儿直接跳到哪儿。
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { g in
+                        let raw = Double((g.location.x - radius) / usable)
+                        value = min(max(raw, 0), 1)
+                    }
+            )
+            .accessibilityElement()
+            .accessibilityLabel("透明度")
+            .accessibilityValue("\(Int((value * 100).rounded()))%")
+            .accessibilityAddTraits(.adjustable)
+            .accessibilityAdjustableAction { direction in
+                if direction == .increment { value = min(value + 0.05, 1) }
+                else { value = max(value - 0.05, 0) }
+            }
+        }
+        .frame(height: 30)
+    }
 }
 
 private enum ConnectionEditorRoute: Identifiable {

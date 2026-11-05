@@ -33,9 +33,11 @@ struct AppBackground: View {
                 }
                 .ignoresSafeArea()
                 // 图上压一层极淡的主题色：挑到深色壁纸时黑字不至于糊进图里。
+                // v2.4.5 再从 0.22/0.10 降到 0.18/0.06——用户觉得 100% 时画面
+                // 还蒙着一层白，这层蒙版也有一份责任。
                 .overlay(colorScheme == .dark
-                         ? Color.black.opacity(0.22)
-                         : Color.white.opacity(0.10))
+                         ? Color.black.opacity(0.18)
+                         : Color.white.opacity(0.06))
                 // 这个值是「图片的不透明度」：0 = 等于没设背景，1 = 原图。
                 .opacity(opacityFlag)
                 .transition(.opacity)
@@ -90,17 +92,21 @@ struct GlassCardModifier: ViewModifier {
             )
             .overlay {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .strokeBorder(Color(.separator).opacity(0.55), lineWidth: 0.5)
+                    // 卡片越透，这圈边也跟着淡，不然背景都透出来了边还硬邦邦的。
+                    .strokeBorder(Color(.separator).opacity(0.55 * cardOpacity),
+                                  lineWidth: 0.5)
             }
     }
 
-    /// 卡片的实心程度：背景图越实，卡片越透，但**保底 0.55**——
-    /// 再透下去，正文压在花里胡哨的图上就开始看不清了。
-    /// v2.4.4 从「保底 0.62 / 系数 0.35」调透一档：默认图 60% 时约 0.70，
-    /// 拉满 100% 时 0.55，卡片之间能明显看出壁纸，不再像只换了条边。
+    /// 卡片的实心程度：滑块越往右，卡片越透。
+    ///
+    /// v2.4.5：用户「透明度 100 也不够透」——下限从 0.55 直接压到 0.25，
+    /// 系数 0.5 → 0.8。默认 60% 时约 0.52（原来 0.70），拉满 100% 时 0.25
+    /// （原来 0.55），壁纸基本能整片透出来。0.25 是底线：再低，正文压在
+    /// 花纹上就没有稳定的底色了；描边也会跟着这个值一起淡下去。
     private var cardOpacity: Double {
         guard onFlag, opacityFlag > 0.01 else { return 1 }
-        return max(0.55, 1 - opacityFlag * 0.5)
+        return max(0.25, 1 - opacityFlag * 0.8)
     }
 }
 

@@ -25,6 +25,18 @@ targets:
       path: Sources/Info.plist
       properties:
         CFBundleDisplayName: OpenWrt 监控
+        # v2.4.5：长按输入框弹出的「剪切 / 拷贝 / 自动填充 / 查找」是 UIKit 的
+        # 系统菜单，它的语言**不跟手机系统走，跟 App 自己声明支持的本地化走**。
+        # 以前只有 CFBundleDevelopmentRegion=zh_CN，没声明任何 localization，
+        # UIKit 就按「这个 App 只支持英文」回退，于是整条菜单都是英文。
+        # zh-Hans / zh_CN 两种写法都列上，兼容不同 iOS 版本的匹配规则；
+        # AllowMixedLocalizations 允许 UIKit 从自己的 framework 里取中文串。
+        CFBundleDevelopmentRegion: zh_CN
+        CFBundleLocalizations:
+          - zh-Hans
+          - zh_CN
+          - en
+        CFBundleAllowMixedLocalizations: true
         # ⚠️ 不写这两行，XcodeGen 会把它自己的默认值「1.0 / 1」写进 Info.plist，
         # 直接把 settings 里的 MARKETING_VERSION 盖掉——「关于」页和签名工具里
         # 永远显示 v1.0 (1) 就是这么来的（2026-10-31 实际踩过）。
@@ -56,8 +68,8 @@ targets:
         # 模块名带歪（改了模块名，所有源文件都不需要动，但 import 会变）。
         PRODUCT_MODULE_NAME: OpenWrtMonitor
         PRODUCT_BUNDLE_IDENTIFIER: com.catmint.openwrtmonitor
-        MARKETING_VERSION: 2.4.4
-        CURRENT_PROJECT_VERSION: 124
+        MARKETING_VERSION: 2.4.5
+        CURRENT_PROJECT_VERSION: 125
         SWIFT_VERSION: 5.9
         IPHONEOS_DEPLOYMENT_TARGET: 26.0
         CODE_SIGN_STYLE: Manual

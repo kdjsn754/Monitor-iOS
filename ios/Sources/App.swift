@@ -6,6 +6,15 @@ import UIKit
 struct OpenWrtMonitorApp: App {
     @State private var model = AppModel()
 
+    init() {
+        // v2.4.5：系统文本菜单（剪切 / 拷贝 / 自动填充 / 查找）的语言取的是
+        // `Bundle.main.preferredLocalizations`，不是手机系统语言。Info.plist 已经
+        // 用 CFBundleLocalizations 声明了中文；这里再兜一层，避免某些 iOS 版本在
+        // App 没有真实 .lproj 目录时仍然回退英文。只写中文一项，因为整个 App
+        // 的界面本来就全是硬编码中文，没有跟随系统语言的需求。
+        UserDefaults.standard.set(["zh-Hans"], forKey: "AppleLanguages")
+    }
+
     var body: some Scene {
         WindowGroup {
             RootView()
