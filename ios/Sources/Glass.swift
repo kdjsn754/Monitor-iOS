@@ -1,11 +1,54 @@
 import SwiftUI
+import UIKit
 
 /// Lightweight, flat surface styling. No blur/material layers, so scrolling
 /// stays smooth on older iPhones.
+///
+/// v2.4.0：底下多垫一层「自定义背景图」（设置页选的，见 `BackgroundImageStore`）。
+/// 渐变始终在：图没选、透明度拉到 0、或者图片还没读上来的时候，它就是兜底，
+/// 界面不会出现「一片透明露出黑底」的中间态。
 struct AppBackground: View {
     @Environment(\.colorScheme) private var colorScheme
+    @AppStorage(BackgroundImageStore.onKey) private var customOn = false
+    @AppStorage(BackgroundImageStore.versionKey) private var version = 0
+    @AppStorage(BackgroundImageStore.opacityKey) private var customOpacity = 0.35
+    /// 读上来的图放 `@State`：body 会跟着每一拍数据重建，几百 KB 的 jpg 每帧解一次太贵。
+    @State private var customImage: UIImage?
 
     var body: some View {
+        ZStack {
+            gradient
+            if customOn, let customImage {
+                GeometryReader { proxy in
+                    Image(uiImage: customImage)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .clipped()
+                        // 图上先压一层主题色（浅色压白、深色压黑）：
+                        // 不然挑到一张深色壁纸，卡片上的黑字直接糊在图里。
+                        .overlay(colorScheme == .dark
+                                 ? Color.black.opacity(0.30)
+                                 : Color.white.opacity(0.22))
+                }
+                .ignoresSafeArea()
+                // 这个值是「图片的不透明度」：0 = 等于没设背景，1 = 原图。
+                .opacity(customOpacity)
+                // 背景永远只是背景，别把点击吃掉。
+                .allowsHitTesting(false)
+            }
+        }
+        .ignoresSafeArea()
+        // 换图 / 删图都会把 version +1，这里跟着重读一次盘；首次进入也走这一趟。
+        .task(id: version) {
+            customImage = customOn ? BackgroundImageStore.load() : nil
+        }
+        .onChange(of: customOn) { _, on in
+            customImage = on ? BackgroundImageStore.load() : nil
+        }
+    }
+
+    private var gradient: some View {
         LinearGradient(
             colors: colorScheme == .dark
                 ? [
@@ -19,7 +62,6 @@ struct AppBackground: View {
             startPoint: .top,
             endPoint: .bottom
         )
-        .ignoresSafeArea()
     }
 }
 
@@ -27,17 +69,30 @@ struct GlassCardModifier: ViewModifier {
     let padding: CGFloat
     let cornerRadius: CGFloat
 
+    // 有自定义背景时卡片让出一点透明度，不然背景只在页边距那 16pt 里露一条缝，
+    // 「换了背景」看着像没生效。
+    @AppStorage(BackgroundImageStore.onKey) private var customOn = false
+    @AppStorage(BackgroundImageStore.opacityKey) private var customOpacity = 0.35
+
     func body(content: Content) -> some View {
         content
             .padding(padding)
             .background(
-                Color(.secondarySystemGroupedBackground),
+                Color(.secondarySystemGroupedBackground).opacity(cardOpacity),
                 in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
             )
             .overlay {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .strokeBorder(Color(.separator).opacity(0.55), lineWidth: 0.5)
             }
+    }
+
+    /// 卡片的实心程度：背景图越实，卡片越透，但**保底 0.62**——
+    /// 再透下去，正文压在花里胡哨的图上就开始看不清了。
+    /// 图很淡（默认 35%）时算出来约 0.87，跟原来的观感几乎一样。
+    private var cardOpacity: Double {
+        guard customOn else { return 1 }
+        return max(0.62, 1 - customOpacity * 0.38)
     }
 }
 

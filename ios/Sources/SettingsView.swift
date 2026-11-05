@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import PhotosUI
 
 /// 设置页：顶部一张「路由器」卡把当前连接、切换、新建、编辑、网页后台全收进去，
 /// 采集频率只留一行摘要，细项进二级页。
@@ -13,6 +14,14 @@ struct SettingsView: View {
     @State private var showRouterWeb = false
     /// 切换连接的半屏选择器（自绘，不再用系统的列表/菜单）。
     @State private var showSwitcher = false
+    /// 自定义背景（v2.4.0）：选中的相片、是否已设、不透明度。
+    /// 图片本身在 `BackgroundImageStore` 里，这里只经手这三个小值。
+    @State private var backgroundPick: PhotosPickerItem?
+    @AppStorage(BackgroundImageStore.onKey) private var hasCustomBackground = false
+    @AppStorage(BackgroundImageStore.opacityKey) private var backgroundOpacity = 0.35
+    @AppStorage(BackgroundImageStore.versionKey) private var backgroundVersion = 0
+    /// 卡片里的缩略图。跟 `AppBackground` 一样，读盘一次存住，别每次 body 现解。
+    @State private var backgroundThumb: UIImage?
 
     var body: some View {
         NavigationStack {
@@ -32,6 +41,7 @@ struct SettingsView: View {
                             }
                         }
                     appearanceCard
+                    backgroundCard
                     pollingCard
                     aboutCard
                     dangerCard
@@ -317,6 +327,124 @@ struct SettingsView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+            }
+        }
+    }
+
+    // MARK: - 背景（自定义图片 + 不透明度）
+
+    /// 自定义背景（v2.4.0，用户要求「可以自定义背景，可以自定义调透明度」）。
+    ///
+    /// 分工：图片的存与缩放在 `BackgroundImageStore`，真正的铺满渲染在 `AppBackground`，
+    /// 这张卡只干三件事——选图、调不透明度、移除。
+    /// 滑块调的是**图片自己的不透明度**（0% = 等于没设背景，回到默认渐变），
+    /// 不是卡片的；卡片的实心程度由 `GlassCardModifier.cardOpacity` 跟着这个值算。
+    private var backgroundCard: some View {
+        SectionCard("背景", icon: "photo") {
+            VStack(spacing: 12) {
+                HStack(spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Color(uiColor: .secondarySystemFill))
+                        if let backgroundThumb {
+                            Image(uiImage: backgroundThumb)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: 54, height: 54)
+                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        } else {
+                            Image(systemName: "photo")
+                                .font(.system(size: 18, weight: .medium))
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    .frame(width: 54, height: 54)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(hasCustomBackground ? "自定义背景" : "默认背景")
+                            .font(.subheadline.weight(.medium))
+                        Text(hasCustomBackground
+                             ? "照片铺满整页，卡片会跟着透一点"
+                             : "选一张照片铺在页面最底下")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 4)
+                }
+
+                if hasCustomBackground {
+                    HStack(spacing: 10) {
+                        Text("透明度")
+                            .font(.subheadline)
+                            .fixedSize()
+                        Slider(value: $backgroundOpacity, in: 0...1)
+                            .tint(.blue)
+                        Text("\(Int((backgroundOpacity * 100).rounded()))%")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .frame(width: 40, alignment: .trailing)
+                    }
+                }
+
+                HStack(spacing: 10) {
+                    PhotosPicker(selection: $backgroundPick, matching: .images) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "photo.on.rectangle")
+                                .font(.system(size: 13, weight: .semibold))
+                            Text(hasCustomBackground ? "更换图片" : "选择图片")
+                                .font(.subheadline.weight(.semibold))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 11)
+                        .background(
+                            Color.blue.opacity(0.14),
+                            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        )
+                        .foregroundStyle(.blue)
+                        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+
+                    if hasCustomBackground {
+                        Button {
+                            BackgroundImageStore.remove()
+                            backgroundThumb = nil
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "trash")
+                                    .font(.system(size: 13, weight: .semibold))
+                                Text("移除")
+                                    .font(.subheadline.weight(.semibold))
+                            }
+                            .frame(width: 96)
+                            .padding(.vertical, 11)
+                            .background(
+                                Color(uiColor: .secondarySystemFill),
+                                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            )
+                            .foregroundStyle(.secondary)
+                            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+        // 选完图之后不用手动等全局刷新，缩略图自己重读一次盘。
+        .task(id: backgroundVersion) {
+            backgroundThumb = hasCustomBackground ? BackgroundImageStore.load() : nil
+        }
+        // PhotosPicker 只给一个「相册里挑中的东西」，读成 Data 再交给 store 去缩放、落盘。
+        .onChange(of: backgroundPick) { _, item in
+            guard let item else { return }
+            Task {
+                if let data = try? await item.loadTransferable(type: Data.self),
+                   let image = UIImage(data: data) {
+                    BackgroundImageStore.save(image)
+                    backgroundThumb = BackgroundImageStore.load()
+                }
+                backgroundPick = nil
             }
         }
     }
