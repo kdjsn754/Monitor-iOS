@@ -5,10 +5,12 @@ import UIKit
 
 /// 全 App 所有「块面」共用这一张表。
 ///
-/// 滑块（`BackgroundImageStore.opacityKey`）0 → 1：
+/// 滑块（`BackgroundImageStore.opacityKey`）就是**卡片 / 格子 / 行底的透明度**，
+/// 0 → 1：
 /// · 没开自定义背景 —— 恒为 1，卡片 / 格子 / 按钮还是原来的实心样子；
-/// · 开了 —— 线性降到 0，**100% 就是全透**。v2.4.5 还留着 0.25 的底板，
-///   用户两次反馈「100 也不够透」，这一版把下限整个拿掉。
+/// · 开了 —— 线性降到 0，**100% 就是卡片填充全没了**（只剩轮廓，壁纸原样透出来）。
+///   **v2.4.7：这一档只管块面**，壁纸永远是原图，不降透明度、不压蒙版
+///   （用户：「调整透明度是模块瓦片控件这些的透明度，不是给背景也蒙上」）。
 ///
 /// 之前只有 `glassCard` 读这个值，`plainTile` / `rowTile` / 导航栏圆钮 /
 /// Form 行底全是死的白底，所以大卡透了、里面一整块白格子还亮着
@@ -112,23 +114,26 @@ extension View {
 /// stays smooth on older iPhones.
 ///
 /// v2.4.0：底下多垫一层「自定义背景图」（设置页选的，见 `BackgroundImageStore`）。
-/// 渐变始终在：图没选、透明度拉到 0、或者图片还没读上来的时候，它就是兜底，
+/// 渐变始终在：图没选、或者图片还没读上来的时候，它就是兜底，
 /// 界面不会出现「一片透明露出黑底」的中间态。
 struct AppBackground: View {
     @Environment(\.colorScheme) private var colorScheme
 
     /// v2.4.4：刷新信号改走 `@AppStorage`，不再只赌 `@Observable` 的追踪。
-    /// `on` / `opacity` 由 UserDefaults 直接驱动，`version` 专门通知「换了一张新图」；
+    /// `on` 由 UserDefaults 直接驱动，`version` 专门通知「换了一张新图」；
     /// 图片本身仍从 `BackgroundImageStore.shared` 的内存对象取，磁盘只管重启恢复。
+    ///
+    /// **v2.4.7：这一层不再读滑块。** 用户：「调整透明度是模块瓦片控件这些的透明度，
+    /// 不是给背景也蒙上」——`customBackgroundOpacity` 从此只管卡片 / 格子 / 行底，
+    /// 壁纸永远是原图（不压蒙版、不降不透明度）。
     @AppStorage(BackgroundImageStore.onKey) private var onFlag = false
-    @AppStorage(BackgroundImageStore.opacityKey) private var opacityFlag = 0.6
     @AppStorage(BackgroundImageStore.versionKey) private var version = 0
     @State private var shownImage: UIImage?
 
     var body: some View {
         ZStack {
             gradient
-            if onFlag, let shownImage, opacityFlag > 0.01 {
+            if onFlag, let shownImage {
                 // 明确量尺寸，不用 `Color.clear.overlay`——完全透明的底视图拿到多大
                 // 尺寸全看父容器心情，之前「一层都没画出来」也有它的份。
                 GeometryReader { proxy in
@@ -139,14 +144,6 @@ struct AppBackground: View {
                         .clipped()
                 }
                 .ignoresSafeArea()
-                // 图上压一层极淡的主题色：挑到深色壁纸时黑字不至于糊进图里。
-                // v2.4.6：这层蒙版改成**跟着滑块一起退**——100% 时彻底没有，
-                // 才是用户说的「全透」。40% ～ 70% 这段仍留一点点压住花纹。
-                .overlay(colorScheme == .dark
-                         ? Color.black.opacity(0.18 * (1 - opacityFlag))
-                         : Color.white.opacity(0.06 * (1 - opacityFlag)))
-                // 这个值是「图片的不透明度」：0 = 等于没设背景，1 = 原图。
-                .opacity(opacityFlag)
                 .transition(.opacity)
             }
         }

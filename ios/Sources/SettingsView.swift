@@ -352,9 +352,10 @@ struct SettingsView: View {
     /// v2.4.1 用户补两条：换了不起作用、不能自己裁切）。
     ///
     /// 分工：图片的存与裁在 `BackgroundImageStore` / `BackgroundCropper`，
-    /// 铺满渲染在 `AppBackground`，这张卡只干四件事——选图、裁切、调不透明度、移除。
-    /// 滑块调的是**图片自己的不透明度**（0% = 等于没设背景，回到默认渐变），
-    /// 不是卡片的；卡片的实心程度由 `SurfaceAlpha.fill` 跟着这个值算（v2.4.6 起 100% 即 0）。
+    /// 铺满渲染在 `AppBackground`，这张卡只干四件事——选图、裁切、调透明度、移除。
+    /// 滑块调的是**卡片 / 瓦片 / 行底的透明度**，不是壁纸（v2.4.7 用户明确：
+    /// 「调整透明度是模块瓦片控件这些的透明度，不是给背景也蒙上」）。
+    /// 0% = 卡片全实心，100% = 卡片填充为 0、只剩轮廓，壁纸始终是原图。
     private var backgroundCard: some View {
         SectionCard("背景", icon: "photo") {
             VStack(spacing: 12) {
@@ -380,7 +381,7 @@ struct SettingsView: View {
                         Text(store.isOn ? "自定义背景" : "默认背景")
                             .font(.subheadline.weight(.medium))
                         Text(store.isOn
-                             ? "已按整屏比例裁好，卡片会跟着透一点"
+                             ? "已按整屏比例裁好，壁纸原图铺满"
                              : "选一张照片铺在页面最底下，可以自己裁")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
@@ -391,12 +392,12 @@ struct SettingsView: View {
 
                 if store.isOn {
                     HStack(spacing: 10) {
-                        Text("透明度")
+                        Text("卡片透明度")
                             .font(.subheadline)
                             .fixedSize()
                         // v2.4.5：系统 Slider 拖到两端会露出轨道断头（见 OpacitySlider
                         // 的注释），换成自绘。`setOpacity` 仍每帧写 UserDefaults，
-                        // 所以背景和卡片保持实时跟着动。
+                        // 所以卡片 / 格子保持实时跟着动。
                         OpacitySlider(value: Binding(get: { store.opacity },
                                                      set: { store.setOpacity($0) }))
                         Text("\(Int((store.opacity * 100).rounded()))%")
