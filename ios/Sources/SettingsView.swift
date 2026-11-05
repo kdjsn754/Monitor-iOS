@@ -933,7 +933,9 @@ private struct OpacitySlider: View {
             .accessibilityElement()
             .accessibilityLabel("透明度")
             .accessibilityValue("\(Int((value * 100).rounded()))%")
-            .accessibilityAddTraits(.adjustable)
+            // `accessibilityAdjustableAction` 自己会把元素标成 adjustable；
+            // 别再写 `.accessibilityAddTraits(.adjustable)`——SwiftUI 的
+            // `AccessibilityTraits` 没有这个成员（2.4.5 首次构建就折在这儿）。
             .accessibilityAdjustableAction { direction in
                 if direction == .increment { value = min(value + 0.05, 1) }
                 else { value = max(value - 0.05, 0) }
