@@ -463,16 +463,22 @@ struct SettingsView: View {
         // v2.4.0 是直接存下来，所以用户没法调整取景；现在中间多了裁切这一步。
         .onChange(of: backgroundPick) { _, item in
             guard let item else { return }
-            Task {
+            Task { @MainActor in
                 pickError = nil
-                if let picked = await loadPickedImage(item) {
-                    cropTask = CropTask(image: BackgroundCropper.upright(picked, maxSide: 3000))
-                } else {
+                backgroundPick = nil
+                guard let picked = await loadPickedImage(item) else {
                     // iCloud 里没下载完、或者格式解不开时，以前是静默失败——
                     // 点完「选择图片」什么都不发生，正是「换了不起作用」的一半来源。
                     pickError = "这张照片读不出来，换一张试试（iCloud 原图需要先下载）"
+                    return
                 }
-                backgroundPick = nil
+                let upright = BackgroundCropper.upright(picked, maxSide: 3000)
+                // PhotosPicker 自己也是一次 presentation。它 dismiss 的转场还没走完
+                // 就弹 fullScreenCover，两个转场撞在一起：裁切页能显示出来，但触摸
+                // 会被上面那层尚未撤干净的 window 吃掉——表现就是「按钮根本点不了」。
+                // 等它收干净再呈现（v2.4.3，配合裁切页里按钮挪到底部一起修）。
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                cropTask = CropTask(image: upright)
             }
         }
     }
