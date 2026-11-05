@@ -501,14 +501,14 @@ struct SettingsView: View {
         cropTask = CropTask(image: source)
     }
 
-    /// 相片读成 `UIImage`：先试 `Data`（最稳），不行再用 `UIImage` 的 Transferable。
-    /// 单独拆出来是因为这里面每一种失败都只该表现为「一句提示」，而不是崩溃或静默。
+    /// 相片读成 `UIImage`。
+    ///
+    /// 只走 `Data` 这一条：`UIImage` 自己**不符合 `Transferable`**（CI 报过
+    /// `requires that 'UIImage' conform to 'Transferable'`），`Image` 那个版本拿到了也取不回
+    /// 原始像素、没法再裁。`Data` 是相册选择器最稳的一条路，失败就是失败，交给上面写提示。
     private func loadPickedImage(_ item: PhotosPickerItem) async -> UIImage? {
-        if let data = try? await item.loadTransferable(type: Data.self),
-           let image = UIImage(data: data) {
-            return image
-        }
-        return try? await item.loadTransferable(type: UIImage.self)
+        guard let data = try? await item.loadTransferable(type: Data.self) else { return nil }
+        return UIImage(data: data)
     }
 
     // MARK: - 采集与刷新（摘要，细则进二级页）
