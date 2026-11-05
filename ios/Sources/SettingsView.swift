@@ -21,7 +21,7 @@ struct SettingsView: View {
     @State private var cropTask: CropTask?
     /// 相片读不出来时给一句人话，不然点完像没反应。
     @State private var pickError: String?
-    private var store = BackgroundImageStore.shared
+    @State private var store = BackgroundImageStore.shared
 
     var body: some View {
         NavigationStack {
@@ -68,7 +68,10 @@ struct SettingsView: View {
             // ⚠️ 这一句**救不到 sheet / push 出来的页面**（v2.1.17 实测：模块设置、离线设备、
             // 订阅编辑、切换连接那几页的开关照样是黑的），那些页面的开关必须各自显式 `.tint(.blue)`。
             .tint(.blue)
-            .background(Color.clear)
+            // v2.4.4：背景层必须挂在本页的视图树里。以前只挂在 RootView 的 ZStack 最底层，
+            // 被原生 TabView / NavigationStack 那层不透明的系统容器整个盖住——图存进去了、
+            // 开关也是开的，页面却一点都看不到。挂在这里才在容器之上、卡片之下。
+            .background { AppBackground() }
             // v2.3.3：同概览页，标题和刷新钮搬进导航栏，导航栏常驻（详见 Glass.swift 的 `pageChrome`）。
             // v2.3.14：刷新钮删掉（用户要求）。这一页没有会过期的数据——连接由轮询维护，
             // 间隔在「刷新频率」卡里改，退出登录是独立按钮；那颗刷新键按下去只是白跑一轮采集。
@@ -388,13 +391,12 @@ struct SettingsView: View {
                         Text("透明度")
                             .font(.subheadline)
                             .fixedSize()
+                        // v2.4.4：每动一帧都写 UserDefaults（有内存缓存，不是刷盘），
+                        // 让 `@AppStorage` 实时驱动背景和卡片；以前只改内存、松手才落盘，
+                        // 拖动时页面纹丝不动，看着又像「没生效」。
                         Slider(value: Binding(get: { store.opacity },
                                               set: { store.setOpacity($0) }),
-                               in: 0...1,
-                               onEditingChanged: { editing in
-                                   // 拖动时只改内存，松手才落盘，别一次拖动写几百遍。
-                                   if !editing { store.persistOpacity() }
-                               })
+                               in: 0...1)
                             .tint(.blue)
                         Text("\(Int((store.opacity * 100).rounded()))%")
                             .font(.caption.monospacedDigit())

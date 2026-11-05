@@ -30,18 +30,20 @@ final class BackgroundImageStore {
 
     private let defaults = UserDefaults.standard
 
-    private enum Keys {
-        static let on = "customBackgroundOn"
-        static let opacity = "customBackgroundOpacity"
-    }
+    /// v2.4.4：这三个键同时是 `@AppStorage` 的刷新信号，所以不能藏在 private enum 里。
+    /// `on` / `opacity` 由视图直接读；`version` 每换一次图 +1，专门用来通知
+    /// 「同一张开关状态换了一张新图」——只盯 `on` 是看不出换图的。
+    static let onKey = "customBackgroundOn"
+    static let opacityKey = "customBackgroundOpacity"
+    static let versionKey = "customBackgroundVersion"
 
     /// 沿用 v2.4.0 的文件名，老用户的背景图升级后照样在。
     private static var croppedURL: URL { fileURL("app-background.jpg") }
     private static var originalURL: URL { fileURL("app-background-original.jpg") }
 
     init() {
-        isOn = defaults.bool(forKey: Keys.on)
-        if let saved = defaults.object(forKey: Keys.opacity) as? Double {
+        isOn = defaults.bool(forKey: BackgroundImageStore.onKey)
+        if let saved = defaults.object(forKey: BackgroundImageStore.opacityKey) as? Double {
             opacity = min(max(saved, 0), 1)
         }
         image = Self.read(Self.croppedURL)
@@ -68,9 +70,11 @@ final class BackgroundImageStore {
         }
 
         isOn = true
-        defaults.set(true, forKey: Keys.on)
+        defaults.set(true, forKey: BackgroundImageStore.onKey)
         // 从没设过背景的人第一次选图，直接给一个「看得出有变化」的默认值。
-        if opacity < 0.35 { opacity = 0.6; defaults.set(opacity, forKey: Keys.opacity) }
+        if opacity < 0.35 { opacity = 0.6; defaults.set(opacity, forKey: BackgroundImageStore.opacityKey) }
+        // 内存里的图已经换好，再发信号让各页的 `@AppStorage(versionKey)` 重画。
+        bumpVersion()
     }
 
     func remove() {
@@ -79,16 +83,22 @@ final class BackgroundImageStore {
         image = nil
         original = nil
         isOn = false
-        defaults.set(false, forKey: Keys.on)
+        defaults.set(false, forKey: BackgroundImageStore.onKey)
+        bumpVersion()
     }
 
-    /// 拖动滑块时只改内存，松手再落盘——不然拖一次会写几百遍 UserDefaults。
+    /// 滑块每动一帧都写一次：UserDefaults 是 `@AppStorage` 的刷新信号，
+    /// 只改内存的话背景要等松手才动，用户会以为「拖了没反应」。
+    /// `UserDefaults.set` 有内存缓存，不是每帧同步刷盘，这点开销可以接受。
     func setOpacity(_ value: Double) {
         opacity = min(max(value, 0), 1)
+        defaults.set(opacity, forKey: BackgroundImageStore.opacityKey)
     }
 
-    func persistOpacity() {
-        defaults.set(opacity, forKey: Keys.opacity)
+    /// 换图 / 删图都 +1。只盯 `on` 的话，「同一状态换一张图」是看不出来的。
+    private func bumpVersion() {
+        let next = defaults.integer(forKey: BackgroundImageStore.versionKey) + 1
+        defaults.set(next, forKey: BackgroundImageStore.versionKey)
     }
 
     // MARK: - 盘

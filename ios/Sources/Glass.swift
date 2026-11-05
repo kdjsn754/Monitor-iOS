@@ -9,39 +9,50 @@ import UIKit
 /// 界面不会出现「一片透明露出黑底」的中间态。
 struct AppBackground: View {
     @Environment(\.colorScheme) private var colorScheme
-    /// v2.4.1：直接观察同一个对象。裁完赋值那一刻这里就重画，
-    /// 不再走「版本号 → 读盘」那串接力（那串断一环就看起来完全没生效）。
-    private var store = BackgroundImageStore.shared
+
+    /// v2.4.4：刷新信号改走 `@AppStorage`，不再只赌 `@Observable` 的追踪。
+    /// `on` / `opacity` 由 UserDefaults 直接驱动，`version` 专门通知「换了一张新图」；
+    /// 图片本身仍从 `BackgroundImageStore.shared` 的内存对象取，磁盘只管重启恢复。
+    @AppStorage(BackgroundImageStore.onKey) private var onFlag = false
+    @AppStorage(BackgroundImageStore.opacityKey) private var opacityFlag = 0.6
+    @AppStorage(BackgroundImageStore.versionKey) private var version = 0
+    @State private var shownImage: UIImage?
 
     var body: some View {
         ZStack {
             gradient
-            if store.isOn, let image = store.image, store.opacity > 0.01 {
-                // 不用 GeometryReader：`Color.clear` 拿到父给的尺寸，
-                // 图片铺在 overlay 里溢出，再裁掉。背景图已经是整屏比例，
-                // 所以这一层几乎是 1:1 铺满，不会再把裁好的画面切掉一块。
-                Color.clear
-                    .overlay {
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFill()
-                    }
-                    .clipped()
-                    // 图上压一层极淡的主题色（浅色压白、深色压黑）：
-                    // 挑到一张深色壁纸时，卡片上的黑字不至于糊进图里。
-                    // v2.4.1 从 0.22/0.30 降到 0.10/0.22——原来那层把照片洗掉了一半。
-                    .overlay(colorScheme == .dark
-                             ? Color.black.opacity(0.22)
-                             : Color.white.opacity(0.10))
-                    // 这个值是「图片的不透明度」：0 = 等于没设背景，1 = 原图。
-                    .opacity(store.opacity)
-                    // 背景永远只是背景，别把点击吃掉。
-                    .allowsHitTesting(false)
-                    .transition(.opacity)
+            if onFlag, let shownImage, opacityFlag > 0.01 {
+                // 明确量尺寸，不用 `Color.clear.overlay`——完全透明的底视图拿到多大
+                // 尺寸全看父容器心情，之前「一层都没画出来」也有它的份。
+                GeometryReader { proxy in
+                    Image(uiImage: shownImage)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .clipped()
+                }
+                .ignoresSafeArea()
+                // 图上压一层极淡的主题色：挑到深色壁纸时黑字不至于糊进图里。
+                .overlay(colorScheme == .dark
+                         ? Color.black.opacity(0.22)
+                         : Color.white.opacity(0.10))
+                // 这个值是「图片的不透明度」：0 = 等于没设背景，1 = 原图。
+                .opacity(opacityFlag)
+                .transition(.opacity)
             }
         }
         .ignoresSafeArea()
-        .animation(.easeInOut(duration: 0.25), value: store.isOn)
+        // 背景永远只是背景，整层都不参与命中测试。
+        .allowsHitTesting(false)
+        .animation(.easeInOut(duration: 0.25), value: onFlag)
+        // `task(id:)` 管首次挂载与重启恢复，`onChange` 管换图当下这一拍。
+        .task(id: version) { reload() }
+        .onChange(of: version) { _, _ in reload() }
+        .onChange(of: onFlag) { _, _ in reload() }
+    }
+
+    private func reload() {
+        shownImage = onFlag ? BackgroundImageStore.shared.image : nil
     }
 
     private var gradient: some View {
@@ -65,9 +76,10 @@ struct GlassCardModifier: ViewModifier {
     let padding: CGFloat
     let cornerRadius: CGFloat
 
-    // 有自定义背景时卡片让出一点透明度，不然背景只在页边距那 16pt 里露一条缝，
-    // 「换了背景」看着像没生效。
-    private var store = BackgroundImageStore.shared
+    // v2.4.4：和 `AppBackground` 一样改走 `@AppStorage`，不然背景图变了卡片
+    // 却还是全实心，壁纸只能在页边距那条 16pt 的缝里露出来，看着就像没设。
+    @AppStorage(BackgroundImageStore.onKey) private var onFlag = false
+    @AppStorage(BackgroundImageStore.opacityKey) private var opacityFlag = 0.6
 
     func body(content: Content) -> some View {
         content
@@ -82,12 +94,13 @@ struct GlassCardModifier: ViewModifier {
             }
     }
 
-    /// 卡片的实心程度：背景图越实，卡片越透，但**保底 0.62**——
+    /// 卡片的实心程度：背景图越实，卡片越透，但**保底 0.55**——
     /// 再透下去，正文压在花里胡哨的图上就开始看不清了。
-    /// 图很淡（默认 60%）时算出来约 0.79。
+    /// v2.4.4 从「保底 0.62 / 系数 0.35」调透一档：默认图 60% 时约 0.70，
+    /// 拉满 100% 时 0.55，卡片之间能明显看出壁纸，不再像只换了条边。
     private var cardOpacity: Double {
-        guard store.isOn, store.opacity > 0.01 else { return 1 }
-        return max(0.62, 1 - store.opacity * 0.35)
+        guard onFlag, opacityFlag > 0.01 else { return 1 }
+        return max(0.55, 1 - opacityFlag * 0.5)
     }
 }
 

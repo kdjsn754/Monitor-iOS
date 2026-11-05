@@ -27,7 +27,10 @@ struct RootView: View {
 
     var body: some View {
         ZStack {
-            AppBackground()
+            // v2.4.4：已连接时三个根页各自在自己的视图树里挂背景层
+            // （被原生 TabView / NavigationStack 的不透明容器挡住的是这一层）。
+            // 这里再垫一层会叠成两遍、照片过浓，只在登录页保留底层兜底。
+            if !model.connected { AppBackground() }
             Group {
                 if model.connected {
                     MainTabs()

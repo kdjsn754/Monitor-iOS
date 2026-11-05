@@ -71,7 +71,10 @@ struct ProxyView: View {
             // ⚠️ 这一句**救不到 sheet / push 出来的页面**（v2.1.17 实测：模块设置、离线设备、
             // 订阅编辑、切换连接那几页的开关照样是黑的），那些页面的开关必须各自显式 `.tint(.blue)`。
             .tint(.blue)
-            .background(Color.clear)
+            // v2.4.4：背景层必须挂在本页的视图树里。以前只挂在 RootView 的 ZStack 最底层，
+            // 被原生 TabView / NavigationStack 那层不透明的系统容器整个盖住——图存进去了、
+            // 开关也是开的，页面却一点都看不到。挂在这里才在容器之上、卡片之下。
+            .background { AppBackground() }
             // v2.3.3：同概览页，标题和刷新钮搬进导航栏，导航栏常驻（详见 Glass.swift 的 `pageChrome`）。
             .pageChrome("代理") {
                 // v2.3.14：刷新期间按钮原地换成转圈。以前这里按下去什么都不动——
