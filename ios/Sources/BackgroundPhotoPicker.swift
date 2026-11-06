@@ -122,7 +122,7 @@ private struct BackgroundPhotoGrid: View {
             Color(uiColor: .systemBackground)
                 .ignoresSafeArea()
             if hiddenAssets.isEmpty {
-                message("没有隐藏的照片")
+                hiddenEmptyState
             } else {
                 tileGrid(hiddenAssets)
             }
@@ -130,6 +130,20 @@ private struct BackgroundPhotoGrid: View {
         }
         .navigationTitle("已隐藏")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    /// 隐藏页的空态：把能自查的两条都摆出来。
+    /// ① 系统「显示已隐藏的相册」关着 → 隐藏资产根本不下发，App 拿不到也读不到开关；
+    /// ② 只授权了「部分照片」→ 隐藏照片可能压根不在授权范围里，给个「管理」直接补。
+    private var hiddenEmptyState: some View {
+        VStack(spacing: 14) {
+            message("没有隐藏的照片",
+                    note: "如果这里本来应该有，先到 iPhone「设置 › 照片」确认「显示已隐藏的相册」已打开")
+            if status == .limited {
+                Button("管理可访问的照片") { manageLimited() }
+                    .font(.footnote.weight(.semibold))
+            }
+        }
     }
 
     private func tileGrid(_ list: [PHAsset]) -> some View {
@@ -162,7 +176,7 @@ private struct BackgroundPhotoGrid: View {
         .padding(28)
     }
 
-    private func message(_ text: String) -> some View {
+    private func message(_ text: String, note: String? = nil) -> some View {
         VStack(spacing: 8) {
             Image(systemName: "photo.on.rectangle")
                 .font(.title2)
@@ -170,6 +184,14 @@ private struct BackgroundPhotoGrid: View {
             Text(text)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
+            if let note {
+                Text(note)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 36)
+                    .padding(.top, 2)
+            }
         }
     }
 
@@ -202,8 +224,10 @@ private struct BackgroundPhotoGrid: View {
             return
         }
         // 两批一起取：主网格排除隐藏，分类页只留隐藏。
+        // 隐藏这批**不能**靠全局 fetch + includeHiddenAssets（v2.4.13/2.4.14 就是这么写的，
+        // 用户机上照样一张都取不到），要直接问系统「已隐藏」那个智能相簿。
         assets = PhotoLibrary.images(includeHidden: false)
-        hiddenAssets = PhotoLibrary.images(includeHidden: true).filter { $0.isHidden }
+        hiddenAssets = PhotoLibrary.hiddenImages()
         loading = false
     }
 
@@ -397,6 +421,34 @@ enum PhotoLibrary {
         var list: [PHAsset] = []
         list.reserveCapacity(result.count)
         result.enumerateObjects { asset, _, _ in list.append(asset) }
+        return list
+    }
+
+    /// 只取「已隐藏」里的照片。
+    ///
+    /// **为什么不用全局 fetch + `includeHiddenAssets = true`**：v2.4.13 那么写，用户机上
+    /// 一张都拿不到（2026-11-06 实测）。系统把隐藏资产挂在专门的智能相簿
+    /// `smartAlbumAllHidden` 下，直接对相簿 fetch 才稳定。相簿里不筛 `mediaType`，
+    /// 取完在内存里挑图片——隐藏的照片通常没几张，这点开销不值得再加 predicate 冒险。
+    static func hiddenImages() -> [PHAsset] {
+        let options = PHFetchOptions()
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        options.includeHiddenAssets = true
+
+        var list: [PHAsset] = []
+        let albums = PHAssetCollection.fetchAssetCollections(with: .smartAlbum,
+                                                            subtype: .smartAlbumAllHidden,
+                                                            options: nil)
+        albums.enumerateObjects { album, _, _ in
+            let result = PHAsset.fetchAssets(in: album, options: options)
+            result.enumerateObjects { asset, _, _ in
+                if asset.mediaType == .image { list.append(asset) }
+            }
+        }
+        // 兜底：某些系统版本上「已隐藏」相簿取不到，但全局 fetch 能拿到 hidden 资产。
+        if list.isEmpty {
+            list = images(includeHidden: true).filter { $0.isHidden }
+        }
         return list
     }
 
