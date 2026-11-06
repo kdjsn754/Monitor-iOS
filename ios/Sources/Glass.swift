@@ -90,15 +90,35 @@ extension View {
     }
 
     /// 二级页 / sheet 里 `Form` / `List` 的通用背景：
-    /// ① 关掉系统不透明的滚动底；② 行底换成跟着滑块变透的卡片色；
-    /// ③ 在内容树里垫一层 `AppBackground()`——和 v2.4.4 修三个根页同一个道理，
-    ///    挂到 RootView 最底层会被原生 NavigationStack / 弹窗容器整个盖住。
+    /// ① 关掉系统不透明的滚动底；② 在内容树里垫一层 `AppBackground()`——
+    ///    和 v2.4.4 修三个根页同一个道理，挂到 RootView 最底层会被原生
+    ///    NavigationStack / 弹窗容器整个盖住。
+    ///
+    /// **v2.4.10：这里那行 `.listRowBackground` 别再当成行底用。**
+    /// v2.4.6 就是这么写在 `Form` 上的，结果 iOS 26 不往下传给行——用户装了
+    /// 之后八个二级页 / 弹窗全是死白行底（截图：新建连接、切换连接、连接设备、
+    /// 添加订阅、代理配置、订阅、概览模块）。行底必须逐行挂 `.adaptiveRowBackground()`。
+    /// 这行留着只是「万一某个系统版本又会传」的兜底，别指望它。
     func themedFormBackground() -> some View {
         self
             .scrollContentBackground(.hidden)
             .listRowBackground(AdaptiveRowBackground())
             .toolbarBackground(.hidden, for: .navigationBar)
             .background { AppBackground() }
+    }
+
+    /// Form / List 的**单行**行底。
+    ///
+    /// `.listRowBackground` 是行级修饰符，挂在 `Form` 上不传递（v2.4.6 的坑，
+    /// 见 `themedFormBackground` 注释）。所以每个要变透的行都得显式挂一次。
+    func adaptiveRowBackground() -> some View {
+        listRowBackground(AdaptiveRowBackground())
+    }
+
+    /// 纯按钮行（「连接并保存」「全部更新」这种整宽胶囊）：行底让开，
+    /// 按钮自己的形状才不会被一块白方板包住。
+    func clearRowBackground() -> some View {
+        listRowBackground(Color.clear)
     }
 
     /// 二级页里普通 `ScrollView` 的通用背景（没有行底可换）。

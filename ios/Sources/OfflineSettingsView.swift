@@ -18,6 +18,7 @@ struct OfflineSettingsView: View {
             Section {
                 Toggle("自动清理离线设备", isOn: $model.autoRemoveOffline)
                     .tint(.blue)
+                    .adaptiveRowBackground()
 
                 if model.autoRemoveOffline {
                     // 时长做成菜单选择，不做滑条——「离线多久算久」是几档常识值，不是连续量。
@@ -26,6 +27,7 @@ struct OfflineSettingsView: View {
                             Text(Self.label(minutes)).tag(minutes)
                         }
                     }
+                    .adaptiveRowBackground()
                 }
 
                 // 「已隐藏」跟自动清理开关无关：手动点垃圾桶删掉的设备也记在这里，
@@ -47,6 +49,7 @@ struct OfflineSettingsView: View {
                         // borderless：不加这行，点这一行任何位置都会触发恢复。
                         .buttonStyle(.borderless)
                     }
+                    .adaptiveRowBackground()
                 }
             } footer: {
                 Text("离线够久就从列表里移除，不影响路由器租约。")

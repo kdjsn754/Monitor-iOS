@@ -41,6 +41,8 @@ struct ModuleSettingsView: View {
                         .tint(.blue)
                     }
                     .padding(.vertical, 2)
+                    // v2.4.10：行底逐行挂，`.themedFormBackground()` 里那句不传递。
+                    .adaptiveRowBackground()
                 }
                 .onMove { source, destination in
                     model.moveModules(from: source, to: destination)

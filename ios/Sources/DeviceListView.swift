@@ -40,11 +40,14 @@ struct DeviceListView: View {
                 Section {
                     if model.devices.isEmpty {
                         emptyState
+                            .adaptiveRowBackground()
                     } else {
                         // 用 IP 做标识：每轮采集都会重建 DeviceInfo，id 每次都不一样，
                         // 换成 IP 行才不会每 2 秒被整体重建一次。
                         ForEach(model.devices, id: \.ip) { device in
                             row(device)
+                                // v2.4.10：行底必须逐行挂，挂在 Form 上不生效。
+                                .adaptiveRowBackground()
                         }
                     }
                 } header: {

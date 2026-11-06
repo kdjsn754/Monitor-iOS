@@ -717,9 +717,12 @@ private struct RouterSwitcherSheet: View {
                 Section {
                     if model.profiles.isEmpty {
                         emptyState
+                            .adaptiveRowBackground()
                     } else {
                         ForEach(model.profiles) { profile in
                             row(profile)
+                                // v2.4.10：行底逐行挂，挂在 Form 上不传递。
+                                .adaptiveRowBackground()
                         }
                     }
                 } header: {
@@ -997,16 +1000,22 @@ private struct ConnectionEditorView: View {
             Form {
                 Section("连接信息") {
                     TextField("连接名称（可选）", text: $label)
+                        .adaptiveRowBackground()
                     TextField("路由器地址", text: $host)
                         .textInputAutocapitalization(.never)
                         .keyboardType(.URL)
+                        .adaptiveRowBackground()
                     TextField("SSH 端口", text: $port)
                         .keyboardType(.numberPad)
+                        .adaptiveRowBackground()
                     TextField("网页后台端口（LuCI）", text: $webPort)
                         .keyboardType(.numberPad)
+                        .adaptiveRowBackground()
                     TextField("用户名", text: $user)
                         .textInputAutocapitalization(.never)
+                        .adaptiveRowBackground()
                     SecureField("密码", text: $password)
+                        .adaptiveRowBackground()
                 }
 
                 Section {
@@ -1046,11 +1055,13 @@ private struct ConnectionEditorView: View {
                         .frame(maxWidth: .infinity)
                     }
                     .disabled(model.connecting || host.isEmpty || password.isEmpty)
+                    .adaptiveRowBackground()
                 }
 
                 if let error = model.errorMessage {
                     Section {
                         ErrorBanner(text: error) { model.clearError() }
+                            .clearRowBackground()
                     }
                 }
             }

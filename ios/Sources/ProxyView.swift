@@ -834,6 +834,8 @@ private struct ProxyConfigView: View {
         if let notice = model.notice {
             Section {
                 NoticeRow(notice: notice)
+                    // 结果条自带底色胶囊，行底让开，否则外面又包一层白方板。
+                    .clearRowBackground()
             }
         }
     }
@@ -844,6 +846,8 @@ private struct ProxyConfigView: View {
         Section {
             ForEach(configs, id: \.self) { name in
                 row(name)
+                    // v2.4.10：行底逐行挂，`.themedFormBackground()` 里那句不传递。
+                    .adaptiveRowBackground()
             }
         } header: {
             Text("当前用 \(appliedName)")
@@ -1022,6 +1026,8 @@ private struct SubscriptionListView: View {
         if let notice = model.notice {
             Section {
                 NoticeRow(notice: notice)
+                    // 结果条自带底色胶囊，行底让开，否则外面又包一层白方板。
+                    .clearRowBackground()
             }
         }
     }
@@ -1043,9 +1049,11 @@ private struct SubscriptionListView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.vertical, 6)
+                .adaptiveRowBackground()
             } else {
                 ForEach(model.subscriptions) { sub in
                     subRow(sub)
+                        .adaptiveRowBackground()
                 }
             }
         } header: {
@@ -1134,6 +1142,7 @@ private struct SubscriptionListView: View {
                 .padding(.vertical, 4)
             }
             .disabled(model.subsBusy != nil || !model.subscriptions.contains(where: \.enabled))
+            .adaptiveRowBackground()
         } footer: {
             Text("下载后转成 Clash 配置，名称就是文件名。")
         }
@@ -1219,6 +1228,7 @@ private struct SubscriptionEditView: View {
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                 }
+                .adaptiveRowBackground()
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text("订阅地址")
@@ -1238,6 +1248,7 @@ private struct SubscriptionEditView: View {
                             }
                         }
                 }
+                .adaptiveRowBackground()
 
                 HStack(spacing: 8) {
                     Text("User-Agent")
@@ -1248,6 +1259,7 @@ private struct SubscriptionEditView: View {
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                 }
+                .adaptiveRowBackground()
             } header: {
                 Text("订阅")
             } footer: {
@@ -1264,6 +1276,7 @@ private struct SubscriptionEditView: View {
                 } label: {
                     summary("包含关键词", keywords)
                 }
+                .adaptiveRowBackground()
                 NavigationLink {
                     KeywordEditor(title: "排除关键词",
                                   hint: "命中就丢掉。留空就是不排除。",
@@ -1272,6 +1285,7 @@ private struct SubscriptionEditView: View {
                 } label: {
                     summary("排除关键词", excludeKeywords)
                 }
+                .adaptiveRowBackground()
             } header: {
                 Text("节点筛选")
             } footer: {
@@ -1282,6 +1296,7 @@ private struct SubscriptionEditView: View {
             Section {
                 Toggle("启用", isOn: $enabled)
                     .tint(.blue)
+                    .adaptiveRowBackground()
             } footer: {
                 Text("关掉只是不参与「全部更新」，已下载的配置和当前运行状态都不受影响。"
                      + "点右上角「" + (subscription == nil ? "添加" : "保存")
@@ -1302,6 +1317,7 @@ private struct SubscriptionEditView: View {
                         }
                     }
                     .disabled(model.subsBusy != nil || saving || !canSave)
+                    .adaptiveRowBackground()
                 } footer: {
                     Text("改完不点右上角也行：这里同样会先保存再下载。约 10~30 秒。")
                 }
@@ -1310,6 +1326,7 @@ private struct SubscriptionEditView: View {
             if let notice = model.notice {
                 Section {
                     NoticeRow(notice: notice)
+                        .clearRowBackground()
                 }
             }
         }
@@ -1439,6 +1456,7 @@ private struct KeywordEditor: View {
                                 .allowsHitTesting(false)
                         }
                     }
+                    .adaptiveRowBackground()
             } header: {
                 Text(title)
             } footer: {
@@ -1448,9 +1466,11 @@ private struct KeywordEditor: View {
             Section {
                 Text("新加坡&奈飞")
                     .font(.callout.monospaced())
+                    .adaptiveRowBackground()
                 Text("名字里同时有这两个词，才保留")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .adaptiveRowBackground()
             } header: {
                 Text("写法")
             } footer: {
