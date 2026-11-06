@@ -381,18 +381,25 @@ struct OverviewView: View {
         return nil
     }
 
+    // 档位只看 PWM 占比（`cooling_device` 的 cur_state / max_state），不再看 rpm。
+    //
+    // 以前写死 1200 / 2400 rpm 两档，各机型对不上：满转 2000 转的机器永远进不了
+    // 「高速」，满转 5000 转的机器刚到一半就已经「高速」了。占比是跟机型无关的。
+    // 三个阈值走 33% / 66%，和风扇页那份 `pwmPercent` 是同一份数据。
     private var fanTone: Color {
-        guard let rpm = model.stats.fanRPM, rpm > 0 else { return Color(.systemGray) }
-        if rpm >= 2400 { return .orange }
-        if rpm >= 1200 { return .teal }
+        guard let pwm = model.stats.fanPWM, pwm > 0 else { return Color(.systemGray) }
+        if pwm >= 66 { return .orange }
+        if pwm >= 33 { return .teal }
         return .mint
     }
 
     private var fanBadge: String? {
-        guard let rpm = model.stats.fanRPM else { return nil }
-        if rpm <= 0 { return "静止" }
-        if rpm >= 2400 { return "高速" }
-        if rpm >= 1200 { return "中速" }
+        // 读不到 cooling_device 就干脆不显示档位——宁可少一格信息，
+        // 也不要拿 rpm 猜一个会骗人的「中速」。
+        guard let pwm = model.stats.fanPWM else { return nil }
+        if pwm <= 0 { return "静止" }
+        if pwm >= 66 { return "高速" }
+        if pwm >= 33 { return "中速" }
         return "低速"
     }
 

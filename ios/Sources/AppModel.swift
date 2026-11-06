@@ -892,7 +892,9 @@ final class AppModel {
     private func apply(_ sections: [String: String], items: [PollItem]) {
         if items.contains(.core) { applyCore(sections) }
         if items.contains(.sensors) {
-            updateSensors(temp: sections["TEMP"] ?? "", fan: sections["FAN"] ?? "")
+            updateSensors(temp: sections["TEMP"] ?? "",
+                          fan: sections["FAN"] ?? "",
+                          pwm: sections["FANPWM"] ?? "")
         }
         if items.contains(.flash) { updateFlash(sections["FLASH"] ?? "") }
         if items.contains(.devices) { updateDevices(sections) }
@@ -1886,7 +1888,7 @@ final class AppModel {
         }
     }
 
-    private func updateSensors(temp: String, fan: String) {
+    private func updateSensors(temp: String, fan: String, pwm: String) {
         let temps = temp.split(separator: "\n").compactMap { line -> Double? in
             let parts = line.split(separator: " ")
             guard parts.count >= 2, parts[0] == "T" else { return nil }
@@ -1900,6 +1902,9 @@ final class AppModel {
             return Double(parts[1])
         }
         if let value = fans.max(), value > 0 { stats.fanRPM = value }
+        // 0 是有效值（风扇停着），所以只在解析出东西时才覆盖；一次读空留着上一拍，
+        // 免得轮询抖一下徽标就消失。
+        if let value = parseFanPWM(pwm) { stats.fanPWM = value }
     }
 
     /// 设备列表 = DHCP 租约（名字）+ 三张表（在线）。
@@ -2560,6 +2565,16 @@ private extension AppModel {
             echo @@FAN
             for f in /sys/class/hwmon/hwmon*/fan*_input; do
               if [ -r "$f" ]; then read -r v < "$f"; echo "F $v"; fi
+            done
+            echo @@FANPWM
+            for d in /sys/class/thermal/cooling_device*; do
+              if [ -r "$d/cur_state" ]; then
+                t=$(cat "$d/type" 2>/dev/null)
+                [ -n "$t" ] || t=unknown
+                c=$(cat "$d/cur_state" 2>/dev/null)
+                m=$(cat "$d/max_state" 2>/dev/null)
+                echo "$t $c $m"
+              fi
             done
             true
 

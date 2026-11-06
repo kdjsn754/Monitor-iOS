@@ -84,6 +84,12 @@ struct OverviewStats {
     var load15: Double = 0
     var temperature: Double?
     var fanRPM: Double?
+    /// 风扇转速占比（0–100），由 `cooling_device` 的 `cur_state / max_state` 换算。
+    ///
+    /// 概览页的「低速 / 中速 / 高速」只看这个值，不再看 rpm：各机型风扇满转
+    /// 从 2000 到 5000 转都有，写死 1200 / 2400 两档对谁都对不上——3000 转的
+    /// 机器永远进不了「高速」，5000 转的机器刚过半就已经满格了。
+    var fanPWM: Int?
     var wanDevice = ""
 }
 
