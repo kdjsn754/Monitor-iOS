@@ -72,8 +72,8 @@ targets:
         # 模块名带歪（改了模块名，所有源文件都不需要动，但 import 会变）。
         PRODUCT_MODULE_NAME: OpenWrtMonitor
         PRODUCT_BUNDLE_IDENTIFIER: com.catmint.openwrtmonitor
-        MARKETING_VERSION: 2.4.15
-        CURRENT_PROJECT_VERSION: 135
+        MARKETING_VERSION: 2.4.16
+        CURRENT_PROJECT_VERSION: 136
         SWIFT_VERSION: 5.9
         IPHONEOS_DEPLOYMENT_TARGET: 26.0
         CODE_SIGN_STYLE: Manual

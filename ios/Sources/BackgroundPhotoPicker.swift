@@ -1,5 +1,6 @@
 import SwiftUI
 import Photos
+import PhotosUI
 import UIKit
 
 /// 自建相册网格 + 裁切的整条流程（v2.4.12）。
@@ -54,6 +55,7 @@ private struct BackgroundPhotoGrid: View {
     var onCancel: () -> Void
     var onPick: (UIImage) -> Void
 
+    @Environment(\.scenePhase) private var scenePhase
     @State private var status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
     /// 主网格：不含隐藏照片。
     @State private var assets: [PHAsset] = []
@@ -65,6 +67,13 @@ private struct BackgroundPhotoGrid: View {
     @State private var errorText: String?
     /// 是否已经推到「已隐藏」那一页。
     @State private var showHidden = false
+    /// 系统选择器的呈现开关与选中项。
+    ///
+    /// 为什么「已隐藏」页还要留一条系统选择器的路：iOS 16 起「已隐藏」相簿默认带 Face ID 锁，
+    /// **锁着时系统不给任何 App 下发隐藏资产**（Apple 文档原话：even if the includeHiddenAssets
+    /// fetch option is true），只有 `PhotosPicker` 这种系统托管的选择器能由用户亲手交出来。
+    @State private var showSystemPicker = false
+    @State private var systemPickItem: PhotosPickerItem?
 
     var body: some View {
         NavigationStack {
@@ -93,6 +102,13 @@ private struct BackgroundPhotoGrid: View {
             }
             .navigationDestination(isPresented: $showHidden) { hiddenPage }
             .task { await prepare() }
+            // 去「设置」关掉隐藏相簿的 Face ID 锁再回来，这里得重新取一次，
+            // 否则得先退出选图、再进一次才看得到（`.task` 不会因为回到前台重跑）。
+            .onChange(of: scenePhase) { _, phase in
+                guard phase == .active else { return }
+                guard status == .authorized || status == .limited else { return }
+                hiddenAssets = PhotoLibrary.hiddenImages()
+            }
         }
     }
 
@@ -130,19 +146,61 @@ private struct BackgroundPhotoGrid: View {
         }
         .navigationTitle("已隐藏")
         .navigationBarTitleDisplayMode(.inline)
+        .photosPicker(isPresented: $showSystemPicker,
+                      selection: $systemPickItem,
+                      matching: .images,
+                      preferredItemEncoding: .current)
+        .onChange(of: systemPickItem) { _, item in
+            handleSystemPick(item)
+        }
     }
 
-    /// 隐藏页的空态：把能自查的两条都摆出来。
-    /// ① 系统「显示已隐藏的相册」关着 → 隐藏资产根本不下发，App 拿不到也读不到开关；
-    /// ② 只授权了「部分照片」→ 隐藏照片可能压根不在授权范围里，给个「管理」直接补。
+    /// 隐藏页的空态。
+    ///
+    /// 到这一版才把病因说准：用户「显示已隐藏的相册」是开着的，卡住的是**隐藏相簿的
+    /// Face ID 锁**（iOS 16 起默认开）。Apple 文档写明：锁着时系统不返回隐藏资产，
+    /// `includeHiddenAssets` 也没用；**只有 PhotosPicker 能由用户亲手把隐藏照片交给 App**。
+    /// 所以空态给两条路——系统选择器（不用关锁），或去关锁后让这个网格直接列出来。
     private var hiddenEmptyState: some View {
         VStack(spacing: 14) {
-            message("没有隐藏的照片",
-                    note: "如果这里本来应该有，先到 iPhone「设置 › 照片」确认「显示已隐藏的相册」已打开")
+            message("这里读不到隐藏照片",
+                    note: "iOS 给「已隐藏」相簿默认上了 Face ID 锁，锁着时系统不会把它交给任何 App。下面用系统选择器可以挑（进去切到「相簿 › 已隐藏」）；想让它直接出现在这个网格里，去「设置 › App › 照片」把「使用 Face ID」关掉。")
+            Button {
+                showSystemPicker = true
+            } label: {
+                Label("用系统相册选择", systemImage: "photo.on.rectangle.angled")
+                    .font(.footnote.weight(.semibold))
+            }
+            .buttonStyle(.borderedProminent)
             if status == .limited {
                 Button("管理可访问的照片") { manageLimited() }
                     .font(.footnote.weight(.semibold))
             }
+            if let errorText {
+                Text(errorText)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
+            }
+        }
+    }
+
+    /// 系统选择器交回来的图，走和网格同一条路：读原始数据 → 烘正方向 → 交给裁切页。
+    private func handleSystemPick(_ item: PhotosPickerItem?) {
+        guard let item else { return }
+        reading = true
+        errorText = nil
+        Task { @MainActor in
+            let data = try? await item.loadTransferable(type: Data.self)
+            systemPickItem = nil
+            guard let data, let raw = UIImage(data: data) else {
+                reading = false
+                errorText = "这张照片读不出来，换一张试试"
+                return
+            }
+            reading = false
+            onPick(BackgroundCropper.upright(raw, maxSide: 3000))
         }
     }
 
