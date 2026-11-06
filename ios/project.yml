@@ -44,6 +44,10 @@ targets:
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         NSLocalNetworkUsageDescription: 用于通过 SSH 连接局域网内的 OpenWrt 路由器
+        # v2.4.12：壁纸改成自建相册网格（系统 PhotosPicker 每次弹都从顶部开始，
+        # 裁切页取消后回不到原位），直接读相册就必须声明这条权限说明，
+        # 少了它第一次请求授权会直接崩。
+        NSPhotoLibraryUsageDescription: 选择一张照片作为 App 的自定义背景
         NSBonjourServices:
           - _ssh._tcp
         NSAppTransportSecurity:
@@ -68,8 +72,8 @@ targets:
         # 模块名带歪（改了模块名，所有源文件都不需要动，但 import 会变）。
         PRODUCT_MODULE_NAME: OpenWrtMonitor
         PRODUCT_BUNDLE_IDENTIFIER: com.catmint.openwrtmonitor
-        MARKETING_VERSION: 2.4.11
-        CURRENT_PROJECT_VERSION: 131
+        MARKETING_VERSION: 2.4.12
+        CURRENT_PROJECT_VERSION: 132
         SWIFT_VERSION: 5.9
         IPHONEOS_DEPLOYMENT_TARGET: 26.0
         CODE_SIGN_STYLE: Manual

@@ -30,6 +30,8 @@
     <true/>
     <key>NSLocalNetworkUsageDescription</key>
     <string>用于通过 SSH 连接局域网内的 OpenWrt 路由器</string>
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>选择一张照片作为 App 的自定义背景</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_ssh._tcp</string>

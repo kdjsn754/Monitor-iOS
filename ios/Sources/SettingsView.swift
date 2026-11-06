@@ -703,44 +703,52 @@ private struct RouterSwitcherSheet: View {
 ///
 /// 用 `item:` 而不是 `isPresented:`：换一张图要换一个 `id`，`fullScreenCover`
 /// 才会把裁切页整套重建（缩放、偏移回到初始），而不是复用一个停在上次的视图。
-private struct CropTask: Identifiable {
-    let id = UUID()
-    let image: UIImage
-    /// 点「取消」之后回哪儿去。
-    ///
-    /// 从「选图」进来的是 true：退回相册接着挑另一张（v2.4.11 用户要求，
-    /// 以前取消会把整条流程关掉，想换一张得从头点一遍、重新翻相册）。
-    /// 从「调整」进来的是 false：本来就有图，退回设置页才对。
-    var returnsToPicker = false
+/// 背景卡的全屏路由：挑新图（自建网格）或调整已有那张。
+private enum BackgroundRoute: Identifiable {
+    case picker
+    case adjust(UUID, UIImage)
+
+    /// ⚠️ id 必须在**构造时**就固定下来。
+    /// 写成 `case .adjust: return UUID().uuidString` 每次读 `id` 都会变，
+    /// SwiftUI 会认为「又换了一个 item」，于是一遍遍重建覆盖层（轻则闪，
+    /// 重则停不下来）。
+    var id: String {
+        switch self {
+        case .picker: return "picker"
+        // 每次「调整」一个新 token：`fullScreenCover(item:)` 才会整套重建裁切页，
+        // 缩放和偏移回到初始，而不是复用上一次停在某个角度的视图。
+        case .adjust(let token, _): return "adjust-" + token.uuidString
+        }
+    }
 }
 
 /// 自定义背景卡（v2.4.11 从 `SettingsView` 里拆出来）。
 ///
-/// **为什么非拆不可**：这一块要弹系统的相册选择器，而 `SettingsView` 的本体会因为
-/// `model` 的任何变化重新求值（连接状态、重连、轮询回来的数据都算）。`PhotosPicker`
-/// 是挂在视图上的呈现者，宿主视图被重建一次，系统就可能把选择器重新呈现一遍——
-/// 用户翻相册翻到一半，弹窗自己刷回顶部，位置全丢了（本次的第一条反馈）。
+/// **为什么非拆不可**：这一块要弹相册，而 `SettingsView` 的本体会因为 `model`
+/// 的任何变化重新求值（连接状态、重连、轮询回来的数据都算）。弹窗宿主视图被重建
+/// 一次，系统就可能把选择器再呈现一遍——用户翻相册翻到一半，弹窗自己刷回顶部
+/// （v2.4.11 的第一条反馈就是这么坏的）。
 ///
 /// 拆成一个**不带任何入参**的视图之后，父级重算时它的存储属性一个都没变，
-/// SwiftUI 会跳过它的 `body`，选择器的生命周期只由下面这几个 `@State` 决定。
+/// SwiftUI 会跳过它的 `body`，弹窗的生命周期只由下面这几个 `@State` 决定。
 /// 注意这里刻意不读 `model` 的任何属性（只在闭包里调方法），否则等于又把
 /// `model` 的变化接回了 body。
 private struct BackgroundCard: View {
     @Environment(AppModel.self) private var model
     @State private var store = BackgroundImageStore.shared
-    /// 选择器「要不要显示」由我们自己控（`photosPicker(isPresented:)`）：
-    /// ① 全卡只有一个选择器实例，`store.isOn` 两侧不会各带一个（切换时会被重建）；
-    /// ② 裁切页点「取消」时能再把它叫回来，接着换一张。
-    @State private var pickerPresented = false
-    @State private var pickedItem: PhotosPickerItem?
-    @State private var cropTask: CropTask?
+    /// 当前盖在设置页上的那个全屏路由（v2.4.12）。
+    ///
+    /// 只用**一个** `fullScreenCover` 承载两种去处：挑新图 / 调整已有图。
+    /// 同一个视图上叠两个 cover，系统只保证了「不要同时弹」，先弹哪个、关掉之后
+    /// 另一个还认不认，都不在契约里——一个路由枚举最稳。
+    @State private var route: BackgroundRoute?
     /// 相片读不出来时给一句人话，不然点完像没反应。
     @State private var pickError: String?
 
     /// 相册选择器或裁切页任意一个还盖在屏幕上，就算「有系统浮层」。
     /// 报给 `AppModel` 后，这期间回前台不会触发重连——重连会把根视图整套换掉，
     /// 选择器被顺手关掉，同样是「翻到一半被打断」。
-    private var modalBusy: Bool { pickerPresented || cropTask != nil }
+    private var modalBusy: Bool { route != nil }
 
     var body: some View {
         SectionCard("背景", icon: "photo") {
@@ -756,23 +764,27 @@ private struct BackgroundCard: View {
                 }
             }
         }
-        // `.current` = 不解码转码，直接把相册里那份原格式数据交过来，
-        // 少一道系统侧的二次编码（画质那事用户专门问过）。
-        .photosPicker(isPresented: $pickerPresented,
-                      selection: $pickedItem,
-                      matching: .images,
-                      preferredItemEncoding: .current)
-        .onChange(of: pickedItem) { _, item in handlePick(item) }
         .onChange(of: modalBusy) { _, busy in model.setModalActive(busy) }
         .onAppear { model.setModalActive(modalBusy) }
         .onDisappear { model.setModalActive(false) }
-        .fullScreenCover(item: $cropTask) { task in
-            BackgroundCropView(image: task.image,
-                               onCancel: { cancelCrop(task) },
-                               onUse: { cropped in
-                                   store.apply(cropped: cropped, original: task.image)
-                                   cropTask = nil
-                               })
+        .fullScreenCover(item: $route) { route in
+            switch route {
+            case .picker:
+                // 挑图 + 裁切是一整条流程（见 `BackgroundPickerFlow`）：网格一直活着，
+                // 裁切页只是盖在它上面的一层，所以点「取消」能回到原来浏览的位置。
+                BackgroundPickerFlow { cropped, original in
+                    store.apply(cropped: cropped, original: original)
+                    pickError = nil
+                }
+            case .adjust(_, let image):
+                // 「调整」：图已经在手上，直接进裁切页，取消就回设置页。
+                BackgroundCropView(image: image,
+                                   onCancel: { self.route = nil },
+                                   onUse: { cropped in
+                                       store.apply(cropped: cropped, original: image)
+                                       self.route = nil
+                                   })
+            }
         }
     }
 
@@ -834,7 +846,7 @@ private struct BackgroundCard: View {
             HStack(spacing: 8) {
                 Button {
                     pickError = nil
-                    pickerPresented = true
+                    route = .picker
                 } label: {
                     actionLabel("更换", icon: "photo.on.rectangle",
                                 tint: .blue, fill: Color.blue.opacity(0.14))
@@ -842,7 +854,7 @@ private struct BackgroundCard: View {
                 .buttonStyle(.plain)
 
                 Button {
-                    openCropper()
+                    openAdjuster()
                 } label: {
                     actionLabel("调整", icon: "crop",
                                 tint: .blue, fill: Color.blue.opacity(0.14))
@@ -862,7 +874,7 @@ private struct BackgroundCard: View {
         } else {
             Button {
                 pickError = nil
-                pickerPresented = true
+                route = .picker
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "photo.on.rectangle")
@@ -901,53 +913,15 @@ private struct BackgroundCard: View {
         .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
-    // MARK: - 挑图 → 裁切
-
-    /// 相册里挑中的那条：读成图 → 摆正方向 → 进裁切页。
-    private func handlePick(_ item: PhotosPickerItem?) {
-        guard let item else { return }
-        Task { @MainActor in
-            pickError = nil
-            pickedItem = nil
-            guard let picked = await loadImage(item) else {
-                // iCloud 里没下载完、或者格式解不开：以前静默失败，点完像没反应。
-                pickError = "这张照片读不出来，换一张试试（iCloud 原图需要先下载）"
-                return
-            }
-            let upright = BackgroundCropper.upright(picked, maxSide: 3000)
-            // 选择器自己也是一次呈现。它收起的转场还没走完就弹 fullScreenCover，
-            // 两个转场撞在一起：裁切页能显示，但触摸被上面那层没撤干净的 window
-            // 吃掉——就是「按钮根本点不了」（v2.4.3 的坑）。
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            cropTask = CropTask(image: upright, returnsToPicker: true)
-        }
-    }
-
-    /// 裁切页点「取消」：不是把整条流程关掉，而是退回相册继续挑（v2.4.11）。
-    private func cancelCrop(_ task: CropTask) {
-        cropTask = nil
-        guard task.returnsToPicker else { return }
-        Task { @MainActor in
-            // 同样等全屏页收干净再叫选择器，否则两个转场撞一起。
-            try? await Task.sleep(nanoseconds: 450_000_000)
-            pickerPresented = true
-        }
-    }
+    // MARK: - 调整已有背景
 
     /// 三种来源都能进裁切页：已存的原图 > 已裁的成品（老版本没有原图）。
-    private func openCropper() {
-        guard let source = store.original ?? store.image else { return }
-        cropTask = CropTask(image: source, returnsToPicker: false)
-    }
-
-    /// 相片读成 `UIImage`。
     ///
-    /// 只走 `Data` 这一条：`UIImage` 自己**不符合 `Transferable`**（CI 报过
-    /// `requires that 'UIImage' conform to 'Transferable'`），`Image` 那个版本拿到了也取不回
-    /// 原始像素、没法再裁。`Data` 是相册选择器最稳的一条路，失败就是失败，交给上面写提示。
-    private func loadImage(_ item: PhotosPickerItem) async -> UIImage? {
-        guard let data = try? await item.loadTransferable(type: Data.self) else { return nil }
-        return UIImage(data: data)
+    /// v2.4.12 起「挑新图」不再经过这里：那条路由 `BackgroundPickerFlow` 自己管
+    /// （网格 → 裁切 → 取消回网格），这里只负责「调整当前这张」。
+    private func openAdjuster() {
+        guard let source = store.original ?? store.image else { return }
+        route = .adjust(UUID(), source)
     }
 }
 
