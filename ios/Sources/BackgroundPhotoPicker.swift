@@ -212,6 +212,12 @@ private struct BackgroundPhotoGrid: View {
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
         options.predicate = NSPredicate(format: "mediaType == %d",
                                         PHAssetMediaType.image.rawValue)
+        // v2.4.13：把「已隐藏」的照片也取出来。
+        // 系统相册的「已隐藏」相簿能选、`PhotosPicker` 也能选，自建网格里选不到就是倒退
+        // （用户 2026-11-06 反馈）。这里只负责让 PhotoKit 别把 hidden 资产过滤掉；
+        // 如果用户在「设置 › 照片」里关掉了「显示已隐藏的相册」，系统根本不下发这批资产，
+        // 代码侧没有任何 API 能绕过，也没有 API 能查到那个开关的状态——别在这儿乱试。
+        options.includeHiddenAssets = true
         let result = PHAsset.fetchAssets(with: options)
         var list: [PHAsset] = []
         list.reserveCapacity(result.count)
