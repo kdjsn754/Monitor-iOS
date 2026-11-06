@@ -389,7 +389,7 @@ struct OverviewView: View {
     private var fanTone: Color {
         guard let pwm = model.stats.fanPWM, pwm > 0 else { return Color(.systemGray) }
         if pwm >= 66 { return .orange }
-        if pwm >= 33 { return .teal }
+        if pwm >= 33 { return .blue }
         return .mint
     }
 
