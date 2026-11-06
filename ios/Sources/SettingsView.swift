@@ -14,14 +14,8 @@ struct SettingsView: View {
     @State private var showRouterWeb = false
     /// 切换连接的半屏选择器（自绘，不再用系统的列表/菜单）。
     @State private var showSwitcher = false
-    /// 自定义背景（v2.4.0 起，v2.4.1 改成直接观察 store）。
-    /// 图片本身在 `BackgroundImageStore` 里，这里只经手「挑图 → 裁 → 交回去」。
-    @State private var backgroundPick: PhotosPickerItem?
-    /// 交给裁切页的原图（附一个 id，换一张就换一次视图）。
-    @State private var cropTask: CropTask?
-    /// 相片读不出来时给一句人话，不然点完像没反应。
-    @State private var pickError: String?
-    @State private var store = BackgroundImageStore.shared
+    // 背景卡的选图 / 裁切 / 透明度状态全在 `BackgroundCard` 自己身上：
+    // 那一块会弹系统相册选择器，不能跟着本页的刷新一起重建（见文件末尾它的注释）。
 
     var body: some View {
         NavigationStack {
@@ -41,7 +35,7 @@ struct SettingsView: View {
                             }
                         }
                     appearanceCard
-                    backgroundCard
+                    BackgroundCard()
                     pollingCard
                     aboutCard
                     dangerCard
@@ -82,15 +76,8 @@ struct SettingsView: View {
                     // v2.4.6：sheet 自带一层不透明材质，不清掉的话壁纸只露在收起动画里。
                     .presentationBackground(Color.clear)
             }
-            // 裁壁纸：整屏铺满、可拖动可缩放，完成即生效（v2.4.1）。
-            .fullScreenCover(item: $cropTask) { task in
-                BackgroundCropView(image: task.image,
-                                   onCancel: { cropTask = nil },
-                                   onUse: { cropped in
-                                       store.apply(cropped: cropped, original: task.image)
-                                       cropTask = nil
-                                   })
-            }
+            // 裁壁纸的全屏页跟着背景卡走（v2.4.11）：取消要能退回相册接着挑，
+            // 呈现方和被呈现方放在同一处，状态才不会脱节。见 `BackgroundCard`。
             .sheet(isPresented: $showSwitcher) {
                 RouterSwitcherSheet()
                     .environment(model)
@@ -346,180 +333,10 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - 背景（自定义图片 + 不透明度）
+    // MARK: - 背景（自定义图片 + 透明度）
 
-    /// 自定义背景（v2.4.0，用户要求「可以自定义背景，可以自定义调透明度」；
-    /// v2.4.1 用户补两条：换了不起作用、不能自己裁切）。
-    ///
-    /// 分工：图片的存与裁在 `BackgroundImageStore` / `BackgroundCropper`，
-    /// 铺满渲染在 `AppBackground`，这张卡只干四件事——选图、裁切、调透明度、移除。
-    /// 滑块调的是**卡片 / 瓦片 / 行底的透明度**，不是壁纸（v2.4.7 用户明确：
-    /// 「调整透明度是模块瓦片控件这些的透明度，不是给背景也蒙上」）。
-    /// 0% = 卡片全实心，100% = 卡片填充为 0、只剩轮廓，壁纸始终是原图。
-    private var backgroundCard: some View {
-        SectionCard("背景", icon: "photo") {
-            VStack(spacing: 12) {
-                HStack(spacing: 12) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(Color(uiColor: .secondarySystemFill))
-                        if store.isOn, let thumb = store.image {
-                            Image(uiImage: thumb)
-                                .resizable()
-                                .scaledToFill()
-                                .frame(width: 54, height: 54)
-                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        } else {
-                            Image(systemName: "photo")
-                                .font(.system(size: 18, weight: .medium))
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
-                    .frame(width: 54, height: 54)
-
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(store.isOn ? "自定义背景" : "默认背景")
-                            .font(.subheadline.weight(.medium))
-                        Text(store.isOn
-                             ? "已按整屏比例裁好，壁纸原图铺满"
-                             : "选一张照片铺在页面最底下，可以自己裁")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    Spacer(minLength: 4)
-                }
-
-                if store.isOn {
-                    HStack(spacing: 10) {
-                        Text("卡片透明度")
-                            .font(.subheadline)
-                            .fixedSize()
-                        // v2.4.5：系统 Slider 拖到两端会露出轨道断头（见 OpacitySlider
-                        // 的注释），换成自绘。`setOpacity` 仍每帧写 UserDefaults，
-                        // 所以卡片 / 格子保持实时跟着动。
-                        OpacitySlider(value: Binding(get: { store.opacity },
-                                                     set: { store.setOpacity($0) }))
-                        Text("\(Int((store.opacity * 100).rounded()))%")
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                            .frame(width: 40, alignment: .trailing)
-                    }
-                }
-
-                if store.isOn {
-                    // 三个等宽：换图 / 重裁 / 移除。以前「调整」和「移除」挤在一起，
-                    // 用户挑完图发现框歪了却没地方改，只能删了重选。
-                    HStack(spacing: 8) {
-                        PhotosPicker(selection: $backgroundPick, matching: .images) {
-                            backgroundActionLabel("更换", icon: "photo.on.rectangle",
-                                                  tint: .blue, fill: Color.blue.opacity(0.14))
-                        }
-                        .buttonStyle(.plain)
-
-                        Button {
-                            openCropper()
-                        } label: {
-                            backgroundActionLabel("调整", icon: "crop",
-                                                  tint: .blue, fill: Color.blue.opacity(0.14))
-                        }
-                        .buttonStyle(.plain)
-
-                        Button {
-                            store.remove()
-                            pickError = nil
-                        } label: {
-                            backgroundActionLabel("移除", icon: "trash",
-                                                  tint: .secondary,
-                                                  fill: Color(uiColor: .secondarySystemFill))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                } else {
-                    PhotosPicker(selection: $backgroundPick, matching: .images) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "photo.on.rectangle")
-                                .font(.system(size: 13, weight: .semibold))
-                            Text("选择图片")
-                                .font(.subheadline.weight(.semibold))
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 11)
-                        .background(
-                            Color.blue.opacity(0.14),
-                            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        )
-                        .foregroundStyle(.blue)
-                        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                }
-
-                if let pickError {
-                    Text(pickError)
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-        }
-        // PhotosPicker 只给一个「相册里挑中的东西」：读成图 → 摆正方向 → 进裁切页。
-        // v2.4.0 是直接存下来，所以用户没法调整取景；现在中间多了裁切这一步。
-        .onChange(of: backgroundPick) { _, item in
-            guard let item else { return }
-            Task { @MainActor in
-                pickError = nil
-                backgroundPick = nil
-                guard let picked = await loadPickedImage(item) else {
-                    // iCloud 里没下载完、或者格式解不开时，以前是静默失败——
-                    // 点完「选择图片」什么都不发生，正是「换了不起作用」的一半来源。
-                    pickError = "这张照片读不出来，换一张试试（iCloud 原图需要先下载）"
-                    return
-                }
-                let upright = BackgroundCropper.upright(picked, maxSide: 3000)
-                // PhotosPicker 自己也是一次 presentation。它 dismiss 的转场还没走完
-                // 就弹 fullScreenCover，两个转场撞在一起：裁切页能显示出来，但触摸
-                // 会被上面那层尚未撤干净的 window 吃掉——表现就是「按钮根本点不了」。
-                // 等它收干净再呈现（v2.4.3，配合裁切页里按钮挪到底部一起修）。
-                try? await Task.sleep(nanoseconds: 400_000_000)
-                cropTask = CropTask(image: upright)
-            }
-        }
-    }
-
-    /// 三个小动作按钮的统一外观：图标 + 两字标题，等宽。
-    private func backgroundActionLabel(_ title: String,
-                                       icon: String,
-                                       tint: Color,
-                                       fill: Color) -> some View {
-        HStack(spacing: 5) {
-            Image(systemName: icon)
-                .font(.system(size: 12, weight: .semibold))
-            Text(title)
-                .font(.subheadline.weight(.semibold))
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 11)
-        .background(fill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .foregroundStyle(tint)
-        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
-
-    /// 三种来源都能进裁切页：已存的原图 > 已裁的成品（老版本没有原图）。
-    private func openCropper() {
-        guard let source = store.original ?? store.image else { return }
-        cropTask = CropTask(image: source)
-    }
-
-    /// 相片读成 `UIImage`。
-    ///
-    /// 只走 `Data` 这一条：`UIImage` 自己**不符合 `Transferable`**（CI 报过
-    /// `requires that 'UIImage' conform to 'Transferable'`），`Image` 那个版本拿到了也取不回
-    /// 原始像素、没法再裁。`Data` 是相册选择器最稳的一条路，失败就是失败，交给上面写提示。
-    private func loadPickedImage(_ item: PhotosPickerItem) async -> UIImage? {
-        guard let data = try? await item.loadTransferable(type: Data.self) else { return nil }
-        return UIImage(data: data)
-    }
+    /// 卡片本体搬到文件末尾的 `BackgroundCard`：它要自己托管系统相册选择器，
+    /// 留在这一层会被本页任何一次重新求值牵连（选择器被重建 = 相册跳回顶部）。
 
     // MARK: - 采集与刷新（摘要，细则进二级页）
 
@@ -889,6 +706,249 @@ private struct RouterSwitcherSheet: View {
 private struct CropTask: Identifiable {
     let id = UUID()
     let image: UIImage
+    /// 点「取消」之后回哪儿去。
+    ///
+    /// 从「选图」进来的是 true：退回相册接着挑另一张（v2.4.11 用户要求，
+    /// 以前取消会把整条流程关掉，想换一张得从头点一遍、重新翻相册）。
+    /// 从「调整」进来的是 false：本来就有图，退回设置页才对。
+    var returnsToPicker = false
+}
+
+/// 自定义背景卡（v2.4.11 从 `SettingsView` 里拆出来）。
+///
+/// **为什么非拆不可**：这一块要弹系统的相册选择器，而 `SettingsView` 的本体会因为
+/// `model` 的任何变化重新求值（连接状态、重连、轮询回来的数据都算）。`PhotosPicker`
+/// 是挂在视图上的呈现者，宿主视图被重建一次，系统就可能把选择器重新呈现一遍——
+/// 用户翻相册翻到一半，弹窗自己刷回顶部，位置全丢了（本次的第一条反馈）。
+///
+/// 拆成一个**不带任何入参**的视图之后，父级重算时它的存储属性一个都没变，
+/// SwiftUI 会跳过它的 `body`，选择器的生命周期只由下面这几个 `@State` 决定。
+/// 注意这里刻意不读 `model` 的任何属性（只在闭包里调方法），否则等于又把
+/// `model` 的变化接回了 body。
+private struct BackgroundCard: View {
+    @Environment(AppModel.self) private var model
+    @State private var store = BackgroundImageStore.shared
+    /// 选择器「要不要显示」由我们自己控（`photosPicker(isPresented:)`）：
+    /// ① 全卡只有一个选择器实例，`store.isOn` 两侧不会各带一个（切换时会被重建）；
+    /// ② 裁切页点「取消」时能再把它叫回来，接着换一张。
+    @State private var pickerPresented = false
+    @State private var pickedItem: PhotosPickerItem?
+    @State private var cropTask: CropTask?
+    /// 相片读不出来时给一句人话，不然点完像没反应。
+    @State private var pickError: String?
+
+    /// 相册选择器或裁切页任意一个还盖在屏幕上，就算「有系统浮层」。
+    /// 报给 `AppModel` 后，这期间回前台不会触发重连——重连会把根视图整套换掉，
+    /// 选择器被顺手关掉，同样是「翻到一半被打断」。
+    private var modalBusy: Bool { pickerPresented || cropTask != nil }
+
+    var body: some View {
+        SectionCard("背景", icon: "photo") {
+            VStack(spacing: 12) {
+                header
+                if store.isOn { opacityRow }
+                actions
+                if let pickError {
+                    Text(pickError)
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+        // `.current` = 不解码转码，直接把相册里那份原格式数据交过来，
+        // 少一道系统侧的二次编码（画质那事用户专门问过）。
+        .photosPicker(isPresented: $pickerPresented,
+                      selection: $pickedItem,
+                      matching: .images,
+                      preferredItemEncoding: .current)
+        .onChange(of: pickedItem) { _, item in handlePick(item) }
+        .onChange(of: modalBusy) { _, busy in model.setModalActive(busy) }
+        .onAppear { model.setModalActive(modalBusy) }
+        .onDisappear { model.setModalActive(false) }
+        .fullScreenCover(item: $cropTask) { task in
+            BackgroundCropView(image: task.image,
+                               onCancel: { cancelCrop(task) },
+                               onUse: { cropped in
+                                   store.apply(cropped: cropped, original: task.image)
+                                   cropTask = nil
+                               })
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color(uiColor: .secondarySystemFill))
+                if store.isOn, let thumb = store.image {
+                    Image(uiImage: thumb)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 54, height: 54)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                } else {
+                    Image(systemName: "photo")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .frame(width: 54, height: 54)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(store.isOn ? "自定义背景" : "默认背景")
+                    .font(.subheadline.weight(.medium))
+                Text(store.isOn
+                     ? "已按整屏比例裁好，壁纸原图铺满"
+                     : "选一张照片铺在页面最底下，可以自己裁")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 4)
+        }
+    }
+
+    /// 滑块调的是**卡片 / 瓦片 / 行底的透明度**，不是壁纸（v2.4.7 用户明确）。
+    /// 0% = 卡片全实心，100% = 卡片填充为 0、只剩轮廓，壁纸始终是原图。
+    private var opacityRow: some View {
+        HStack(spacing: 10) {
+            Text("卡片透明度")
+                .font(.subheadline)
+                .fixedSize()
+            // v2.4.5：系统 Slider 拖到两端会露出轨道断头，换成自绘。
+            // `setOpacity` 每帧写 UserDefaults，背景和卡片因此保持实时跟着动。
+            OpacitySlider(value: Binding(get: { store.opacity },
+                                         set: { store.setOpacity($0) }))
+            Text("\(Int((store.opacity * 100).rounded()))%")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 40, alignment: .trailing)
+        }
+    }
+
+    @ViewBuilder private var actions: some View {
+        if store.isOn {
+            // 三个等宽：换图 / 重裁 / 移除。以前「调整」和「移除」挤在一起，
+            // 用户挑完图发现框歪了却没地方改，只能删了重选。
+            HStack(spacing: 8) {
+                Button {
+                    pickError = nil
+                    pickerPresented = true
+                } label: {
+                    actionLabel("更换", icon: "photo.on.rectangle",
+                                tint: .blue, fill: Color.blue.opacity(0.14))
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    openCropper()
+                } label: {
+                    actionLabel("调整", icon: "crop",
+                                tint: .blue, fill: Color.blue.opacity(0.14))
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    store.remove()
+                    pickError = nil
+                } label: {
+                    actionLabel("移除", icon: "trash",
+                                tint: .secondary,
+                                fill: Color(uiColor: .secondarySystemFill))
+                }
+                .buttonStyle(.plain)
+            }
+        } else {
+            Button {
+                pickError = nil
+                pickerPresented = true
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "photo.on.rectangle")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("选择图片")
+                        .font(.subheadline.weight(.semibold))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 11)
+                .background(
+                    Color.blue.opacity(0.14),
+                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                )
+                .foregroundStyle(.blue)
+                .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    /// 三个小动作按钮的统一外观：图标 + 两字标题，等宽。
+    private func actionLabel(_ title: String,
+                             icon: String,
+                             tint: Color,
+                             fill: Color) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .semibold))
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 11)
+        .background(fill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .foregroundStyle(tint)
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    // MARK: - 挑图 → 裁切
+
+    /// 相册里挑中的那条：读成图 → 摆正方向 → 进裁切页。
+    private func handlePick(_ item: PhotosPickerItem?) {
+        guard let item else { return }
+        Task { @MainActor in
+            pickError = nil
+            pickedItem = nil
+            guard let picked = await loadImage(item) else {
+                // iCloud 里没下载完、或者格式解不开：以前静默失败，点完像没反应。
+                pickError = "这张照片读不出来，换一张试试（iCloud 原图需要先下载）"
+                return
+            }
+            let upright = BackgroundCropper.upright(picked, maxSide: 3000)
+            // 选择器自己也是一次呈现。它收起的转场还没走完就弹 fullScreenCover，
+            // 两个转场撞在一起：裁切页能显示，但触摸被上面那层没撤干净的 window
+            // 吃掉——就是「按钮根本点不了」（v2.4.3 的坑）。
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            cropTask = CropTask(image: upright, returnsToPicker: true)
+        }
+    }
+
+    /// 裁切页点「取消」：不是把整条流程关掉，而是退回相册继续挑（v2.4.11）。
+    private func cancelCrop(_ task: CropTask) {
+        cropTask = nil
+        guard task.returnsToPicker else { return }
+        Task { @MainActor in
+            // 同样等全屏页收干净再叫选择器，否则两个转场撞一起。
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            pickerPresented = true
+        }
+    }
+
+    /// 三种来源都能进裁切页：已存的原图 > 已裁的成品（老版本没有原图）。
+    private func openCropper() {
+        guard let source = store.original ?? store.image else { return }
+        cropTask = CropTask(image: source, returnsToPicker: false)
+    }
+
+    /// 相片读成 `UIImage`。
+    ///
+    /// 只走 `Data` 这一条：`UIImage` 自己**不符合 `Transferable`**（CI 报过
+    /// `requires that 'UIImage' conform to 'Transferable'`），`Image` 那个版本拿到了也取不回
+    /// 原始像素、没法再裁。`Data` 是相册选择器最稳的一条路，失败就是失败，交给上面写提示。
+    private func loadImage(_ item: PhotosPickerItem) async -> UIImage? {
+        guard let data = try? await item.loadTransferable(type: Data.self) else { return nil }
+        return UIImage(data: data)
+    }
 }
 
 /// 自定义不透明度滑块（v2.4.5）。

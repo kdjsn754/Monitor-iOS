@@ -639,8 +639,29 @@ final class AppModel {
         lastOcTotalDate = nil
     }
 
+    /// 有系统浮层（相册选择器 / 裁切页）盖在屏幕上时为真。
+    ///
+    /// 这期间不做「回前台恢复连接」：换壁纸跟路由器一点关系都没有，而重连会把
+    /// 根视图整套换掉——系统选择器被顺手关掉，用户翻相册翻到一半就跳回顶部
+    /// （v2.4.11 用户反馈的第一条）。
+    ///
+    /// 只在 `resumeAfterForeground()` 和下面的 `setModalActive` 里读写，
+    /// 不进任何视图的 `body`，所以不会多出一次刷新。
+    private var modalActive = false
+
+    /// 浮层的开与关都由背景卡报过来。
+    func setModalActive(_ value: Bool) {
+        guard value != modalActive else { return }
+        modalActive = value
+        // 收起时把轮询接回来：后台暂停过（pausePolling）就靠这一句续上，
+        // 当前页没有周期项时 `startPolling` 自己会直接返回。
+        if !value, connected, pollTask == nil { startPolling() }
+    }
+
     func resumeAfterForeground() async {
         guard connected else { return }
+        // 系统浮层盖着：别重连、也别重开轮询，交给浮层收起时那句。
+        guard !modalActive else { return }
         if let lastSuccessfulPoll,
            Date().timeIntervalSince(lastSuccessfulPoll) < 10 {
             startPolling()
