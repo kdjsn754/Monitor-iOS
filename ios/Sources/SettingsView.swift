@@ -703,9 +703,12 @@ private struct RouterSwitcherSheet: View {
 ///
 /// 用 `item:` 而不是 `isPresented:`：换一张图要换一个 `id`，`fullScreenCover`
 /// 才会把裁切页整套重建（缩放、偏移回到初始），而不是复用一个停在上次的视图。
-/// 背景卡的全屏路由：挑新图（自建网格）或调整已有那张。
+/// 背景卡的全屏路由（v2.4.17 只剩一种：进裁切页）。
+///
+/// 挑新图改回系统 `PhotosPicker` 之后，挑图这一段由系统在独立进程里托管，
+/// 不需要（也没法）塞进 `fullScreenCover` —— 那个 cover 现在就只干一件事：
+/// 把裁切页整屏盖上来。
 private enum BackgroundRoute: Identifiable {
-    case picker
     case adjust(UUID, UIImage)
 
     /// ⚠️ id 必须在**构造时**就固定下来。
@@ -714,7 +717,6 @@ private enum BackgroundRoute: Identifiable {
     /// 重则停不下来）。
     var id: String {
         switch self {
-        case .picker: return "picker"
         // 每次「调整」一个新 token：`fullScreenCover(item:)` 才会整套重建裁切页，
         // 缩放和偏移回到初始，而不是复用上一次停在某个角度的视图。
         case .adjust(let token, _): return "adjust-" + token.uuidString
@@ -744,11 +746,21 @@ private struct BackgroundCard: View {
     @State private var route: BackgroundRoute?
     /// 相片读不出来时给一句人话，不然点完像没反应。
     @State private var pickError: String?
+    /// 系统照片选择器（v2.4.17 起挑图就走它）。
+    ///
+    /// **为什么回到原生**：「已隐藏」相簿 iOS 16 起默认有 Face ID 锁，锁着时 PhotoKit
+    /// 对第三方一律不下发隐藏资产（`includeHiddenAssets`、`smartAlbumAllHidden` 都没用，
+    /// v2.4.13～v2.4.16 四个版本撞的就是这堵墙）。Apple 留的唯一通道就是 `PhotosPicker`：
+    /// 用户在系统界面里亲手挑，系统才把图交出来。自建网格做不到这件事，索性整条路让回去。
+    @State private var pickerPresented = false
+    @State private var pickerItem: PhotosPickerItem?
+    /// 正在把选中的原图读出来（iCloud 照片要等几秒）。
+    @State private var readingPick = false
 
-    /// 相册选择器或裁切页任意一个还盖在屏幕上，就算「有系统浮层」。
+    /// 系统选择器或裁切页任意一个还盖在屏幕上，就算「有系统浮层」。
     /// 报给 `AppModel` 后，这期间回前台不会触发重连——重连会把根视图整套换掉，
     /// 选择器被顺手关掉，同样是「翻到一半被打断」。
-    private var modalBusy: Bool { route != nil }
+    private var modalBusy: Bool { route != nil || pickerPresented || readingPick }
 
     var body: some View {
         SectionCard("背景", icon: "photo") {
@@ -756,6 +768,15 @@ private struct BackgroundCard: View {
                 header
                 if store.isOn { opacityRow }
                 actions
+                if readingPick {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.mini)
+                        Text("正在读取原图…")
+                            .font(.caption2)
+                    }
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 if let pickError {
                     Text(pickError)
                         .font(.caption2)
@@ -767,17 +788,18 @@ private struct BackgroundCard: View {
         .onChange(of: modalBusy) { _, busy in model.setModalActive(busy) }
         .onAppear { model.setModalActive(modalBusy) }
         .onDisappear { model.setModalActive(false) }
+        // v2.4.17：挑图交给系统选择器。「已隐藏」相簿要 Face ID 解锁后才下发，
+        // 只有这条通道能拿到（见 `pickerPresented` 的注释）。
+        .photosPicker(isPresented: $pickerPresented,
+                      selection: $pickerItem,
+                      matching: .images,
+                      preferredItemEncoding: .current)
+        .onChange(of: pickerItem) { _, item in handlePickerItem(item) }
         .fullScreenCover(item: $route) { route in
             switch route {
-            case .picker:
-                // 挑图 + 裁切是一整条流程（见 `BackgroundPickerFlow`）：网格一直活着，
-                // 裁切页只是盖在它上面的一层，所以点「取消」能回到原来浏览的位置。
-                BackgroundPickerFlow { cropped, original in
-                    store.apply(cropped: cropped, original: original)
-                    pickError = nil
-                }
             case .adjust(_, let image):
-                // 「调整」：图已经在手上，直接进裁切页，取消就回设置页。
+                // 图已经在手上，直接进裁切页；取消就回设置页（系统选择器已关闭，
+                // 没法退回相册原来那一屏——这是让回原生选择器要付的代价）。
                 BackgroundCropView(image: image,
                                    onCancel: { self.route = nil },
                                    onUse: { cropped in
@@ -845,8 +867,7 @@ private struct BackgroundCard: View {
             // 用户挑完图发现框歪了却没地方改，只能删了重选。
             HStack(spacing: 8) {
                 Button {
-                    pickError = nil
-                    route = .picker
+                    startPicking()
                 } label: {
                     actionLabel("更换", icon: "photo.on.rectangle",
                                 tint: .blue, fill: Color.blue.opacity(0.14))
@@ -873,8 +894,7 @@ private struct BackgroundCard: View {
             }
         } else {
             Button {
-                pickError = nil
-                route = .picker
+                startPicking()
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "photo.on.rectangle")
@@ -913,12 +933,45 @@ private struct BackgroundCard: View {
         .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
+    // MARK: - 挑新图（系统选择器）
+
+    private func startPicking() {
+        pickError = nil
+        pickerPresented = true
+    }
+
+    /// 系统选择器交回来的图：读原始数据 → 把方向烘进像素 → 盖裁切页。
+    ///
+    /// 两个细节：
+    /// ① `pickerItem` 立刻置 nil，否则同一张图再选一次时 `onChange` 不触发（值没变）；
+    /// ② 裁切页等选择器收起之后再盖上来。选择器是 sheet、裁切页是 `fullScreenCover`，
+    ///    两个 modal 抢同一个呈现槽位，同一帧内连开系统会吞掉后者。
+    private func handlePickerItem(_ item: PhotosPickerItem?) {
+        guard let item else { return }
+        pickError = nil
+        readingPick = true
+        Task { @MainActor in
+            let data = try? await item.loadTransferable(type: Data.self)
+            pickerItem = nil
+            guard let data, let raw = UIImage(data: data) else {
+                readingPick = false
+                pickError = "这张照片读不出来，换一张试试（iCloud 原图需要先下载）"
+                return
+            }
+            // 方向在这里烘进像素——放主线程做，避免 UIKit 绘制跨线程。
+            let upright = BackgroundCropper.upright(raw, maxSide: 3000)
+            readingPick = false
+            try? await Task.sleep(nanoseconds: 320_000_000)
+            route = .adjust(UUID(), upright)
+        }
+    }
+
     // MARK: - 调整已有背景
 
     /// 三种来源都能进裁切页：已存的原图 > 已裁的成品（老版本没有原图）。
     ///
-    /// v2.4.12 起「挑新图」不再经过这里：那条路由 `BackgroundPickerFlow` 自己管
-    /// （网格 → 裁切 → 取消回网格），这里只负责「调整当前这张」。
+    /// v2.4.17 起「挑新图」完全不经过这里：那条路是系统 `PhotosPicker` →
+    /// `handlePickerItem` → 直接设 `route`，这里只负责「调整当前这张」。
     private func openAdjuster() {
         guard let source = store.original ?? store.image else { return }
         route = .adjust(UUID(), source)
