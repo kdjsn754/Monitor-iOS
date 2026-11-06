@@ -45,18 +45,26 @@ struct BackgroundPickerFlow: View {
 }
 
 /// 相册网格本体：三列缩略图，按创建时间倒序（跟系统相册的「最近项目」一致）。
+///
+/// v2.4.14：隐藏照片不再混进主网格，改成导航栏右上角一个「眼睛划掉」入口，
+/// 点进去是单独的一页（已隐藏），里面只放隐藏照片。主网格因此和系统「最近项目」
+/// 同序；找隐藏照片也不用在几百张普通照片里翻。入口**常驻**（用户 2026-11-06 定），
+/// 一张隐藏照片都没有时点进去看到的是「没有隐藏的照片」。
 private struct BackgroundPhotoGrid: View {
     var onCancel: () -> Void
     var onPick: (UIImage) -> Void
 
     @State private var status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+    /// 主网格：不含隐藏照片。
     @State private var assets: [PHAsset] = []
+    /// 「已隐藏」那一页：只含隐藏照片。
+    @State private var hiddenAssets: [PHAsset] = []
     @State private var loading = true
     /// 正在把某张原图读出来（iCloud 上的照片可能要等几秒）。
     @State private var reading = false
     @State private var errorText: String?
-
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 2), count: 3)
+    /// 是否已经推到「已隐藏」那一页。
+    @State private var showHidden = false
 
     var body: some View {
         NavigationStack {
@@ -72,7 +80,18 @@ private struct BackgroundPhotoGrid: View {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("取消") { onCancel() }
                 }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        // 换页时把上一页的读图错误收掉，免得错误文案跟到另一页去。
+                        errorText = nil
+                        showHidden = true
+                    } label: {
+                        Image(systemName: "eye.slash")
+                    }
+                    .accessibilityLabel("已隐藏")
+                }
             }
+            .navigationDestination(isPresented: $showHidden) { hiddenPage }
             .task { await prepare() }
         }
     }
@@ -87,7 +106,7 @@ private struct BackgroundPhotoGrid: View {
             } else if assets.isEmpty {
                 message("相册里没有可用的照片")
             } else {
-                grid
+                tileGrid(assets)
             }
         case .denied, .restricted:
             denied
@@ -96,52 +115,31 @@ private struct BackgroundPhotoGrid: View {
         }
     }
 
-    private var grid: some View {
-        ScrollView {
-            if status == .limited { limitedBar }
-
-            if let errorText {
-                Text(errorText)
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
+    /// 「已隐藏」页：用 push 而不是在主网格里切数据源——`NavigationStack` 只盖上一层，
+    /// 底下那个 `ScrollView` 不销毁，返回时还在原来那一屏（跟裁切页「取消」同一个思路）。
+    @ViewBuilder private var hiddenPage: some View {
+        ZStack {
+            Color(uiColor: .systemBackground)
+                .ignoresSafeArea()
+            if hiddenAssets.isEmpty {
+                message("没有隐藏的照片")
+            } else {
+                tileGrid(hiddenAssets)
             }
-
-            LazyVGrid(columns: columns, spacing: 2) {
-                ForEach(assets, id: \.localIdentifier) { asset in
-                    Button {
-                        pick(asset)
-                    } label: {
-                        PhotoThumbCell(asset: asset)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.bottom, 24)
+            if reading { readingOverlay }
         }
+        .navigationTitle("已隐藏")
+        .navigationBarTitleDisplayMode(.inline)
     }
 
-    /// 只授权了部分照片时给一条提示：不然用户会以为「相册里的图都没了」。
-    private var limitedBar: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "photo.on.rectangle")
-                .font(.caption)
-            Text("当前只显示你授权过的照片")
-                .font(.caption)
-            Spacer(minLength: 4)
-            Button("管理") {
-                if let vc = PhotoLibrary.topViewController() {
-                    PHPhotoLibrary.shared().presentLimitedLibraryPicker(from: vc)
-                }
-            }
-            .font(.caption.weight(.semibold))
-        }
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(Color(uiColor: .secondarySystemBackground))
+    private func tileGrid(_ list: [PHAsset]) -> some View {
+        PhotoTileGrid(
+            assets: list,
+            showsLimitedBar: status == .limited,
+            notice: errorText,
+            onManage: manageLimited,
+            onPick: pick
+        )
     }
 
     private var denied: some View {
@@ -203,26 +201,15 @@ private struct BackgroundPhotoGrid: View {
             loading = false
             return
         }
-        loadAssets()
+        // 两批一起取：主网格排除隐藏，分类页只留隐藏。
+        assets = PhotoLibrary.images(includeHidden: false)
+        hiddenAssets = PhotoLibrary.images(includeHidden: true).filter { $0.isHidden }
         loading = false
     }
 
-    private func loadAssets() {
-        let options = PHFetchOptions()
-        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-        options.predicate = NSPredicate(format: "mediaType == %d",
-                                        PHAssetMediaType.image.rawValue)
-        // v2.4.13：把「已隐藏」的照片也取出来。
-        // 系统相册的「已隐藏」相簿能选、`PhotosPicker` 也能选，自建网格里选不到就是倒退
-        // （用户 2026-11-06 反馈）。这里只负责让 PhotoKit 别把 hidden 资产过滤掉；
-        // 如果用户在「设置 › 照片」里关掉了「显示已隐藏的相册」，系统根本不下发这批资产，
-        // 代码侧没有任何 API 能绕过，也没有 API 能查到那个开关的状态——别在这儿乱试。
-        options.includeHiddenAssets = true
-        let result = PHAsset.fetchAssets(with: options)
-        var list: [PHAsset] = []
-        list.reserveCapacity(result.count)
-        result.enumerateObjects { asset, _, _ in list.append(asset) }
-        assets = list
+    private func manageLimited() {
+        guard let vc = PhotoLibrary.topViewController() else { return }
+        PHPhotoLibrary.shared().presentLimitedLibraryPicker(from: vc)
     }
 
     private func pick(_ asset: PHAsset) {
@@ -239,6 +226,62 @@ private struct BackgroundPhotoGrid: View {
             // 方向在这里烘进像素——和 v2.4.11 一样放在主线程做，避免 UIKit 绘制跨线程。
             onPick(BackgroundCropper.upright(raw, maxSide: 3000))
         }
+    }
+}
+
+/// 普通照片和隐藏照片共用的网格：三列、间距 2pt、按创建时间倒序。
+/// 顶部两条提示也一起搬进来，两页的样式就不会各走各的。
+private struct PhotoTileGrid: View {
+    let assets: [PHAsset]
+    let showsLimitedBar: Bool
+    let notice: String?
+    let onManage: () -> Void
+    let onPick: (PHAsset) -> Void
+
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 2), count: 3)
+
+    var body: some View {
+        ScrollView {
+            if showsLimitedBar { limitedBar }
+
+            if let notice {
+                Text(notice)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+            }
+
+            LazyVGrid(columns: columns, spacing: 2) {
+                ForEach(assets, id: \.localIdentifier) { asset in
+                    Button {
+                        onPick(asset)
+                    } label: {
+                        PhotoThumbCell(asset: asset)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.bottom, 24)
+        }
+    }
+
+    /// 只授权了部分照片时给一条提示：不然用户会以为「相册里的图都没了」。
+    private var limitedBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "photo.on.rectangle")
+                .font(.caption)
+            Text("当前只显示你授权过的照片")
+                .font(.caption)
+            Spacer(minLength: 4)
+            Button("管理") { onManage() }
+                .font(.caption.weight(.semibold))
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Color(uiColor: .secondarySystemBackground))
     }
 }
 
@@ -340,6 +383,21 @@ enum PhotoLibrary {
         }
         guard let data else { return nil }
         return UIImage(data: data)
+    }
+
+    /// 取图列表。`includeHidden: false` = 主网格（跟系统「最近项目」一致）；
+    /// `true` = 带上隐藏资产，调用方按 `isHidden` 自己筛。
+    static func images(includeHidden: Bool) -> [PHAsset] {
+        let options = PHFetchOptions()
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        options.predicate = NSPredicate(format: "mediaType == %d",
+                                        PHAssetMediaType.image.rawValue)
+        options.includeHiddenAssets = includeHidden
+        let result = PHAsset.fetchAssets(with: options)
+        var list: [PHAsset] = []
+        list.reserveCapacity(result.count)
+        result.enumerateObjects { asset, _, _ in list.append(asset) }
+        return list
     }
 
     /// 「管理」按钮要把系统的受限相册选择器挂到当前最上层控制器上。
