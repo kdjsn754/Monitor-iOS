@@ -83,11 +83,32 @@ struct SettingsView: View {
                     .environment(model)
                     .presentationBackground(Color.clear)
             }
-            .confirmationDialog("退出后需要重新输入密码", isPresented: $confirmLogout, titleVisibility: .visible) {
-                Button("断开并清除密码", role: .destructive) {
-                    Task { await model.logout() }
+            // v2.4.18：确认框自绘。iOS 26 把系统 `confirmationDialog` 锚到页面上方
+            // （看着像个贴歪的气泡，底部按钮行还露在外面），和 FanControl / 设备面板
+            // 同一个毛病，那两处早就换成 `SheetOverlay` 了，这里跟上。
+            .overlay {
+                if confirmLogout {
+                    SheetOverlay(onDismiss: { confirmLogout = false }) {
+                        SheetOverlayCard {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("断开并清除密码？")
+                                    .font(.headline)
+                                Text("退出后需要重新输入密码才能连接，保存的监控设置不会丢。")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+
+                            HStack(spacing: 10) {
+                                SheetOverlayButton(title: "取消") { confirmLogout = false }
+                                SheetOverlayButton(title: "断开并清除", tint: .red) {
+                                    confirmLogout = false
+                                    Task { await model.logout() }
+                                }
+                            }
+                        }
+                    }
                 }
-                Button("取消", role: .cancel) {}
             }
         }
     }
