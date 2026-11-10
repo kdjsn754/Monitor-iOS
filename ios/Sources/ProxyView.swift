@@ -100,14 +100,16 @@ struct ProxyView: View {
             .task {
                 await model.loadSubscriptions(silent: true)
                 // v2.4.22：流量也自动拉一次，别让用户进页面先点一下刷新。
-                // 内部按「一分钟内问过就不再问」节流，切页来回不会连打机场。
-                await model.autoLoadSubscriptionUsage()
+                // v2.4.25：改成「2 秒后再拉」——先把落盘缓存画出来（`configDisplayUsage`
+                // 第一帧就能拿到），等首屏安稳了再覆盖。多次调用会互相取消重排，
+                // 不会变成两次请求。
+                model.scheduleAutoLoadSubscriptionUsage()
             }
             .onChange(of: model.ocStateLoaded) { _, loaded in
                 guard loaded else { return }
                 Task {
                     await model.loadSubscriptions(silent: true)
-                    await model.autoLoadSubscriptionUsage()
+                    model.scheduleAutoLoadSubscriptionUsage()
                 }
             }
             // 控制面板改 fullScreenCover（v2.3.5，用户要求全屏）：WebView 自带导航栏
@@ -596,7 +598,9 @@ struct ProxyView: View {
                     }
                 }
 
-                if model.ocStateLoaded { configUsageBlock }
+                // v2.4.25：有落盘缓存时不受「配置列表还没读到」的限制——
+                // 冷启动第一屏就要看到数字，而不是等探针跑完才出现。
+                if model.ocStateLoaded || model.configDisplayUsage != nil { configUsageBlock }
 
                 // 下半段：两个动作并排放到文字下面，各占一半宽，尺寸加大。
                 // v2.3.8 起两个统一成「管理」那套浅蓝底 + 蓝字（用户要求），
@@ -631,55 +635,60 @@ struct ProxyView: View {
     /// ④ 还没有数据也还没开始读 → 淡色一行提示，刷新钮是补救手段（v2.4.22 起进页面自动拉）。
     @ViewBuilder
     private var configUsageBlock: some View {
-        if let sub = model.currentConfigSubscription {
-            if let usage = sub.usage {
-                VStack(alignment: .leading, spacing: 5) {
-                    UsageBar(usage: usage)
-                    HStack(spacing: 6) {
-                        Text(usage.amountText + (usage.percentText.map { "（\($0)）" } ?? ""))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.8)
-                        Spacer(minLength: 4)
-                        if let expire = usage.shortExpireText {
-                            Text(expire)
-                                .font(.caption2)
-                                .foregroundStyle(usage.expireColor)
-                                .lineLimit(1)
-                                .layoutPriority(1)
-                        }
-                    }
-                    // v2.4.24：剩余流量单独一行。挤在「已用 / 总量」那一行的右边放不下，
-                    // 而它是用户最先想知道的那个数，干脆给它一行（左对齐，跟着上面那行起头）。
-                    if let remaining = usage.remainingText {
-                        Text(remaining)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.8)
-                    }
-                }
-            } else if model.subUsageLoading {
-                VStack(alignment: .leading, spacing: 5) {
-                    Capsule()
-                        .fill(Color(uiColor: .tertiarySystemFill))
-                        .frame(height: 5)
-                    Text("正在读取流量…")
+        // v2.4.25：数据来源换成 `configDisplayUsage`——真实数据还没到时它会顶一份落盘缓存
+        // （键是配置文件名全名，第一帧就查得到）。所以这里不能再套
+        // `if let sub = currentConfigSubscription`，否则冷启动那两秒缓存没地方显示。
+        if let usage = model.configDisplayUsage {
+            VStack(alignment: .leading, spacing: 5) {
+                UsageBar(usage: usage)
+                HStack(spacing: 6) {
+                    Text(usage.amountText + (usage.percentText.map { "（\($0)）" } ?? ""))
                         .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                    Spacer(minLength: 4)
+                    if let expire = usage.shortExpireText {
+                        Text(expire)
+                            .font(.caption2)
+                            .foregroundStyle(usage.expireColor)
+                            .lineLimit(1)
+                            .layoutPriority(1)
+                    }
                 }
-            } else if let error = model.subUsageError {
-                Text(error)
-                    .font(.caption2)
-                    .foregroundStyle(.orange)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else {
-                Text("流量信息还没读到，点右上角可重试")
+                // v2.4.24：剩余流量单独一行。挤在「已用 / 总量」那一行的右边放不下，
+                // 而它是用户最先想知道的那个数，干脆给它一行（左对齐，跟着上面那行起头）。
+                if let remaining = usage.remainingText {
+                    Text(remaining)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
+            }
+        } else if model.subUsageLoading {
+            VStack(alignment: .leading, spacing: 5) {
+                Capsule()
+                    .fill(Color(uiColor: .tertiarySystemFill))
+                    .frame(height: 5)
+                Text("正在读取流量…")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
+        } else if let error = model.subUsageError {
+            Text(error)
+                .font(.caption2)
+                .foregroundStyle(.orange)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+        } else if model.subsLoaded && model.currentConfigSubscription == nil {
+            // 订阅列表读回来了、却匹配不到订阅：手动放进 `/etc/openclash/config` 的 yaml，
+            // 没有订阅可问。整块不出现，和 v2.4.21 的行为保持一致。
+            EmptyView()
+        } else {
+            Text("流量信息还没读到，点右上角可重试")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
     }
 
@@ -708,7 +717,11 @@ struct ProxyView: View {
     }
 
     private var configTitle: String {
-        guard model.ocStateLoaded else { return "读取中…" }
+        guard model.ocStateLoaded else {
+            // v2.4.25：还没探测到 `oc.config` 时，磁盘上有上次用的文件名就先把它写出来——
+            // 下面已经画着缓存流量了，标题还写「读取中…」看着自相矛盾。
+            return model.lastConfigFileName ?? "读取中…"
+        }
         guard !oc.config.isEmpty else { return "未选择" }
         return (oc.config as NSString).lastPathComponent
     }
@@ -1247,7 +1260,9 @@ private struct SubscriptionListView: View {
     /// ③ 读不到 / 机场不给这个头 → 整块不出现，不留一条 0 B 的假条。
     @ViewBuilder
     private func usageBlock(for sub: ProxySubscription) -> some View {
-        if let usage = sub.usage {
+        // v2.4.25：当前正在用的那条，数据还没回来时用落盘缓存顶上——
+        // 冷启动进列表页，不该只有这一行空着（键是配置文件名，命中的必然是它）。
+        if let usage = model.displayUsage(for: sub) {
             VStack(alignment: .leading, spacing: 5) {
                 UsageBar(usage: usage)
                     .padding(.top, 3)

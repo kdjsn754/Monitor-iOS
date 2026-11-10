@@ -204,6 +204,18 @@ struct SubscriptionUsage: Hashable {
     /// nil = 机场没给这一项；0 = 长期有效。
     var expire: TimeInterval?
 
+    /// 显式写一个初始化器（v2.4.25）。
+    ///
+    /// 下面那个 `init?(header:)` 把编译器自动生成的 memberwise init 顶掉了，
+    /// 而落盘缓存还原时需要「从四个数直接造一个」。没有它就只能拿响应头字符串反序列化，
+    /// 那是把「存储格式」和「解析格式」硬绑在一起，改一个准坏另一个。
+    init(upload: Int64, download: Int64, total: Int64, expire: TimeInterval?) {
+        self.upload = upload
+        self.download = download
+        self.total = total
+        self.expire = expire
+    }
+
     var used: Int64 { upload + download }
 
     /// 已用比例。总量为 0（不限量）时没有比例可言。

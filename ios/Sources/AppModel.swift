@@ -131,6 +131,21 @@ final class AppModel {
     /// 没有这份缓存，30 秒内第二次进这一页就会看到「流量没了」——数据其实还在，
     /// 只是被列表刷新冲掉了。
     private var subUsageCache: [String: SubscriptionUsage] = [:]
+    /// 落盘的流量快照（v2.4.25），键是**配置文件名全名**（`Aurora.yaml`，小写去空白）。
+    ///
+    /// 为什么不用订阅名做键：冷启动第一帧订阅列表还没读回来（`loadSubscriptions`
+    /// 要等 SSH），`currentConfigSubscription` 是 nil，按名字什么都查不到；
+    /// 而配置文件全名——`oc.config` 一去扩展名就能比，`oc.config` 本身没探测到时
+    /// 退回上次读成功时记下的那个——**第一帧就拿得到**。所以这份缓存只能按文件名存。
+    private var usageSnapshots: [String: StoredUsage] = AppModel.loadUsageSnapshots()
+    /// 上一次读成功时用的配置文件名全名（落盘）。冷启动 `oc.config` 还没回来的那几秒靠它。
+    ///
+    /// 界面也会拿它当标题（`configTitle`）：那几秒卡片下面已经画出缓存流量了，
+    /// 标题还写「读取中…」会显得自相矛盾。
+    private(set) var lastConfigFileName: String? = AppModel.loadLastConfigName()
+    /// 「2 秒后再去拉」的定时任务。重复调度直接取消重排，
+    /// 所以页面挂载、连接完成两声铃不会变成两次请求。
+    @ObservationIgnored private var usageAutoTask: Task<Void, Never>?
     /// 弹窗里的操作结果（成功/失败/进行中的说明）。见 `Notice` 的注释：
     /// 弹窗里没有系统 alert 可用，`errorMessage` 又只在登录页/设置页渲染，
     /// 所以订阅相关的每一步都必须往这里写一条，否则界面看起来「什么都没发生」。
@@ -823,7 +838,8 @@ final class AppModel {
             self.startPolling(refreshNow: true)
             // v2.4.22：配置已经读回来了，顺手把订阅流量也拉一次——
             // 用户不该为了看几个数字先点一次刷新。
-            await self.autoLoadSubscriptionUsage()
+            // v2.4.25：改成延迟 2 秒排队，先把落盘缓存画出来再更新。
+            self.scheduleAutoLoadSubscriptionUsage()
         }
     }
 
@@ -1264,8 +1280,110 @@ final class AppModel {
             subscriptions = updated
             subUsageFetchedAt = Date()
             subUsageAt = Date()
+            // 落盘一份（键是配置文件名全名）。下次冷启动第一帧就有数字可画，
+            // 不用再盯着「正在读取流量…」等 SSH 往返。
+            if !openClash.config.isEmpty {
+                rememberUsage(usage, configFile: (openClash.config as NSString).lastPathComponent)
+            }
         } catch {
             subUsageError = "读取超时，点刷新重试"
+        }
+    }
+
+    // MARK: - 流量缓存（v2.4.25）
+
+    /// 冷启动第一屏要画的那份流量：从落盘缓存按**配置文件名**取。
+    ///
+    /// 超过 7 天的不画——换过套餐、月度重置过的旧数字比空白更误导人。
+    var cachedConfigUsage: SubscriptionUsage? {
+        guard let key = cachedConfigKey, let stored = usageSnapshots[key] else { return nil }
+        guard Date().timeIntervalSince1970 - stored.savedAt < 7 * 86_400 else { return nil }
+        return stored.usage
+    }
+
+    /// 缓存键：优先用刚探测到的 `oc.config`，还没探测到就退回上次成功时记下的文件名。
+    private var cachedConfigKey: String? {
+        let file = (openClash.config as NSString).lastPathComponent
+        if !file.isEmpty { return Self.usageKey(file) }
+        return lastConfigFileName.map(Self.usageKey)
+    }
+
+    /// 卡片上该画什么：真实数据优先，没有就顶一份落盘缓存。
+    ///
+    /// `subsLoaded` 这个分支是必要的：订阅列表已经读回来却匹配不到订阅，说明当前配置是
+    /// 手动放进 `/etc/openclash/config` 的 yaml——这时候不能拿缓存冒充订阅数据
+    /// （哪怕文件名恰好和某条历史订阅一样）。而列表还没读回来时必须用缓存，
+    /// 因为「还没读」和「没有订阅」是两件完全不同的事。
+    var configDisplayUsage: SubscriptionUsage? {
+        if let sub = currentConfigSubscription {
+            return sub.usage ?? cachedConfigUsage
+        }
+        return subsLoaded ? nil : cachedConfigUsage
+    }
+
+    /// 订阅列表某一行的流量：真实数据优先；当前正在用的那条，数据还没回来时用缓存顶上。
+    ///
+    /// 只可能命中当前这条——缓存的键是配置文件名，别的订阅对不上。
+    func displayUsage(for sub: ProxySubscription) -> SubscriptionUsage? {
+        if let usage = sub.usage { return usage }
+        guard sub.name == currentConfigSubscription?.name else { return nil }
+        return cachedConfigUsage
+    }
+
+    /// 写一份落盘快照。键用配置文件名全名，和 `cachedConfigKey` 严格对齐。
+    private func rememberUsage(_ usage: SubscriptionUsage, configFile: String) {
+        guard !configFile.isEmpty else { return }
+        usageSnapshots[Self.usageKey(configFile)] = StoredUsage(usage)
+        // 只留最近 12 条：换掉的旧配置留着没用，也别在 UserDefaults 里堆垃圾。
+        if usageSnapshots.count > 12 {
+            let keep = usageSnapshots.sorted { $0.value.savedAt > $1.value.savedAt }.prefix(12)
+            usageSnapshots = Dictionary(uniqueKeysWithValues: keep.map { ($0.key, $0.value) })
+        }
+        lastConfigFileName = configFile
+        UserDefaults.standard.set(configFile, forKey: Self.lastConfigKey)
+        Self.saveUsageSnapshots(usageSnapshots)
+    }
+
+    private static let usageStoreKey = "oc.usage.snapshots.v1"
+    private static let lastConfigKey = "oc.usage.lastConfig.v1"
+
+    private static func usageKey(_ file: String) -> String {
+        file.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private static func loadUsageSnapshots() -> [String: StoredUsage] {
+        guard let data = UserDefaults.standard.data(forKey: usageStoreKey),
+              let decoded = try? JSONDecoder().decode([String: StoredUsage].self, from: data)
+        else { return [:] }
+        return decoded
+    }
+
+    private static func saveUsageSnapshots(_ value: [String: StoredUsage]) {
+        guard let data = try? JSONEncoder().encode(value) else { return }
+        UserDefaults.standard.set(data, forKey: usageStoreKey)
+    }
+
+    private static func loadLastConfigName() -> String? {
+        UserDefaults.standard.string(forKey: lastConfigKey)
+    }
+
+    /// 自动拉流量的统一入口：**先让界面把缓存画出来，2 秒后再去问机场**（v2.4.25）。
+    ///
+    /// 为什么不在页面一出现就拉：冷启动那一拍订阅列表、OpenClash 探针、指标采集全挤在
+    /// 同一条 SSH 通道上，抢在前面拉流量只会让第一屏更晚出来。晚 2 秒既能先画出落盘缓存，
+    /// 也避开连接刚建好时那阵忙。多次调用只保留最后一次（取消重排），不会叠成两次请求。
+    func scheduleAutoLoadSubscriptionUsage(delay: TimeInterval = 2) {
+        // 手上没有缓存可画时（第一次装、或者刚换了一条配置），没必要再等满 2 秒——
+        // 那 2 秒本来就是留给第一屏把缓存画出来的。等下去只会让人对着
+        // 「还没读到」多盯两秒。
+        let effective = configDisplayUsage == nil ? min(delay, 0.4) : delay
+        usageAutoTask?.cancel()
+        usageAutoTask = Task { [effective] in
+            if effective > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(effective * 1_000_000_000))
+            }
+            guard !Task.isCancelled else { return }
+            await self.autoLoadSubscriptionUsage()
         }
     }
 
@@ -3009,3 +3127,28 @@ private func splitFields(_ line: Substring) -> [String] {
     line.split(separator: " " as Character).map(String.init)
 }
 
+
+/// 落盘用的流量快照：`SubscriptionUsage` 负责算，这里只负责存。
+///
+/// 多一个 `savedAt`：判断这份缓存是不是太旧了——太久以前的数字画出来只会误导。
+/// 存成独立类型而不是给 `SubscriptionUsage` 加 `Codable`：后者将来改字段
+/// （比如机场新增一个 `reset_day`）会顺带改掉磁盘格式，旧数据就解不出来了。
+private struct StoredUsage: Codable {
+    var upload: Int64
+    var download: Int64
+    var total: Int64
+    var expire: TimeInterval?
+    var savedAt: TimeInterval
+
+    init(_ usage: SubscriptionUsage) {
+        upload = usage.upload
+        download = usage.download
+        total = usage.total
+        expire = usage.expire
+        savedAt = Date().timeIntervalSince1970
+    }
+
+    var usage: SubscriptionUsage {
+        SubscriptionUsage(upload: upload, download: download, total: total, expire: expire)
+    }
+}
