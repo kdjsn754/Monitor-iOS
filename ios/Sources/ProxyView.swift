@@ -49,7 +49,8 @@ struct ProxyView: View {
                     // 冷启动那两秒整张卡是隐藏的，探针一回来凭空插进来，把下面几张卡全推下去
                     // ——用户看到的就是「控制面板要等一会才闪出来」。
                     // 现在未探测完先按「连接中」渲染（`panelBadge` 本来就有这一态），
-                    // 和 heroCard 里 `loadingRow` 的处理是同一个思路：先占住位置，别让布局跳。
+                    // 和 heroCard 里「未探测完就先把两排按钮灰着画出来」是同一个思路：
+                    // 先占住位置，别让布局跳。
                     if oc.installed || !model.ocStateLoaded { panelCard }
                     configCard
                     accessCard
@@ -192,13 +193,21 @@ struct ProxyView: View {
                 statusPill
             }
 
-            if oc.installed {
+            // v2.5.3：未探测完也按「装了」的骨架渲染，只是灰着、点不动。
+            //
+            // 以前这里是 `if oc.installed` —— 冷启动那一拍 `installed` 还是 false，
+            // 于是走 `loadingRow`，只有一行 44pt；探针一回来确认装了，整块换成
+            // 「模式三连 + 启停三连」两行，heroCard 一下长高三十多点，下面所有卡片
+            // 全被推下去。用户说的「openclash 模块也会」就是这个。
+            // 现在：两行按钮从第一帧就在，尺寸与真实状态完全一致，探针回来只换颜色
+            // （灰 → 彩）和能否点，高度一行都不动。右上角「读取中」已经说明在等。
+            if oc.installed || !model.ocStateLoaded {
                 HStack(spacing: 6) {
                     modeButton("规则", value: "rule")
                     modeButton("全局", value: "global")
                     modeButton("直连", value: "direct")
                 }
-                .disabled(model.busy || !oc.running)
+                .disabled(model.busy || !oc.running || !oc.installed)
                 .opacity(oc.running ? 1 : 0.55)
 
                 HStack(spacing: 8) {
@@ -212,14 +221,11 @@ struct ProxyView: View {
                         await model.restartOpenClash()
                     }
                 }
-                .disabled(model.busy)
-                .opacity(model.busy ? 0.55 : 1)
-            } else if !model.ocStateLoaded {
-                // 第一拍还没回来：给一条「正在读取」，别把这块留白，也别急着下结论。
-                // 以前这里直接按「没装」渲染，于是进页面先看到一句
-                // 「未检测到插件」，几秒后按钮才整排蹦出来。
-                loadingRow
+                .disabled(model.busy || !oc.installed)
+                .opacity(model.busy || !oc.installed ? 0.55 : 1)
             } else {
+                // 确认没装才说话。这一分支会把卡片变矮——那是对的，
+                // 这几排按钮本来就不该出现在没装插件的机器上。
                 Text("确认路由器已安装 OpenClash 插件，且 SSH 账号有权限读取 /etc/config/openclash。")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -228,20 +234,6 @@ struct ProxyView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassCard()
-    }
-
-    private var loadingRow: some View {
-        HStack(spacing: 8) {
-            ProgressView()
-                .controlSize(.small)
-            Text("正在读取模式与配置…")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 11)
-        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-        .plainTile(radius: 12)
     }
 
     // MARK: - 控制面板
