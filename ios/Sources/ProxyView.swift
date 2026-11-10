@@ -45,7 +45,12 @@ struct ProxyView: View {
                     heroCard
                     liveCard
                     // 没装插件就不出现这张卡：它只会给一个必然打不开的入口。
-                    if oc.installed { panelCard }
+                    // 但「还没探测完」不等于「没装」（v2.5.1）：以前这里只认 `oc.installed`，
+                    // 冷启动那两秒整张卡是隐藏的，探针一回来凭空插进来，把下面几张卡全推下去
+                    // ——用户看到的就是「控制面板要等一会才闪出来」。
+                    // 现在未探测完先按「连接中」渲染（`panelBadge` 本来就有这一态），
+                    // 和 heroCard 里 `loadingRow` 的处理是同一个思路：先占住位置，别让布局跳。
+                    if oc.installed || !model.ocStateLoaded { panelCard }
                     configCard
                     accessCard
                 }
