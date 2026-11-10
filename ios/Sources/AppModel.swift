@@ -101,11 +101,16 @@ final class AppModel {
     /// 直到某次读列表真的读回同一个值才放手。
     private var pendingEnabled: [String: Bool] = [:]
     private(set) var subsLoaded = false
-    /// 正在跑那条并发 curl。界面用它显示「正在读取流量…」。
+    /// 正在读当前配置那一条订阅的流量。界面用它显示「正在读取流量…」。
     ///
     /// 用量本身不放单独的表，直接回填进 `subscriptions[i].usage`：列表、编辑页
     /// 拿的是同一份值，不会出现「列表里有流量、点进编辑就没了」。
     private(set) var subUsageLoading = false
+    /// 上一次读取失败的原因（成功时清空）。v2.4.21 起界面上要显示出来：
+    /// 上一版读不到就静默留白，谁也不知道是机场没给还是命令没跑起来。
+    private(set) var subUsageError: String?
+    /// 上一次读成功的时间点，卡片上显示「几分钟前」。
+    private(set) var subUsageAt: Date?
     /// 上一次读成功的时间：来回切页面时 30 秒内不重复打机场接口。
     private var subUsageFetchedAt: Date?
     /// 用量缓存（键是订阅名）。
@@ -1175,69 +1180,130 @@ final class AppModel {
     /// **并发**跑 `curl -sLI -X GET`，只取响应头里的 `subscription-userinfo` 那一行。
     /// 串行跑四条就是三十秒，所以命令里每条都挂 `&`，最后 `wait`。
     /// 请求从路由器发出（不是手机），机场看到的是路由器的出口 IP，和更新订阅时一致。
+    /// 当前配置文件对应的那条订阅。
+    ///
+    /// OpenClash 的约定是「订阅名 = 产物文件名」（`/etc/openclash/config/<name>.yaml`），
+    /// 所以拿 `oc.config` 的 basename 去掉扩展名去比订阅名就能对上。
+    /// 配置文件也可能是手动放的（不来自任何订阅），那时返回 nil，卡片上就不显示流量。
+    var currentConfigSubscription: ProxySubscription? {
+        let file = (openClash.config as NSString).lastPathComponent
+        guard !file.isEmpty, !openClash.config.isEmpty else { return nil }
+        let stem = (file as NSString).deletingPathExtension
+        // 去扩展名后直接比；再给一层「忽略大小写与首尾空白」的宽匹配——
+        // 有人订阅名写成 `Aurora Sub`、文件却叫 `aurora sub.yaml`，严格比会匹配不上，
+        // 那卡片就永远是空的，还看不出是为什么。
+        func normalize(_ text: String) -> String {
+            text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+        let target = normalize(stem)
+        return subscriptions.first { normalize($0.name) == target }
+            ?? subscriptions.first { normalize($0.name) == normalize(file) }
+    }
+
+    /// 读**当前配置文件那一条**订阅的流量与到期（v2.4.21）。
+    ///
+    /// 不再遍历所有订阅：五条订阅就是五次对外请求，而卡片上只展示当前在用的那条，
+    /// 其余四条纯属白打机场接口（还慢）。要全部刷新就把当前配置切过去。
+    ///
+    /// 走的路子和 OpenClash 网页后台一样（`fetch_sub_info`）：只取响应头里的
+    /// `subscription-userinfo`。请求从路由器发出，机场看到的出口 IP 与更新订阅时一致。
     func loadSubscriptionUsages(force: Bool = false) async {
         guard connected, !subUsageLoading else { return }
-        let targets = subscriptions.filter(\.enabled)
-        guard !targets.isEmpty else { return }
-        if !force, let last = subUsageFetchedAt, Date().timeIntervalSince(last) < 30 {
+        // 进页面时 `oc.config` 可能还没读回来（OpenClash 探针是异步的），
+        // 这时候按名字匹配会得到 nil，等于静默不拉。补一次探针再匹配。
+        if openClash.config.isEmpty { await runOpenClashProbe() }
+        guard let sub = currentConfigSubscription else {
+            subUsageError = "当前配置不是来自订阅"
+            return
+        }
+        if !force, let last = subUsageFetchedAt, Date().timeIntervalSince(last) < 30,
+           sub.usage != nil {
             return
         }
         subUsageLoading = true
+        subUsageError = nil
         defer { subUsageLoading = false }
         do {
-            let output = try await execute(subscriptionUsageCommand(targets), timeout: 30)
-            var parsed: [String: SubscriptionUsage] = [:]
+            let output = try await execute(subscriptionUsageCommand(sub), timeout: 45)
+            var header: String?
+            var diag = ""
             for raw in output.split(separator: "\n") {
+                if raw.hasPrefix("D|") { diag = String(raw.dropFirst(2)); continue }
                 // 订阅名里可能有 `|`，所以从**最后**一个分隔符切开。
                 guard raw.hasPrefix("U|"), let bar = raw.lastIndex(of: "|") else { continue }
-                let name = String(raw.dropFirst(2)[..<bar])
-                let header = String(raw[raw.index(after: bar)...])
-                guard !header.isEmpty,
-                      let usage = SubscriptionUsage(header: header) else { continue }
-                parsed[name] = usage
+                let body = String(raw[raw.index(after: bar)...])
+                if !body.isEmpty { header = body }
             }
-            guard !parsed.isEmpty else { return }
-            subUsageCache.merge(parsed) { _, new in new }
+            guard let header, let usage = SubscriptionUsage(header: header) else {
+                // 明确说清是「没拿到这一行」，而不是静默留白——上一版就是静默，
+                // 结果谁也不知道是机场没给、还是命令压根没跑起来。
+                subUsageError = diag.isEmpty ? "订阅没有返回流量信息" : diag
+                return
+            }
+            subUsageCache[sub.name] = usage
             var updated = subscriptions
-            for index in updated.indices {
-                updated[index].usage = subUsageCache[updated[index].name]
+            for index in updated.indices where updated[index].name == sub.name {
+                updated[index].usage = usage
             }
             subscriptions = updated
             subUsageFetchedAt = Date()
+            subUsageAt = Date()
         } catch {
-            // 读不到就不显示，不打扰：订阅本身已经列出来了，
-            // 为一条流量再弹个错误只会让「列表能用」这件事看起来像坏了。
+            subUsageError = "读取超时，点刷新重试"
         }
     }
 
-    /// 并发抓每条订阅的 `subscription-userinfo`。
+    /// 卡片上那个刷新钮：先重读配置与订阅列表，拿到当前配置，再去拉它的流量。
     ///
-    /// 三点讲究：
-    /// ① `-I` 配 `-X GET`：方法仍是 GET（有的机场对 HEAD 不回头），但只读响应头，
-    ///    不会把整个配置文件再下一遍；`-L` 跟 301，`-m 8` 兜住挂掉的机场。
-    /// ② `printf` 而不是 `echo "U|$name|$h"`：名字里有空格 / 中文时，引号拼在双引号
-    ///    里会把引号本身也打出来，`printf` 按参数分开引用才稳。
-    /// ③ 没有 curl 的固件直接退出，别让整条命令报错——列表本身仍然是可用的。
-    /// ④ 第一遍没拿到这一行，就换 `Quantumultx` 再问一次——**这条也是抄 OpenClash 的**：
-    ///    有的机场只对特定 UA 回 `subscription-userinfo`，`fetch_sub_info()` 里同样是
-    ///    「非 200 就换 Quantumultx 重试」。只有失败时才多打一次，正常情况不变慢。
-    func subscriptionUsageCommand(_ subs: [ProxySubscription]) -> String {
-        var body: [String] = [
-            "echo @@OCUSAGE",
-            "command -v curl >/dev/null 2>&1 || exit 0",
-        ]
-        for sub in subs {
-            guard let url = sub.lines.first else { continue }
-            let agent = sub.ua.isEmpty ? "clash-verge/v2.4.5" : sub.ua
-            body.append("""
-            ( h=$(curl -sLI -X GET -m 8 -H \(shQuote("User-Agent: " + agent)) \(shQuote(url)) 2>/dev/null | grep -i 'subscription-userinfo' | head -1)
-              [ -z "$h" ] && h=$(curl -sLI -X GET -m 6 -H 'User-Agent: Quantumultx' \(shQuote(url)) 2>/dev/null | grep -i 'subscription-userinfo' | head -1)
-              printf 'U|%s|%s\\n' \(shQuote(sub.name)) "$h" ) &
-            """)
+    /// 顺序不能反——`oc.config` 可能刚被换过，先拉流量会拉到上一条订阅头上。
+    func refreshCurrentSubscriptionUsage() async {
+        guard connected else { return }
+        await runOpenClashProbe()
+        await loadSubscriptions(silent: true)
+        await loadSubscriptionUsages(force: true)
+    }
+
+    /// 抓这条订阅的 `subscription-userinfo`。
+    ///
+    /// 五道保险，都是踩出来的：
+    /// ① `curl -I` 先行（只读响应头，最省流量），没拿到就用 **GET + `-D -` + `-o /dev/null`**
+    ///    再要一次——不少机场/CDN 对 HEAD 不回头，`-I` 永远拿不到这个头，这是 v2.4.20
+    ///    「读不到流量」最可能的一条原因。
+    /// ② 两种 UA 都试：`clash-verge` 拿不到就换 `Quantumultx`（OpenClash 的 `fetch_sub_info`
+    ///    同样是「非 200 换 Quantumultx 重试」）。
+    /// ③ 没 curl 的固件退到 `wget -S`（busybox wget 把响应头打在 stderr，`2>&1` 混回来）。
+    /// ④ 全部失败时打一行 `D|` 说明卡在哪一步，界面直接显示，不用再猜。
+    /// ⑤ `printf` 而不是 `echo "U|$name|$h"`：名字里有空格 / 中文时，引号拼在双引号里
+    ///    会把引号本身也打出来，`printf` 按参数分开引用才稳。
+    func subscriptionUsageCommand(_ sub: ProxySubscription) -> String {
+        guard let url = sub.lines.first else {
+            return lowPriority("echo \"D|这条订阅没有地址\"")
         }
-        body.append("wait")
-        body.append("true")
-        return lowPriority(body.joined(separator: "\n"))
+        let agent = sub.ua.isEmpty ? "clash-verge/v2.4.5" : sub.ua
+        return lowPriority("""
+        echo @@OCUSAGE
+        command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || { echo "D|路由器上没有 curl / wget"; exit 0; }
+        subinfo() {
+          if command -v curl >/dev/null 2>&1; then
+            curl -sLI -X GET -m 6 -H "User-Agent: $2" "$1" 2>/dev/null
+          else
+            wget -q -S -O /dev/null --header="User-Agent: $2" --timeout=6 "$1" 2>&1
+          fi
+        }
+        subbody() {
+          if command -v curl >/dev/null 2>&1; then
+            curl -sL -m 10 -D - -o /dev/null -H "User-Agent: $2" "$1" 2>/dev/null
+          fi
+        }
+        URL=\(shQuote(url))
+        UA=\(shQuote(agent))
+        h=$(subinfo "$URL" "$UA" | grep -i 'subscription-userinfo' | head -1)
+        [ -z "$h" ] && h=$(subbody "$URL" "$UA" | grep -i 'subscription-userinfo' | head -1)
+        [ -z "$h" ] && h=$(subinfo "$URL" 'Quantumultx' | grep -i 'subscription-userinfo' | head -1)
+        [ -z "$h" ] && h=$(subbody "$URL" 'Quantumultx' | grep -i 'subscription-userinfo' | head -1)
+        if [ -z "$h" ]; then echo "D|订阅没有返回 subscription-userinfo"; exit 0; fi
+        printf 'U|%s|%s\n' \(shQuote(sub.name)) "$h"
+        """)
     }
 
     /// 新增（`id == nil`）或修改一条订阅。写成功就返回**重新读回来的那一条**

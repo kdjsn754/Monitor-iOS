@@ -546,12 +546,29 @@ struct ProxyView: View {
 
                     Spacer(minLength: 4)
 
-                    if !model.ocStateLoaded {
-                        // 还没读到配置列表：转圈，别先写一句「未找到」把人劝走。
+                    if model.subUsageLoading || !model.ocStateLoaded {
+                        // 还没读到配置列表 / 正在拉流量：转圈，别先写一句「未找到」把人劝走。
                         ProgressView()
                             .controlSize(.mini)
+                    } else {
+                        // v2.4.21：这里原本什么都没有，现在放刷新钮——点一次先重读配置
+                        // 与订阅列表，再只拉**当前这一条**订阅的流量（不再遍历全部）。
+                        Button {
+                            Task { await model.refreshCurrentSubscriptionUsage() }
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.blue)
+                                .frame(width: 30, height: 30)
+                                .background(Circle().fill(Color.blue.opacity(0.12)))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("刷新订阅信息")
+                        .disabled(model.busy)
                     }
                 }
+
+                if model.ocStateLoaded { configUsageBlock }
 
                 // 下半段：两个动作并排放到文字下面，各占一半宽，尺寸加大。
                 // v2.3.8 起两个统一成「管理」那套浅蓝底 + 蓝字（用户要求），
@@ -571,6 +588,61 @@ struct ProxyView: View {
             }
             .padding(11)
             .plainTile(radius: 14)
+        }
+    }
+
+    /// 当前配置文件所属订阅的流量与到期（v2.4.21）。
+    ///
+    /// 数据来自机场响应头 `subscription-userinfo`，只有「配置文件确实由订阅生成」时才有——
+    /// 手动丢进 `/etc/openclash/config` 的 yaml 没有订阅可问，这一块就不出现。
+    ///
+    /// 四种状态都要有交代：
+    /// ① 有数据 → 条 + `已用 / 总量（百分比）` + `剩 N 天`；
+    /// ② 读取中 → 同高度的空条 + 「正在读取流量…」，读完高度不跳；
+    /// ③ 失败 → 橙色一行说明（机场没给这个头 / 没 curl / 超时），提示点右上角重试；
+    /// ④ 还没有数据也还没开始读 → 淡色一行「点右上角刷新」。
+    @ViewBuilder
+    private var configUsageBlock: some View {
+        if let sub = model.currentConfigSubscription {
+            if let usage = sub.usage {
+                VStack(alignment: .leading, spacing: 5) {
+                    usageBar(usage)
+                    HStack(spacing: 6) {
+                        Text(usage.amountText + (usage.percentText.map { "（\($0)）" } ?? ""))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                        Spacer(minLength: 4)
+                        if let expire = usage.shortExpireText {
+                            Text(expire)
+                                .font(.caption2)
+                                .foregroundStyle(expireColor(usage))
+                                .lineLimit(1)
+                                .layoutPriority(1)
+                        }
+                    }
+                }
+            } else if model.subUsageLoading {
+                VStack(alignment: .leading, spacing: 5) {
+                    Capsule()
+                        .fill(Color(uiColor: .tertiarySystemFill))
+                        .frame(height: 5)
+                    Text("正在读取流量…")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            } else if let error = model.subUsageError {
+                Text(error)
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("点右上角刷新读取流量")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
         }
     }
 
@@ -1158,7 +1230,8 @@ private struct SubscriptionListView: View {
                     }
                 }
             }
-        } else if model.subUsageLoading {
+        } else if model.subUsageLoading && sub.id == model.currentConfigSubscription?.id {
+            // 只有当前配置那条在拉：其余订阅没有数据就是没有，别一起转圈。
             VStack(alignment: .leading, spacing: 5) {
                 Capsule()
                     .fill(Color(uiColor: .tertiarySystemFill))

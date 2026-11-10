@@ -232,6 +232,16 @@ struct SubscriptionUsage: Hashable {
         return String(format: "%.1f%%", fraction * 100)
     }
 
+    /// 卡片上用的短版本：`剩 21 天` / `已过期` / `长期有效`。
+    /// 完整版 `expireText` 带日期，订阅列表那一行放得下；配置卡里要跟用量数字并排，
+    /// 多十来个字符就会把数字挤成 `…`。
+    var shortExpireText: String? {
+        guard let expire else { return nil }
+        if expire == 0 { return "长期有效" }
+        guard let left = daysLeft() else { return nil }
+        return left == 0 ? "已过期" : "剩 \(left) 天"
+    }
+
     /// 到期那一行的文案：`12-01 到期 · 剩 21 天` / `长期有效` / 过期后 `已过期`。
     var expireText: String? {
         guard let expire else { return nil }
