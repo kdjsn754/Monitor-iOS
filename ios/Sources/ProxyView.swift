@@ -29,7 +29,10 @@ struct ProxyView: View {
 
     private var statusDetail: String {
         if !oc.installed {
-            return model.ocStateLoaded ? "未检测到 OpenClash" : "正在读取 OpenClash 状态…"
+            // v2.5.4（用户要求）：还没读到时这一行不写字，等待状态只交给右上角
+            // 那个灰点「读取中」。但**不能返回空字符串就走人**——那行 Text 一消失，
+            // 标题下面就少一行，读完再变回来又要跳一次。用空格占住这一行的高度。
+            return model.ocStateLoaded ? "未检测到 OpenClash" : " "
         }
         if !oc.running { return "服务已停止，启动后可查看流量" }
         // 面板地址在「控制面板」卡里，这里改说「当前跑的是哪份配置」，
@@ -193,14 +196,17 @@ struct ProxyView: View {
                 statusPill
             }
 
-            // v2.5.3：未探测完也按「装了」的骨架渲染，只是灰着、点不动。
+            // v2.5.3：未探测完也按「装了」的骨架渲染，两行按钮从第一帧就在，
+            // 尺寸与真实状态完全一致，探针回来只换选中高亮和能否点，高度一行都不动。
             //
             // 以前这里是 `if oc.installed` —— 冷启动那一拍 `installed` 还是 false，
             // 于是走 `loadingRow`，只有一行 44pt；探针一回来确认装了，整块换成
             // 「模式三连 + 启停三连」两行，heroCard 一下长高三十多点，下面所有卡片
             // 全被推下去。用户说的「openclash 模块也会」就是这个。
-            // 现在：两行按钮从第一帧就在，尺寸与真实状态完全一致，探针回来只换颜色
-            // （灰 → 彩）和能否点，高度一行都不动。右上角「读取中」已经说明在等。
+            //
+            // v2.5.4（用户要求）：未探测完**不再把按钮压暗**。等待状态只由右上角那颗
+            // 灰点「读取中」交代，按钮保持正常配色——灰着六颗按钮会让人以为坏了。
+            // 交互仍然关着（`.disabled`），只是外观不提前示弱。
             if oc.installed || !model.ocStateLoaded {
                 HStack(spacing: 6) {
                     modeButton("规则", value: "rule")
@@ -208,7 +214,9 @@ struct ProxyView: View {
                     modeButton("直连", value: "direct")
                 }
                 .disabled(model.busy || !oc.running || !oc.installed)
-                .opacity(oc.running ? 1 : 0.55)
+                // 只有「已经确认装了、但内核停着」才压暗——那是真有原因。
+                // 还没读到时保持 1，别让灰点之外再多一层灰。
+                .opacity(model.ocStateLoaded && !oc.running ? 0.55 : 1)
 
                 HStack(spacing: 8) {
                     actionChip("启动", icon: "play.fill", color: .blue) {
@@ -222,7 +230,8 @@ struct ProxyView: View {
                     }
                 }
                 .disabled(model.busy || !oc.installed)
-                .opacity(model.busy || !oc.installed ? 0.55 : 1)
+                // 同上：只在真的在执行别的操作时压暗。
+                .opacity(model.busy ? 0.55 : 1)
             } else {
                 // 确认没装才说话。这一分支会把卡片变矮——那是对的，
                 // 这几排按钮本来就不该出现在没装插件的机器上。
