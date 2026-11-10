@@ -603,23 +603,30 @@ struct ProxyView: View {
                     }
                 }
 
-                // v2.4.25：有落盘缓存时不受「配置列表还没读到」的限制——
-                // 冷启动第一屏就要看到数字，而不是等探针跑完才出现。
-                if model.ocStateLoaded || model.configDisplayUsage != nil { configUsageBlock }
+                // v2.5.2：原来这里是 `ocStateLoaded || configDisplayUsage != nil`，冷启动
+                // 那一拍两个都为假，整块不存在——探针回来才凭空插入，下面按钮被推下去，
+                // 看到的就是「订阅信息隔一会才冒出来」。改成骨架常驻：四态共用同一套三行，
+                // 有数据只是把占位换掉，高度不动。
+                // 唯一的例外是手放 yaml（订阅列表读完却匹配不到订阅），那本来就不该有这块。
+                if !(model.subsLoaded && model.currentConfigSubscription == nil) {
+                    configUsageBlock
+                }
 
                 // 下半段：两个动作并排放到文字下面，各占一半宽，尺寸加大。
                 // v2.3.8 起两个统一成「管理」那套浅蓝底 + 蓝字（用户要求），
                 // 主次只靠图标和文字区分，不再一个实色一个浅底。
-                if model.ocStateLoaded {
-                    HStack(spacing: 10) {
-                        cardAction("添加", icon: "plus", dimmed: model.busy) {
-                            showAddSubscription = true
-                        }
-                        cardAction("管理", icon: "list.bullet",
-                                   dimmed: oc.configs.isEmpty || model.busy) {
-                            guard !oc.configs.isEmpty, !model.busy else { return }
-                            showConfigPicker = true
-                        }
+                //
+                // v2.5.2：这一行也不再等探针。未加载时先灰着占位——否则流量块刚站稳，
+                // 探针一回来这里又插一行，卡片照样被撑高一次。
+                HStack(spacing: 10) {
+                    cardAction("添加", icon: "plus",
+                               dimmed: model.busy || !model.ocStateLoaded) {
+                        showAddSubscription = true
+                    }
+                    cardAction("管理", icon: "list.bullet",
+                               dimmed: oc.configs.isEmpty || model.busy || !model.ocStateLoaded) {
+                        guard !oc.configs.isEmpty, !model.busy else { return }
+                        showConfigPicker = true
                     }
                 }
             }
@@ -633,20 +640,31 @@ struct ProxyView: View {
     /// 数据来自机场响应头 `subscription-userinfo`，只有「配置文件确实由订阅生成」时才有——
     /// 手动丢进 `/etc/openclash/config` 的 yaml 没有订阅可问，这一块就不出现。
     ///
-    /// 四种状态都要有交代：
-    /// ① 有数据 → 条 + `已用 / 总量（百分比）` + `剩 N 天`；
-    /// ② 读取中 → 同高度的空条 + 「正在读取流量…」，读完高度不跳；
-    /// ③ 失败 → 橙色一行说明（机场没给这个头 / 没 curl / 超时），提示点右上角重试；
-    /// ④ 还没有数据也还没开始读 → 淡色一行提示，刷新钮是补救手段（v2.4.22 起进页面自动拉）。
-    @ViewBuilder
+    /// **四态共用同一套三行骨架**（v2.5.2）：进度条 / 主行 / 剩余行。
+    /// ① 有数据 → 条 + `已用 / 总量（%）` + `剩 N 天`，第三行剩余；
+    /// ② 读取中（或配置列表还没回来）→ 灰条 + 「正在读取流量…」；
+    /// ③ 失败 → 灰条 + 橙色一行说明（机场没给这个头 / 没 curl / 超时）；
+    /// ④ 已读完却没数据 → 灰条 + 淡色一行提示，刷新钮是补救手段。
+    ///
+    /// **为什么非要同高**：冷启动第一帧什么都没有，若这块要么不存在、要么比有数据时矮两行，
+    /// 那么探针和流量一回来卡片就被撑高一次——看到的就是「订阅信息隔一会才冒出来」。
+    /// 现在第一帧就把位置占住，数字到了原地填进去，一行都不动。
     private var configUsageBlock: some View {
-        // v2.4.25：数据来源换成 `configDisplayUsage`——真实数据还没到时它会顶一份落盘缓存
+        // 数据来源是 `configDisplayUsage`：真实数据还没到时它会顶一份落盘缓存
         // （键是配置文件名全名，第一帧就查得到）。所以这里不能再套
         // `if let sub = currentConfigSubscription`，否则冷启动那两秒缓存没地方显示。
-        if let usage = model.configDisplayUsage {
-            VStack(alignment: .leading, spacing: 5) {
+        let usage = model.configDisplayUsage
+        return VStack(alignment: .leading, spacing: 5) {
+            if let usage {
                 UsageBar(usage: usage)
-                HStack(spacing: 6) {
+            } else {
+                Capsule()
+                    .fill(Color(uiColor: .tertiarySystemFill))
+                    .frame(height: 5)
+            }
+
+            HStack(spacing: 6) {
+                if let usage {
                     Text(usage.amountText + (usage.percentText.map { "（\($0)）" } ?? ""))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -660,40 +678,42 @@ struct ProxyView: View {
                             .lineLimit(1)
                             .layoutPriority(1)
                     }
-                }
-                // v2.4.24：剩余流量单独一行。挤在「已用 / 总量」那一行的右边放不下，
-                // 而它是用户最先想知道的那个数，干脆给它一行（左对齐，跟着上面那行起头）。
-                if let remaining = usage.remainingText {
-                    Text(remaining)
+                } else if model.subUsageLoading || !model.subsLoaded {
+                    // 正在拉、或者订阅列表都还没读回来——两种都是「等」，
+                    // 而且这时候 `subUsageError` 里的东西还不可信（可能刚被上一次
+                    // 「配置不是来自订阅」写脏），所以这一条排在错误之前。
+                    Text("正在读取流量…")
                         .font(.caption2)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.tertiary)
+                    Spacer(minLength: 4)
+                } else if let error = model.subUsageError {
+                    // 诊断文案最长也就「订阅没有返回 subscription-userinfo」这一档，
+                    // 一行挤不下就缩一点，不再允许占两行——两行就把骨架撑高了。
+                    Text(error)
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                    Spacer(minLength: 4)
+                } else {
+                    Text("流量信息还没读到，点右上角可重试")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
+                    Spacer(minLength: 4)
                 }
             }
-        } else if model.subUsageLoading {
-            VStack(alignment: .leading, spacing: 5) {
-                Capsule()
-                    .fill(Color(uiColor: .tertiarySystemFill))
-                    .frame(height: 5)
-                Text("正在读取流量…")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-        } else if let error = model.subUsageError {
-            Text(error)
+
+            // 剩余行常驻。不限量套餐（`total=0`）本来就没有「剩余」，但位置得留着——
+            // 否则换配置时从「有剩余」切到「无剩余」，卡片又会矮一行。
+            Text(usage?.remainingText ?? "剩余 0 B")
                 .font(.caption2)
-                .foregroundStyle(.orange)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-        } else if model.subsLoaded && model.currentConfigSubscription == nil {
-            // 订阅列表读回来了、却匹配不到订阅：手动放进 `/etc/openclash/config` 的 yaml，
-            // 没有订阅可问。整块不出现，和 v2.4.21 的行为保持一致。
-            EmptyView()
-        } else {
-            Text("流量信息还没读到，点右上角可重试")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .opacity(usage?.remainingText == nil ? 0 : 1)
+                .accessibilityHidden(usage?.remainingText == nil)
         }
     }
 
