@@ -113,6 +113,11 @@ final class AppModel {
     private(set) var subUsageAt: Date?
     /// 上一次读成功的时间：来回切页面时 30 秒内不重复打机场接口。
     private var subUsageFetchedAt: Date?
+    /// 上一次**真正发出请求**的时间，成败都记（v2.4.22）。
+    ///
+    /// 自动加载的节流靠它：失败时 `subUsageFetchedAt` 不会更新，只看那一个的话，
+    /// 每切一次页就会重打一次机场接口，机场那边看着像在刷订阅。
+    private var subUsageAttemptAt: Date?
     /// 用量缓存（键是订阅名）。
     ///
     /// 必须留着：`loadSubscriptions` 每次都会拿 UCI 重造一遍数组，`usage` 随之清零。
@@ -809,6 +814,9 @@ final class AppModel {
             // 目标页自己的 startPolling 已经在跑了。
             guard self.activePage == .proxy else { return }
             self.startPolling(refreshNow: true)
+            // v2.4.22：配置已经读回来了，顺手把订阅流量也拉一次——
+            // 用户不该为了看几个数字先点一次刷新。
+            await self.autoLoadSubscriptionUsage()
         }
     }
 
@@ -1221,6 +1229,7 @@ final class AppModel {
             return
         }
         subUsageLoading = true
+        subUsageAttemptAt = Date()
         subUsageError = nil
         defer { subUsageLoading = false }
         do {
@@ -1251,6 +1260,26 @@ final class AppModel {
         } catch {
             subUsageError = "读取超时，点刷新重试"
         }
+    }
+
+    /// 进代理页 / 刚连上时**自动**拉一次当前订阅的流量（v2.4.22）。
+    ///
+    /// 以前只有卡片右上角那颗刷新钮能拉，用户每次开 App 都得先点一下才有数字。
+    /// 这里把「点一下」省掉，但不敢每次都打机场接口（那是对外请求）：
+    /// 一分钟内已经问过——无论成败——就直接返回，用户来回切页不会变成连打机场。
+    /// 冷启动时 `subUsageAttemptAt` 是空的，所以第一次进页面一定会拉一次。
+    ///
+    /// 三种情况直接跳过：没连上（连接成功那一拍会再调一次）、正在连、正在拉。
+    func autoLoadSubscriptionUsage() async {
+        guard connected, !connecting, !subUsageLoading else { return }
+        if let last = subUsageAttemptAt, Date().timeIntervalSince(last) < 60 { return }
+        // 配置还没读回来就匹配不到订阅，补一次探针。
+        if openClash.config.isEmpty { await runOpenClashProbe() }
+        if subscriptions.isEmpty { await loadSubscriptions(silent: true) }
+        // 手动丢进 `/etc/openclash/config` 的 yaml 没有订阅可问，别去猜。
+        // 这里只在有订阅可匹配时继续，省得把「不是来自订阅」写成一条错误挂到卡片上。
+        guard currentConfigSubscription != nil else { return }
+        await loadSubscriptionUsages()
     }
 
     /// 卡片上那个刷新钮：先重读配置与订阅列表，拿到当前配置，再去拉它的流量。

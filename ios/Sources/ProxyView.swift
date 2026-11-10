@@ -97,10 +97,18 @@ struct ProxyView: View {
             // 刷新只在右上角按钮里做。
             // 订阅条数要显示在配置卡的副标题里，进页面就先读一次；
             // 刚连上时状态还没到、上面这一次会直接返回，所以再挂一个 onChange 补读。
-            .task { await model.loadSubscriptions(silent: true) }
+            .task {
+                await model.loadSubscriptions(silent: true)
+                // v2.4.22：流量也自动拉一次，别让用户进页面先点一下刷新。
+                // 内部按「一分钟内问过就不再问」节流，切页来回不会连打机场。
+                await model.autoLoadSubscriptionUsage()
+            }
             .onChange(of: model.ocStateLoaded) { _, loaded in
                 guard loaded else { return }
-                Task { await model.loadSubscriptions(silent: true) }
+                Task {
+                    await model.loadSubscriptions(silent: true)
+                    await model.autoLoadSubscriptionUsage()
+                }
             }
             // 控制面板改 fullScreenCover（v2.3.5，用户要求全屏）：WebView 自带导航栏
             // 和「关闭」钮，盖住底栏反而更像「进了面板」；半屏 sheet 会露出底下的页面。
@@ -600,7 +608,7 @@ struct ProxyView: View {
     /// ① 有数据 → 条 + `已用 / 总量（百分比）` + `剩 N 天`；
     /// ② 读取中 → 同高度的空条 + 「正在读取流量…」，读完高度不跳；
     /// ③ 失败 → 橙色一行说明（机场没给这个头 / 没 curl / 超时），提示点右上角重试；
-    /// ④ 还没有数据也还没开始读 → 淡色一行「点右上角刷新」。
+    /// ④ 还没有数据也还没开始读 → 淡色一行提示，刷新钮是补救手段（v2.4.22 起进页面自动拉）。
     @ViewBuilder
     private var configUsageBlock: some View {
         if let sub = model.currentConfigSubscription {
@@ -639,7 +647,7 @@ struct ProxyView: View {
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
-                Text("点右上角刷新读取流量")
+                Text("流量信息还没读到，点右上角可重试")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
