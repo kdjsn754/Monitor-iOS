@@ -1218,6 +1218,9 @@ final class AppModel {
     /// ② `printf` 而不是 `echo "U|$name|$h"`：名字里有空格 / 中文时，引号拼在双引号
     ///    里会把引号本身也打出来，`printf` 按参数分开引用才稳。
     /// ③ 没有 curl 的固件直接退出，别让整条命令报错——列表本身仍然是可用的。
+    /// ④ 第一遍没拿到这一行，就换 `Quantumultx` 再问一次——**这条也是抄 OpenClash 的**：
+    ///    有的机场只对特定 UA 回 `subscription-userinfo`，`fetch_sub_info()` 里同样是
+    ///    「非 200 就换 Quantumultx 重试」。只有失败时才多打一次，正常情况不变慢。
     func subscriptionUsageCommand(_ subs: [ProxySubscription]) -> String {
         var body: [String] = [
             "echo @@OCUSAGE",
@@ -1228,6 +1231,7 @@ final class AppModel {
             let agent = sub.ua.isEmpty ? "clash-verge/v2.4.5" : sub.ua
             body.append("""
             ( h=$(curl -sLI -X GET -m 8 -H \(shQuote("User-Agent: " + agent)) \(shQuote(url)) 2>/dev/null | grep -i 'subscription-userinfo' | head -1)
+              [ -z "$h" ] && h=$(curl -sLI -X GET -m 6 -H 'User-Agent: Quantumultx' \(shQuote(url)) 2>/dev/null | grep -i 'subscription-userinfo' | head -1)
               printf 'U|%s|%s\\n' \(shQuote(sub.name)) "$h" ) &
             """)
         }
