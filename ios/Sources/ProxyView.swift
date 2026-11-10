@@ -650,6 +650,15 @@ struct ProxyView: View {
                                 .layoutPriority(1)
                         }
                     }
+                    // v2.4.24：剩余流量单独一行。挤在「已用 / 总量」那一行的右边放不下，
+                    // 而它是用户最先想知道的那个数，干脆给它一行（左对齐，跟着上面那行起头）。
+                    if let remaining = usage.remainingText {
+                        Text(remaining)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                    }
                 }
             } else if model.subUsageLoading {
                 VStack(alignment: .leading, spacing: 5) {
@@ -1256,6 +1265,14 @@ private struct SubscriptionListView: View {
                             .lineLimit(1)
                             .layoutPriority(1)
                     }
+                }
+                // v2.4.24：和配置卡一样补一行剩余流量。
+                if let remaining = usage.remainingText {
+                    Text(remaining)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
                 }
             }
         } else if model.subUsageLoading && sub.id == model.currentConfigSubscription?.id {

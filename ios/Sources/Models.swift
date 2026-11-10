@@ -232,6 +232,21 @@ struct SubscriptionUsage: Hashable {
         return String(format: "%.1f%%", fraction * 100)
     }
 
+    /// 剩余流量 = 总量 − 已用（小于 0 按 0，机场偶尔会给出超额的数据）。
+    ///
+    /// 不限量（`total == 0`）时没有「剩余」可言，返回 nil —— 卡片上就不写这一行，
+    /// 而不是画一个 `剩余 ∞` 让人以为还能算出个数。
+    var remaining: Int64? {
+        guard total > 0 else { return nil }
+        return max(0, total - used)
+    }
+
+    /// 卡片 / 列表那一行用的「剩余 89.8 GB」。不限量套餐为 nil。
+    var remainingText: String? {
+        guard let remaining else { return nil }
+        return "剩余 " + Self.bytes(remaining)
+    }
+
     /// 卡片上用的短版本：`剩 21 天` / `已过期` / `长期有效`。
     /// 完整版 `expireText` 带日期，订阅列表那一行放得下；配置卡里要跟用量数字并排，
     /// 多十来个字符就会把数字挤成 `…`。
