@@ -106,6 +106,13 @@ final class AppModel {
     /// 用量本身不放单独的表，直接回填进 `subscriptions[i].usage`：列表、编辑页
     /// 拿的是同一份值，不会出现「列表里有流量、点进编辑就没了」。
     private(set) var subUsageLoading = false
+    /// 「刷新流程」正在跑——从点下按钮到 curl 回来**整段**都算（v2.4.23）。
+    ///
+    /// 和 `subUsageLoading` 的区别就是那个时间差：`subUsageLoading` 要等前面的
+    /// 探针 / 读订阅列表跑完才置位，中间这段时间按钮毫无变化，用户以为没点到，
+    /// 于是连点——而 SSH 是串行队列，点三次就是排三次，一次比一次慢。
+    /// 现在按钮一按就置位，界面上立刻转圈；同一时间只允许一条刷新在飞。
+    private(set) var subUsageRefreshing = false
     /// 上一次读取失败的原因（成功时清空）。v2.4.21 起界面上要显示出来：
     /// 上一版读不到就静默留白，谁也不知道是机场没给还是命令没跑起来。
     private(set) var subUsageError: String?
@@ -1271,7 +1278,7 @@ final class AppModel {
     ///
     /// 三种情况直接跳过：没连上（连接成功那一拍会再调一次）、正在连、正在拉。
     func autoLoadSubscriptionUsage() async {
-        guard connected, !connecting, !subUsageLoading else { return }
+        guard connected, !connecting, !subUsageLoading, !subUsageRefreshing else { return }
         if let last = subUsageAttemptAt, Date().timeIntervalSince(last) < 60 { return }
         // 配置还没读回来就匹配不到订阅，补一次探针。
         if openClash.config.isEmpty { await runOpenClashProbe() }
@@ -1282,13 +1289,34 @@ final class AppModel {
         await loadSubscriptionUsages()
     }
 
-    /// 卡片上那个刷新钮：先重读配置与订阅列表，拿到当前配置，再去拉它的流量。
+    /// 卡片上那个刷新钮：重读配置（必要时）与订阅列表，再拉当前这条的流量。
     ///
     /// 顺序不能反——`oc.config` 可能刚被换过，先拉流量会拉到上一条订阅头上。
+    ///
+    /// v2.4.23 三处提速 / 防连点：
+    /// ① **一进来就置 `subUsageRefreshing`**，界面立刻转圈，不用等探针跑完；
+    /// ② 已有 `oc.config` 时不再探一次状态（一次 SSH 往返，少说几百毫秒），
+    ///    只有配置为空才补探针——切换配置那条路自己会把 `oc.config` 刷新好；
+    /// ③ 订阅列表已经读过就不再重读（它只影响名字匹配，不影响地址）。
+    ///    常见路径因此只剩一条命令：那条 curl。剩下的时间基本全是机场响应。
     func refreshCurrentSubscriptionUsage() async {
-        guard connected else { return }
-        await runOpenClashProbe()
-        await loadSubscriptions(silent: true)
+        guard connected, !subUsageRefreshing else { return }
+        subUsageRefreshing = true
+        defer { subUsageRefreshing = false }
+        if openClash.config.isEmpty { await runOpenClashProbe() }
+        if subscriptions.isEmpty { await loadSubscriptions(silent: true) }
+        await loadSubscriptionUsages(force: true)
+    }
+
+    /// 切换配置文件之后：重读状态（拿到新的 `oc.config`）→ 只拉新那条的流量。
+    ///
+    /// 用户切完订阅看到的第一眼就是配置卡，流量还挂着上一条的数字会很怪；
+    /// 这里不等节流，切一次就拉一次（切换本身是低频动作，一次请求不算多）。
+    ///
+    /// 必须**先** `refreshOpenClash()`：`oc.config` 不更新，匹配到的还是上一条订阅。
+    func switchConfigAndRefreshUsage(_ name: String) async {
+        await switchConfig(name)
+        await refreshOpenClash()
         await loadSubscriptionUsages(force: true)
     }
 

@@ -122,7 +122,10 @@ struct ProxyView: View {
             // 目的地必须挂在本 NavigationStack 内部这一层，否则点了没反应（交接 7.1）。
             .navigationDestination(isPresented: $showConfigPicker) {
                 ProxyConfigView(configs: oc.configs, applied: oc.config) { name in
-                    Task { await model.switchConfig(name); await model.refreshOpenClash() }
+                    // v2.4.23：切完配置顺手把流量也换成新那条的，不等节流。
+                    // 内部顺序是 switchConfig → refreshOpenClash → 拉流量，
+                    // `oc.config` 不先更新会拉到上一条订阅的头上。
+                    Task { await model.switchConfigAndRefreshUsage(name) }
                 }
             }
             .navigationDestination(isPresented: $showAddSubscription) {
@@ -554,25 +557,42 @@ struct ProxyView: View {
 
                     Spacer(minLength: 4)
 
-                    if model.subUsageLoading || !model.ocStateLoaded {
-                        // 还没读到配置列表 / 正在拉流量：转圈，别先写一句「未找到」把人劝走。
+                    if !model.ocStateLoaded {
+                        // 配置列表还没读到：转圈，别先写一句「未找到」把人劝走。
                         ProgressView()
                             .controlSize(.mini)
+                            .frame(width: 44, height: 44)
                     } else {
                         // v2.4.21：这里原本什么都没有，现在放刷新钮——点一次先重读配置
                         // 与订阅列表，再只拉**当前这一条**订阅的流量（不再遍历全部）。
+                        //
+                        // v2.4.23：转圈**画在同一个蓝圆里**，不再整颗按钮换成 ProgressView。
+                        // 换掉会让这一行忽高忽低（30 圆 ↔ 20 的进度条），看着像页面在跳；
+                        // 而且同一颗按钮原地转，才说得清「刚才那一下点到了」。
                         Button {
                             Task { await model.refreshCurrentSubscriptionUsage() }
                         } label: {
-                            Image(systemName: "arrow.clockwise")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.blue)
-                                .frame(width: 30, height: 30)
-                                .background(Circle().fill(Color.blue.opacity(0.12)))
+                            ZStack {
+                                Circle()
+                                    .fill(Color.blue.opacity(0.12))
+                                    .frame(width: 30, height: 30)
+                                if model.subUsageRefreshing || model.subUsageLoading {
+                                    ProgressView()
+                                        .controlSize(.mini)
+                                } else {
+                                    Image(systemName: "arrow.clockwise")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(.blue)
+                                }
+                            }
+                            // 视觉还是 30pt，可点区放大到 44pt——原来那颗圆太小，
+                            // 手指点偏一点就当没点，人就会连点。
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("刷新订阅信息")
-                        .disabled(model.busy)
+                        .disabled(model.busy || model.subUsageRefreshing || model.subUsageLoading)
                     }
                 }
 
