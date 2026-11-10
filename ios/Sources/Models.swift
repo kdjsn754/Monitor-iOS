@@ -149,6 +149,9 @@ struct ProxySubscription: Identifiable, Hashable {
     var keywords: [String] = []
     /// 排除关键词（UCI `ex_keyword`），命中就丢掉，写法同上。
     var excludeKeywords: [String] = []
+    /// 机场报回来的流量和到期（v2.4.19）。列表先渲染基础信息，这一项是后补的，
+    /// 所以是可选的：读不到就整块不出现，不留一个「0 B / 0 B」的假条。
+    var usage: SubscriptionUsage?
 
     /// 有没有配过筛选。空 = 不筛，全部节点都留下。
     var hasFilters: Bool { !keywords.isEmpty || !excludeKeywords.isEmpty }
@@ -181,6 +184,93 @@ struct ProxySubscription: Identifiable, Hashable {
         let formatter = DateFormatter()
         formatter.dateFormat = "M 月 d 日更新"
         return formatter.string(from: date)
+    }
+}
+
+/// 订阅的用量信息，来自机场响应头 `subscription-userinfo`。
+///
+/// **为什么在 App 里自己请求**：OpenClash 不缓存这个头。它的网页后台每次渲染
+/// 配置文件列表都现场 `curl -sLI -X GET` 打一遍订阅地址，从响应头里抠出这一行
+/// （`luci-app-openclash/luasrc/controller/openclash.lua` 的 `fetch_sub_info`）。
+/// 配置文件和 UCI 里都没有这份数据，想显示就只能照同样的路子重新请求一次。
+///
+/// 字段语义与 OpenClash 一致：三个数都是**字节**，`expire` 是 Unix 秒，
+/// `total = 0` 表示不限量（网页后台显示 ∞），`expire = 0` 表示长期有效。
+struct SubscriptionUsage: Hashable {
+    var upload: Int64
+    var download: Int64
+    /// 0 = 不限量。
+    var total: Int64
+    /// nil = 机场没给这一项；0 = 长期有效。
+    var expire: TimeInterval?
+
+    var used: Int64 { upload + download }
+
+    /// 已用比例。总量为 0（不限量）时没有比例可言。
+    var fraction: Double? {
+        guard total > 0 else { return nil }
+        return min(1, max(0, Double(used) / Double(total)))
+    }
+
+    /// 剩余天数，向上取整；已过期为 0。长期有效或没给到期时间返回 nil。
+    func daysLeft(now: Date = Date()) -> Int? {
+        guard let expire, expire > 0 else { return nil }
+        return max(0, Int(ceil((expire - now.timeIntervalSince1970) / 86_400)))
+    }
+
+    var isLifetime: Bool { expire == 0 }
+
+    /// 「已用 / 总量」，总量为 0 时按 OpenClash 的写法显示 ∞。
+    var amountText: String {
+        let usedText = Self.bytes(used)
+        guard total > 0 else { return usedText + " / ∞" }
+        return usedText + " / " + Self.bytes(total)
+    }
+
+    var percentText: String? {
+        guard let fraction else { return nil }
+        return String(format: "%.1f%%", fraction * 100)
+    }
+
+    /// 到期那一行的文案：`12-01 到期 · 剩 21 天` / `长期有效` / 过期后 `已过期`。
+    var expireText: String? {
+        guard let expire else { return nil }
+        if expire == 0 { return "长期有效" }
+        let date = Date(timeIntervalSince1970: expire)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yy-MM-dd"
+        let day = formatter.string(from: date)
+        guard let left = daysLeft() else { return day + " 到期" }
+        if left == 0 { return day + " · 已过期" }
+        return day + " · 剩 \(left) 天"
+    }
+
+    /// 和 OpenClash 的 `fs.filesize` 对齐：超过 1 GB 用 GB，其余 MB / KB，只留一位小数。
+    static func bytes(_ value: Int64) -> String {
+        let v = Double(max(0, value))
+        if v >= 1024 * 1024 * 1024 { return String(format: "%.1f GB", v / 1_073_741_824) }
+        if v >= 1024 * 1024 { return String(format: "%.1f MB", v / 1_048_576) }
+        if v >= 1024 { return String(format: "%.1f KB", v / 1024) }
+        return "\(Int(v)) B"
+    }
+
+    /// 从 `subscription-userinfo: upload=1; download=2; total=3; expire=4` 里抠数字。
+    /// 键名大小写不敏感（各机场写法不统一），缺 `total` 就当不限量。
+    init?(header: String) {
+        let lower = header.lowercased()
+        guard lower.contains("subscription-userinfo") else { return nil }
+
+        func number(_ key: String) -> Int64? {
+            guard let range = lower.range(of: key + "=") else { return nil }
+            let digits = lower[range.upperBound...].prefix { $0.isNumber }
+            return digits.isEmpty ? nil : Int64(digits)
+        }
+
+        guard let up = number("upload"), let down = number("download") else { return nil }
+        upload = up
+        download = down
+        total = number("total") ?? 0
+        expire = number("expire").map(TimeInterval.init)
     }
 }
 

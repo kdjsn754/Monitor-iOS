@@ -1016,6 +1016,8 @@ private struct SubscriptionListView: View {
         .task {
             model.clearNotice()
             await model.loadSubscriptions(silent: true)
+            // 列表先出来，流量后补：这一步要挨个打机场接口（并发，最多 8 秒）。
+            await model.loadSubscriptionUsages()
         }
         .overlay { confirmLayer }
     }
@@ -1085,6 +1087,7 @@ private struct SubscriptionListView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
+                    usageBlock(for: sub)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
@@ -1123,6 +1126,79 @@ private struct SubscriptionListView: View {
                 Label("删除", systemImage: "trash")
             }
         }
+    }
+
+    // MARK: - 流量 / 到期（v2.4.19）
+
+    /// 一行订阅底部的用量块：一条进度 + 一行「已用 / 总量（百分比）」+ 到期。
+    ///
+    /// 三态：
+    /// ① 有数据 → 条 + 文字；
+    /// ② 正在读 → 空条 + 「正在读取流量…」，高度和 ① 一样，读完不跳；
+    /// ③ 读不到 / 机场不给这个头 → 整块不出现，不留一条 0 B 的假条。
+    @ViewBuilder
+    private func usageBlock(for sub: ProxySubscription) -> some View {
+        if let usage = sub.usage {
+            VStack(alignment: .leading, spacing: 5) {
+                usageBar(usage)
+                    .padding(.top, 3)
+                HStack(spacing: 6) {
+                    Text(usage.amountText + (usage.percentText.map { "（\($0)）" } ?? ""))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                    Spacer(minLength: 4)
+                    if let expire = usage.expireText {
+                        Text(expire)
+                            .font(.caption2)
+                            .foregroundStyle(expireColor(usage))
+                            .lineLimit(1)
+                            .layoutPriority(1)
+                    }
+                }
+            }
+        } else if model.subUsageLoading {
+            VStack(alignment: .leading, spacing: 5) {
+                Capsule()
+                    .fill(Color(uiColor: .tertiarySystemFill))
+                    .frame(height: 5)
+                    .padding(.top, 3)
+                Text("正在读取流量…")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    /// 用量条：宽度按**已用**比例走（和网页后台那张卡一致），不限量时只画一段淡色。
+    private func usageBar(_ usage: SubscriptionUsage) -> some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color(uiColor: .tertiarySystemFill))
+                Capsule()
+                    .fill(usageTint(usage))
+                    .frame(width: max(4, proxy.size.width * (usage.fraction ?? 0)))
+            }
+        }
+        .frame(height: 5)
+    }
+
+    /// 绿 → 橙 → 红：和网页后台的高/中/低三档同一个意思，阈值按已用比例。
+    private func usageTint(_ usage: SubscriptionUsage) -> Color {
+        guard let fraction = usage.fraction else { return .blue }
+        if fraction >= 0.9 { return .red }
+        if fraction >= 0.7 { return .orange }
+        return .green
+    }
+
+    /// 到期时间：一周内变橙，过期变红，其余用次级灰。
+    private func expireColor(_ usage: SubscriptionUsage) -> Color {
+        guard let left = usage.daysLeft() else { return .secondary }
+        if left == 0 { return .red }
+        if left <= 7 { return .orange }
+        return .secondary
     }
 
     private var updateSection: some View {

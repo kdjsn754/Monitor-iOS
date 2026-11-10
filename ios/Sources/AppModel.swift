@@ -101,6 +101,19 @@ final class AppModel {
     /// 直到某次读列表真的读回同一个值才放手。
     private var pendingEnabled: [String: Bool] = [:]
     private(set) var subsLoaded = false
+    /// 正在跑那条并发 curl。界面用它显示「正在读取流量…」。
+    ///
+    /// 用量本身不放单独的表，直接回填进 `subscriptions[i].usage`：列表、编辑页
+    /// 拿的是同一份值，不会出现「列表里有流量、点进编辑就没了」。
+    private(set) var subUsageLoading = false
+    /// 上一次读成功的时间：来回切页面时 30 秒内不重复打机场接口。
+    private var subUsageFetchedAt: Date?
+    /// 用量缓存（键是订阅名）。
+    ///
+    /// 必须留着：`loadSubscriptions` 每次都会拿 UCI 重造一遍数组，`usage` 随之清零。
+    /// 没有这份缓存，30 秒内第二次进这一页就会看到「流量没了」——数据其实还在，
+    /// 只是被列表刷新冲掉了。
+    private var subUsageCache: [String: SubscriptionUsage] = [:]
     /// 弹窗里的操作结果（成功/失败/进行中的说明）。见 `Notice` 的注释：
     /// 弹窗里没有系统 alert 可用，`errorMessage` 又只在登录页/设置页渲染，
     /// 所以订阅相关的每一步都必须往这里写一条，否则界面看起来「什么都没发生」。
@@ -1145,11 +1158,82 @@ final class AppModel {
                 }
             }
             for id in confirmed { pendingEnabled[id] = nil }
+            // 重造的数组没有 usage，从缓存补回来（见 `subUsageCache` 的注释）。
+            for index in parsed.indices {
+                parsed[index].usage = subUsageCache[parsed[index].name]
+            }
             subscriptions = parsed
             subsLoaded = true
         } catch {
             if !silent { presentError(describe(error)) }
         }
+    }
+
+    /// 读每条订阅的流量与到期。
+    ///
+    /// 走的路子和 OpenClash 网页后台完全一样（`fetch_sub_info`）：对所有启用的订阅
+    /// **并发**跑 `curl -sLI -X GET`，只取响应头里的 `subscription-userinfo` 那一行。
+    /// 串行跑四条就是三十秒，所以命令里每条都挂 `&`，最后 `wait`。
+    /// 请求从路由器发出（不是手机），机场看到的是路由器的出口 IP，和更新订阅时一致。
+    func loadSubscriptionUsages(force: Bool = false) async {
+        guard connected, !subUsageLoading else { return }
+        let targets = subscriptions.filter(\.enabled)
+        guard !targets.isEmpty else { return }
+        if !force, let last = subUsageFetchedAt, Date().timeIntervalSince(last) < 30 {
+            return
+        }
+        subUsageLoading = true
+        defer { subUsageLoading = false }
+        do {
+            let output = try await execute(subscriptionUsageCommand(targets), timeout: 30)
+            var parsed: [String: SubscriptionUsage] = [:]
+            for raw in output.split(separator: "\n") {
+                // 订阅名里可能有 `|`，所以从**最后**一个分隔符切开。
+                guard raw.hasPrefix("U|"), let bar = raw.lastIndex(of: "|") else { continue }
+                let name = String(raw.dropFirst(2)[..<bar])
+                let header = String(raw[raw.index(after: bar)...])
+                guard !header.isEmpty,
+                      let usage = SubscriptionUsage(header: header) else { continue }
+                parsed[name] = usage
+            }
+            guard !parsed.isEmpty else { return }
+            subUsageCache.merge(parsed) { _, new in new }
+            var updated = subscriptions
+            for index in updated.indices {
+                updated[index].usage = subUsageCache[updated[index].name]
+            }
+            subscriptions = updated
+            subUsageFetchedAt = Date()
+        } catch {
+            // 读不到就不显示，不打扰：订阅本身已经列出来了，
+            // 为一条流量再弹个错误只会让「列表能用」这件事看起来像坏了。
+        }
+    }
+
+    /// 并发抓每条订阅的 `subscription-userinfo`。
+    ///
+    /// 三点讲究：
+    /// ① `-I` 配 `-X GET`：方法仍是 GET（有的机场对 HEAD 不回头），但只读响应头，
+    ///    不会把整个配置文件再下一遍；`-L` 跟 301，`-m 8` 兜住挂掉的机场。
+    /// ② `printf` 而不是 `echo "U|$name|$h"`：名字里有空格 / 中文时，引号拼在双引号
+    ///    里会把引号本身也打出来，`printf` 按参数分开引用才稳。
+    /// ③ 没有 curl 的固件直接退出，别让整条命令报错——列表本身仍然是可用的。
+    func subscriptionUsageCommand(_ subs: [ProxySubscription]) -> String {
+        var body: [String] = [
+            "echo @@OCUSAGE",
+            "command -v curl >/dev/null 2>&1 || exit 0",
+        ]
+        for sub in subs {
+            guard let url = sub.lines.first else { continue }
+            let agent = sub.ua.isEmpty ? "clash-verge/v2.4.5" : sub.ua
+            body.append("""
+            ( h=$(curl -sLI -X GET -m 8 -H \(shQuote("User-Agent: " + agent)) \(shQuote(url)) 2>/dev/null | grep -i 'subscription-userinfo' | head -1)
+              printf 'U|%s|%s\\n' \(shQuote(sub.name)) "$h" ) &
+            """)
+        }
+        body.append("wait")
+        body.append("true")
+        return lowPriority(body.joined(separator: "\n"))
     }
 
     /// 新增（`id == nil`）或修改一条订阅。写成功就返回**重新读回来的那一条**
@@ -1220,6 +1304,8 @@ final class AppModel {
         guard connected else { return }
         do {
             _ = try await execute(subscriptionDeleteCommand(sub))
+            // 同名订阅以后可能再建一条，缓存不能留着旧的流量。
+            subUsageCache.removeValue(forKey: sub.name)
             await loadSubscriptions(silent: true)
             notice = Notice(kind: .ok, title: "已删除「\(sub.name)」",
                             detail: "只删了路由器上的订阅条目，已下载的配置文件还在。")
