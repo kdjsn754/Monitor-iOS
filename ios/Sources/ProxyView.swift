@@ -606,7 +606,7 @@ struct ProxyView: View {
         if let sub = model.currentConfigSubscription {
             if let usage = sub.usage {
                 VStack(alignment: .leading, spacing: 5) {
-                    usageBar(usage)
+                    UsageBar(usage: usage)
                     HStack(spacing: 6) {
                         Text(usage.amountText + (usage.percentText.map { "（\($0)）" } ?? ""))
                             .font(.caption2)
@@ -617,7 +617,7 @@ struct ProxyView: View {
                         if let expire = usage.shortExpireText {
                             Text(expire)
                                 .font(.caption2)
-                                .foregroundStyle(expireColor(usage))
+                                .foregroundStyle(usage.expireColor)
                                 .lineLimit(1)
                                 .layoutPriority(1)
                         }
@@ -1212,7 +1212,7 @@ private struct SubscriptionListView: View {
     private func usageBlock(for sub: ProxySubscription) -> some View {
         if let usage = sub.usage {
             VStack(alignment: .leading, spacing: 5) {
-                usageBar(usage)
+                UsageBar(usage: usage)
                     .padding(.top, 3)
                 HStack(spacing: 6) {
                     Text(usage.amountText + (usage.percentText.map { "（\($0)）" } ?? ""))
@@ -1224,7 +1224,7 @@ private struct SubscriptionListView: View {
                     if let expire = usage.expireText {
                         Text(expire)
                             .font(.caption2)
-                            .foregroundStyle(expireColor(usage))
+                            .foregroundStyle(usage.expireColor)
                             .lineLimit(1)
                             .layoutPriority(1)
                     }
@@ -1242,36 +1242,6 @@ private struct SubscriptionListView: View {
                     .foregroundStyle(.tertiary)
             }
         }
-    }
-
-    /// 用量条：宽度按**已用**比例走（和网页后台那张卡一致），不限量时只画一段淡色。
-    private func usageBar(_ usage: SubscriptionUsage) -> some View {
-        GeometryReader { proxy in
-            ZStack(alignment: .leading) {
-                Capsule()
-                    .fill(Color(uiColor: .tertiarySystemFill))
-                Capsule()
-                    .fill(usageTint(usage))
-                    .frame(width: max(4, proxy.size.width * (usage.fraction ?? 0)))
-            }
-        }
-        .frame(height: 5)
-    }
-
-    /// 绿 → 橙 → 红：和网页后台的高/中/低三档同一个意思，阈值按已用比例。
-    private func usageTint(_ usage: SubscriptionUsage) -> Color {
-        guard let fraction = usage.fraction else { return .blue }
-        if fraction >= 0.9 { return .red }
-        if fraction >= 0.7 { return .orange }
-        return .green
-    }
-
-    /// 到期时间：一周内变橙，过期变红，其余用次级灰。
-    private func expireColor(_ usage: SubscriptionUsage) -> Color {
-        guard let left = usage.daysLeft() else { return .secondary }
-        if left == 0 { return .red }
-        if left <= 7 { return .orange }
-        return .secondary
     }
 
     private var updateSection: some View {
@@ -1665,5 +1635,45 @@ struct NoticeRow: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 2)
+    }
+}
+
+/// 用量条（v2.4.21 从 `SubscriptionListView` 抽出来）。
+///
+/// 抽的原因很实在：配置卡在 `ProxyView`、订阅列表在 `SubscriptionListView`，
+/// 两个不同的 struct，私有方法互相看不见——上一版把调用写进配置卡就直接编译不过
+/// （`cannot find 'usageBar' in scope`）。宽度按**已用**比例走，不限量时只画一段淡色。
+private struct UsageBar: View {
+    let usage: SubscriptionUsage
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color(uiColor: .tertiarySystemFill))
+                Capsule()
+                    .fill(usage.barColor)
+                    .frame(width: max(4, proxy.size.width * (usage.fraction ?? 0)))
+            }
+        }
+        .frame(height: 5)
+    }
+}
+
+extension SubscriptionUsage {
+    /// 绿 → 橙 → 红：和网页后台的高/中/低三档同一个意思，阈值按已用比例。
+    var barColor: Color {
+        guard let fraction else { return .blue }
+        if fraction >= 0.9 { return .red }
+        if fraction >= 0.7 { return .orange }
+        return .green
+    }
+
+    /// 到期时间：一周内变橙，过期变红，其余用次级灰。
+    var expireColor: Color {
+        guard let left = daysLeft() else { return .secondary }
+        if left == 0 { return .red }
+        if left <= 7 { return .orange }
+        return .secondary
     }
 }
