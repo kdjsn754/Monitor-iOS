@@ -31,6 +31,12 @@ final class AppModel {
     var flashInfo = FlashInfo()
     var routerInfo = RouterInfo()
     var devices: [DeviceInfo] = []
+    /// 每台路由器上一次握手读到的设备名（`/proc/sys/kernel/hostname`），键是连接 id。
+    ///
+    /// 连接名称留空时拿它当显示名：`Redmi-AX6000` 比 `192.168.8.1` 好认。
+    /// 存盘是为了冷启动那一两秒也先显示名字——实时值要到第一轮 `refreshInfo`
+    /// 回来才有，不存的话卡片会先闪一下 IP 再变成设备名。
+    private var profileHostnames: [String: String] = [:]
     /// 自定义设备名：键是 MAC（租约重新下发时 IP 会变，MAC 不会），没 MAC 才退回 IP。
     var deviceAliases: [String: String] = [:]
     /// 删掉（隐藏）的离线设备。键同上，值是删掉那一刻。
@@ -223,6 +229,54 @@ final class AppModel {
         loadModules()
         loadDeviceAliases()
         loadHiddenDevices()
+        loadProfileHostnames()
+    }
+
+    // MARK: - 连接显示名
+
+    private static let profileHostnamesKey = "profileHostnames"
+
+    private func loadProfileHostnames() {
+        guard let stored = UserDefaults.standard.dictionary(forKey: Self.profileHostnamesKey) else {
+            return
+        }
+        for (key, value) in stored {
+            if let name = value as? String, !name.isEmpty {
+                profileHostnames[key] = name
+            }
+        }
+    }
+
+    /// 卡片/列表上那条连接叫什么。
+    ///
+    /// 三级回退：用户自己填的名称 → 路由器的设备名 → IP。
+    /// 设备名优先取当前会话的实时值（换了路由器立刻跟着变），
+    /// 没连上或还没来得及采集时用上一次存下的，最后才退回地址。
+    func connectionName(for profile: RouterProfile) -> String {
+        if !profile.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return profile.label
+        }
+        if profile.id == sessionProfileID {
+            let live = routerInfo.hostname.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !live.isEmpty { return live }
+        }
+        if let cached = profileHostnames[profile.id.uuidString], !cached.isEmpty {
+            return cached
+        }
+        return profile.host
+    }
+
+    /// 采到设备名就记一笔，顺带写盘。
+    ///
+    /// 只在**会话身份**上记账：`refreshInfo` 回来的值一定属于当前连上的那台，
+    /// 而切换过程中 `currentProfileID` 可能已经先指向新的了。
+    private func rememberHostname(_ hostname: String) {
+        let name = hostname.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, let id = sessionProfileID else { return }
+        let key = id.uuidString
+        guard profileHostnames[key] != name else { return }
+        profileHostnames[key] = name
+        UserDefaults.standard.set(profileHostnames, forKey: Self.profileHostnamesKey)
     }
 
     // MARK: - 设备别名
@@ -623,6 +677,10 @@ final class AppModel {
         // 「已连接」上，可它已经不在列表里了，重连、刷新、编辑全都指向空。
         let wasSession = profile.id == sessionProfileID
         profiles.removeAll { $0.id == profile.id }
+        // 删掉的连接连它上一次的设备名一起清掉，别在偏好里留孤儿键。
+        if profileHostnames.removeValue(forKey: profile.id.uuidString) != nil {
+            UserDefaults.standard.set(profileHostnames, forKey: Self.profileHostnamesKey)
+        }
         if currentProfileID == profile.id {
             currentProfileID = profiles.first?.id
         }
@@ -775,6 +833,9 @@ final class AppModel {
         profiles = []
         currentProfileID = nil
         saveProfiles()
+        // 连接都清空了，设备名也没了归属，一并抹掉。
+        profileHostnames = [:]
+        UserDefaults.standard.removeObject(forKey: Self.profileHostnamesKey)
         stats = OverviewStats()
         routerInfo = RouterInfo()
         devices = []
@@ -1108,6 +1169,8 @@ final class AppModel {
             value.cpuCores = Int(firstLine(sections["CPUCORES"])) ?? 0
             value.firmware = parseRelease(sections["RELEASE"] ?? "")
             routerInfo = value
+            // 名称留空的连接靠这个标题，采到就存下来。
+            rememberHostname(value.hostname)
             let wan = parseWanDevice(sections["ROUTE"] ?? "")
             if !wan.isEmpty { stats.wanDevice = wan }
         } catch {

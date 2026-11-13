@@ -218,7 +218,9 @@ struct SettingsView: View {
     }
 
     private var routerTitle: String {
-        model.currentProfile?.title ?? "还没有连接"
+        // 名称留空时显示设备名（路由器的 hostname），读不到才退回 IP——见 `connectionName`。
+        guard let profile = model.currentProfile else { return "还没有连接" }
+        return model.connectionName(for: profile)
     }
 
     /// 参考图那行：`root@192.168.8.1:22 · 网页 :8080`。
@@ -620,7 +622,7 @@ private struct RouterSwitcherSheet: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text(profile.title)
+                    Text(model.connectionName(for: profile))
                         .font(.subheadline.weight(isCurrent ? .semibold : .regular))
                         .lineLimit(1)
                     if isCurrent {
@@ -656,12 +658,12 @@ private struct RouterSwitcherSheet: View {
             }
             // Form 的行里必须 borderless：不指定样式的话，点这一枚会把整行当按钮。
             .buttonStyle(.borderless)
-            .accessibilityLabel("删除 \(profile.title)")
+            .accessibilityLabel("删除 \(model.connectionName(for: profile))")
 
             Toggle("", isOn: switchBinding(for: profile))
                 .labelsHidden()
                 .tint(.blue)
-                .accessibilityLabel("切换到 \(profile.title)")
+                .accessibilityLabel("切换到 \(model.connectionName(for: profile))")
         }
         .padding(.vertical, 4)
     }
@@ -689,7 +691,7 @@ private struct RouterSwitcherSheet: View {
             SheetOverlay(onDismiss: { pendingDelete = nil }) {
                 SheetOverlayCard {
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("删除「\(profile.title)」？")
+                        Text("删除「\(model.connectionName(for: profile))」？")
                             .font(.headline)
                             .lineLimit(2)
                         Text(profile.id == model.currentProfileID

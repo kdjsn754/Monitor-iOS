@@ -10,6 +10,8 @@ struct PanelView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var progress: Double = 0
     @State private var error: String?
+    /// 清除网页数据的确认浮层（v2.5.5）。
+    @State private var confirmClear = false
 
     var body: some View {
         NavigationStack {
@@ -51,6 +53,15 @@ struct PanelView: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
+                        confirmClear = true
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .navBarTint()
+                    .accessibilityLabel("清除网页数据")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
                         NotificationCenter.default.post(name: .panelReload, object: nil)
                     } label: {
                         Image(systemName: "arrow.clockwise")
@@ -59,11 +70,40 @@ struct PanelView: View {
                 }
             }
         }
+        // v2.5.5：清除网页数据的确认浮层。用自绘的 `SheetOverlay` 而不是系统
+        // `confirmationDialog`——iOS 26 会把那个气泡锚到页面顶端，和 FanControl、
+        // 设备面板同一个毛病。挂在 NavigationStack 外面，遮罩才会连导航栏一起压暗。
+        .overlay {
+            if confirmClear {
+                SheetOverlay(onDismiss: { confirmClear = false }) {
+                    SheetOverlayCard {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("清除网页数据？")
+                                .font(.headline)
+                            Text("会清掉这个面板的缓存、Cookie 和登录状态，重新载入后需要再登录一次。路由器本身的设置不会受影响。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+
+                        HStack(spacing: 10) {
+                            SheetOverlayButton(title: "取消") { confirmClear = false }
+                            SheetOverlayButton(title: "清除并重载", tint: .red) {
+                                confirmClear = false
+                                NotificationCenter.default.post(name: .panelClearData, object: nil)
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
 extension Notification.Name {
     static let panelReload = Notification.Name("OpenWrtPanelReload")
+    /// 清空 `WKWebsiteDataStore` 之后重新载入（v2.5.5）。
+    static let panelClearData = Notification.Name("OpenWrtPanelClearData")
 }
 
 private struct PanelWebView: UIViewRepresentable {
@@ -106,13 +146,17 @@ private struct PanelWebView: UIViewRepresentable {
         private let autoLoginPassword: String?
         weak var webView: WKWebView?
         private var observer: NSObjectProtocol?
+        private var clearObserver: NSObjectProtocol?
         private var autoLoginAttempts = 0
+        /// 首次请求的地址：网页加载失败时 `webView.url` 是 nil，清除后还得有处可回。
+        private let initialURL: URL
 
         init(_ parent: PanelWebView) {
             self.progress = parent.$progress
             self.error = parent.$error
             self.autoLoginUser = parent.autoLoginUser
             self.autoLoginPassword = parent.autoLoginPassword
+            self.initialURL = parent.url
         }
 
         func observe() {
@@ -123,6 +167,40 @@ private struct PanelWebView: UIViewRepresentable {
                 guard let self, let webView = self.webView,
                       let url = webView.url else { return }
                 webView.load(URLRequest(url: url))
+            }
+            clearObserver = NotificationCenter.default.addObserver(
+                forName: .panelClearData, object: nil, queue: .main
+            ) { [weak self] _ in
+                self?.clearWebsiteData()
+            }
+        }
+
+        /// 清空 WebKit 落盘的一切（缓存、Cookie、localStorage、IndexedDB、Service Worker），
+        /// 然后跳过缓存重新载入。
+        ///
+        /// 只删文件不够：`URLRequest` 默认的缓存策略还会让 WebView 直接吃内存里的
+        /// 那份 CSS/JS 和登录态，所以重载时显式要求忽略本地缓存，
+        /// 相当于一次「硬刷新」。路由器本身的数据一点没动，清掉的只是这台手机上
+        /// 关于这个网页的痕迹。
+        private func clearWebsiteData() {
+            progress.wrappedValue = 0.02
+            error.wrappedValue = nil
+            autoLoginAttempts = 0
+            URLCache.shared.removeAllCachedResponses()
+            HTTPCookieStorage.shared.removeCookies(since: .distantPast)
+
+            let store = WKWebsiteDataStore.default()
+            let types = WKWebsiteDataStore.allWebsiteDataTypes()
+            store.removeData(ofTypes: types, modifiedSince: .distantPast) { [weak self] in
+                DispatchQueue.main.async {
+                    guard let self, let webView = self.webView else { return }
+                    let target = webView.url ?? self.initialURL
+                    webView.load(URLRequest(
+                        url: target,
+                        cachePolicy: .reloadIgnoringLocalCacheData,
+                        timeoutInterval: 30
+                    ))
+                }
             }
         }
 
@@ -189,6 +267,9 @@ private struct PanelWebView: UIViewRepresentable {
         deinit {
             if let observer {
                 NotificationCenter.default.removeObserver(observer)
+            }
+            if let clearObserver {
+                NotificationCenter.default.removeObserver(clearObserver)
             }
         }
     }
