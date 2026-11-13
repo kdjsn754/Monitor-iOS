@@ -138,8 +138,17 @@ extension Notification.Name {
 /// v2.5.10 实锤：那条 12pt 亮带其实是**网页自己画的**（zashboard 的 `.status-bar-tint`），
 /// 不是这层系统雾——所以下面这段留着当保险即可，真正修掉它的是 `cssFixScript`。
 private final class EdgeFreeWebView: WKWebView {
+    /// 只扫前几次布局（v2.5.11）。
+    ///
+    /// 扫一次要给每个子视图做一次 `String(describing:)`，那是会分配内存的；滚动、横滑
+    /// 期间布局回调不便宜，几十上百次叠起来就是白白吃掉帧时间。这类系统视图只在
+    /// 视图刚建起来时出现，扫四遍足够，之后彻底不干活。
+    private var scanBudget = 4
+
     override func layoutSubviews() {
         super.layoutSubviews()
+        guard scanBudget > 0 else { return }
+        scanBudget -= 1
         // 先在自己身上找（这层雾平时挂在滚动视图上）；一个都没找到，再看一眼外面那层
         // 容器——有的系统版本把效果视图放在宿主视图里，不扫就漏。
         if hideEdgeEffects(in: scrollView, depth: 3) == 0, let container = superview {
@@ -195,7 +204,13 @@ private struct PanelWebView: UIViewRepresentable {
         ))
         let webView = EdgeFreeWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
-        webView.allowsBackForwardNavigationGestures = true
+        // v2.5.11：关掉 WKWebView 自带的左右滑动前进/后退。
+        //
+        // 这个开关一开，WebKit 会往内容视图上装一套自己的横向手势识别器，专门用来
+        // 抢「从边缘横滑」。面板里横滑是网页自己的翻页（代理/连接/日志…），两套识别器
+        // 在同一个方向上互相等对方让路，手感就变成「拖一下才动、还回弹」。
+        // 面板退回上一页有自己的「关闭」钮，用不上这个手势。
+        webView.allowsBackForwardNavigationGestures = false
         // 不让 WKWebView 自己再叠一层安全区内边距：SwiftUI 那边已经把视口拉到底，
         // .automatic 会再缩一次，网页底栏就又浮起来、底下重新露出底色（v2.3.6）。
         webView.scrollView.contentInsetAdjustmentBehavior = .never
@@ -208,15 +223,25 @@ private struct PanelWebView: UIViewRepresentable {
         return webView
     }
 
-    /// 盖掉 zashboard 那条 12pt「状态栏染色膜」（v2.5.10）。
+    /// 盖掉 zashboard 那条 12pt「状态栏染色膜」（v2.5.10），顺带处理横滑卡顿（v2.5.11）。
     ///
     /// 只在文档开始时执行一次：把 `<style id="owmPanelCssFix">` 尽早塞进 `<head>`，
     /// 之后无论那条 `@supports` 规则什么时候生效，`.status-bar-tint` 都被压成
     /// `display:none!important`。文档刚开始时 `<head>` 可能还没建出来，所以先
     /// 试一次、没成就盯住 `documentElement` 的子节点变化再补，补上进就收手。
+    ///
+    /// **横滑卡顿**：设了壁纸之后，zashboard 会给整页的卡片、表格、底栏、弹层都挂上
+    /// `backdrop-filter`（`.custom-background :is(.card,.collapse,.base-container,…)`，
+    /// 表格下面还有一层 `height:100dvh` 的 `::before` 毛玻璃）。这些东西一旦跟着容器
+    /// 做位移动画，每帧都要重新采样背景、重新模糊——横滑就一卡一卡的。
+    ///
+    /// 所以横滑时给 `<html>` 加一个 `owm-swiping` 类，把毛玻璃临时收掉：动画期间只是
+    /// 一层半透明底色（模糊半径本来就只有 10pt，动起来几乎看不出来），手指松开
+    /// 220ms 后恢复原样。静止时的观感一点没变。
     static let cssFixScript = #"""
     (function(){
-      var CSS = '.status-bar-tint{display:none!important}';
+      var CSS = '.status-bar-tint{display:none!important}' +
+        'html.owm-swiping *{-webkit-backdrop-filter:none!important;backdrop-filter:none!important}';
       var ID = 'owmPanelCssFix';
       var obs = null;
       function ensure(){
@@ -247,6 +272,46 @@ private struct PanelWebView: UIViewRepresentable {
       boot();
       document.addEventListener('DOMContentLoaded', ensure);
       window.addEventListener('load', ensure);
+
+      // 横滑识别：只认「横向位移明显大于纵向」的拖动，竖向滚动一律不碰。
+      var x0 = 0, y0 = 0, swiping = false, timer = 0;
+      function clearFlag(){
+        if (swiping) {
+          swiping = false;
+          var r = document.documentElement;
+          if (r) r.classList.remove('owm-swiping');
+        }
+      }
+      // 定时摘掉标记；再给一个 2.5s 的兜底，万一 touchend 没送到也不会一直关着模糊。
+      function release(ms){
+        if (timer) { clearTimeout(timer); }
+        timer = setTimeout(function(){ timer = 0; clearFlag(); }, ms);
+      }
+      function begin(){
+        if (swiping) return;
+        swiping = true;
+        var r = document.documentElement;
+        if (r) r.classList.add('owm-swiping');
+        release(2500);
+      }
+      document.addEventListener('touchstart', function(e){
+        if (!e.touches || e.touches.length !== 1) { clearFlag(); return; }
+        // 上一轮如果没收到 touchend，先收干净
+        if (swiping) clearFlag();
+        x0 = e.touches[0].clientX;
+        y0 = e.touches[0].clientY;
+      }, {passive: true, capture: true});
+      document.addEventListener('touchmove', function(e){
+        if (swiping) return;
+        if (!e.touches || e.touches.length !== 1) return;
+        var dx = Math.abs(e.touches[0].clientX - x0);
+        var dy = Math.abs(e.touches[0].clientY - y0);
+        // 先走够 12pt，而且横向至少是纵向的 1.6 倍，才算翻页手势
+        if (dx < 12 || dx < dy * 1.6) return;
+        begin();
+      }, {passive: true, capture: true});
+      document.addEventListener('touchend', function(){ if (swiping) release(220); }, {passive: true, capture: true});
+      document.addEventListener('touchcancel', function(){ if (swiping) release(220); }, {passive: true, capture: true});
     })();
     """#
 
