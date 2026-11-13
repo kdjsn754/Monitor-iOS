@@ -65,6 +65,15 @@ struct PanelView: View {
             }
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
+            // v2.6.2：这一页的导航栏不要毛玻璃，用不透明白底。
+            //
+            // iOS 26 的玻璃栏要在每一帧重新采样它下面的内容才算得出模糊。面板横滑时
+            // 下面整个网页都在平移，等于每帧重新模糊一整条栏——这是掉帧第二大来源
+            // （第一是网页里那堆玻璃卡片，由注入样式一并处理）。
+            //
+            // 换成实色以后完全不采样，外观就是一条普通白栏，和面板自己的白底也对得上。
+            .toolbarBackground(Color(.systemBackground), for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("关闭") { dismiss() }
@@ -223,25 +232,48 @@ private struct PanelWebView: UIViewRepresentable {
         return webView
     }
 
-    /// 盖掉 zashboard 那条 12pt「状态栏染色膜」（v2.5.10），顺带处理横滑卡顿（v2.5.11）。
+    /// 盖掉 zashboard 那条 12pt「状态栏染色膜」（v2.5.10），并压掉横滑时的重绘开销
+    /// （v2.6.2）。
     ///
     /// 只在文档开始时执行一次：把 `<style id="owmPanelCssFix">` 尽早塞进 `<head>`，
     /// 之后无论那条 `@supports` 规则什么时候生效，`.status-bar-tint` 都被压成
     /// `display:none!important`。文档刚开始时 `<head>` 可能还没建出来，所以先
     /// 试一次、没成就盯住 `documentElement` 的子节点变化再补，补上进就收手。
     ///
-    /// **横滑卡顿**：设了壁纸之后，zashboard 会给整页的卡片、表格、底栏、弹层都挂上
-    /// `backdrop-filter`（`.custom-background :is(.card,.collapse,.base-container,…)`，
-    /// 表格下面还有一层 `height:100dvh` 的 `::before` 毛玻璃）。这些东西一旦跟着容器
-    /// 做位移动画，每帧都要重新采样背景、重新模糊——横滑就一卡一卡的。
+    /// ----
     ///
-    /// 所以横滑时给 `<html>` 加一个 `owm-swiping` 类，把毛玻璃临时收掉：动画期间只是
-    /// 一层半透明底色（模糊半径本来就只有 10pt，动起来几乎看不出来），手指松开
-    /// 220ms 后恢复原样。静止时的观感一点没变。
+    /// **横滑卡顿（v2.6.2 重做）**
+    ///
+    /// v2.6.1 的做法是「横滑时临时关掉毛玻璃」，结果两头不讨好：关的那一下整页
+    /// 一起变了外观，看着一闪一闪；而且 `html.owm-swiping *` 这种通配选择器会让
+    /// WebKit 把整棵树的样式重算一遍，手势刚起就卡一下，等于把省下的又还回去了。
+    ///
+    /// 真正的问题在于**毛玻璃是常驻的、数量还多**：
+    ///
+    /// ```css
+    /// .custom-background :is(.bg-base-100,.card,.collapse,.base-container,…){backdrop-filter:var(--app-glass)}
+    /// .custom-background .table-glass:before{height:100dvh;position:sticky;backdrop-filter:var(--app-glass)}
+    /// .custom-background .tab-bar{backdrop-filter:var(--app-glass-overlay) saturate(180%)}
+    /// ```
+    ///
+    /// 翻页时 zashboard 是把整个 `.pageRef` 做 `translate3d`，上面这些玻璃面每一帧
+    /// 都要重新采样背景、重新模糊一遍，表格页那层还是**整屏 100dvh**。
+    ///
+    /// 所以改成「一次到位」：把 `--app-glass` / `--app-glass-overlay` 这两个变量在
+    /// 壁纸那一层上定成 `none`，所有玻璃面一起失去模糊，**外观从头到尾是同一个样子**，
+    /// 不会闪。损失几乎看不出来——这些面的底色是 `color-mix(base-100 90%, transparent)`，
+    /// 本来就九成不透明，被模糊的只是最后那一成。
+    ///
+    /// 只挂在 `.custom-background` 上：没设壁纸时页面本来就是实底，玻璃只有底栏那一条，
+    /// 而且底色只有 20% 不透明、全靠模糊撑着，那种情况下不能撤。
+    ///
+    /// 另外给翻页容器加 `will-change: transform`：让它自己成为一个合成层，拖动时
+    /// 只做图层位移，不再每帧重画整页。
     static let cssFixScript = #"""
     (function(){
       var CSS = '.status-bar-tint{display:none!important}' +
-        'html.owm-swiping *{-webkit-backdrop-filter:none!important;backdrop-filter:none!important}';
+        '.custom-background{--app-glass:none!important;--app-glass-overlay:none!important}' +
+        '.home-page > .overflow-hidden > .absolute{will-change:transform}';
       var ID = 'owmPanelCssFix';
       var obs = null;
       function ensure(){
@@ -272,46 +304,6 @@ private struct PanelWebView: UIViewRepresentable {
       boot();
       document.addEventListener('DOMContentLoaded', ensure);
       window.addEventListener('load', ensure);
-
-      // 横滑识别：只认「横向位移明显大于纵向」的拖动，竖向滚动一律不碰。
-      var x0 = 0, y0 = 0, swiping = false, timer = 0;
-      function clearFlag(){
-        if (swiping) {
-          swiping = false;
-          var r = document.documentElement;
-          if (r) r.classList.remove('owm-swiping');
-        }
-      }
-      // 定时摘掉标记；再给一个 2.5s 的兜底，万一 touchend 没送到也不会一直关着模糊。
-      function release(ms){
-        if (timer) { clearTimeout(timer); }
-        timer = setTimeout(function(){ timer = 0; clearFlag(); }, ms);
-      }
-      function begin(){
-        if (swiping) return;
-        swiping = true;
-        var r = document.documentElement;
-        if (r) r.classList.add('owm-swiping');
-        release(2500);
-      }
-      document.addEventListener('touchstart', function(e){
-        if (!e.touches || e.touches.length !== 1) { clearFlag(); return; }
-        // 上一轮如果没收到 touchend，先收干净
-        if (swiping) clearFlag();
-        x0 = e.touches[0].clientX;
-        y0 = e.touches[0].clientY;
-      }, {passive: true, capture: true});
-      document.addEventListener('touchmove', function(e){
-        if (swiping) return;
-        if (!e.touches || e.touches.length !== 1) return;
-        var dx = Math.abs(e.touches[0].clientX - x0);
-        var dy = Math.abs(e.touches[0].clientY - y0);
-        // 先走够 12pt，而且横向至少是纵向的 1.6 倍，才算翻页手势
-        if (dx < 12 || dx < dy * 1.6) return;
-        begin();
-      }, {passive: true, capture: true});
-      document.addEventListener('touchend', function(){ if (swiping) release(220); }, {passive: true, capture: true});
-      document.addEventListener('touchcancel', function(){ if (swiping) release(220); }, {passive: true, capture: true});
     })();
     """#
 
