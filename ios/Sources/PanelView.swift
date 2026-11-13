@@ -15,37 +15,47 @@ struct PanelView: View {
 
     var body: some View {
         NavigationStack {
-            ZStack(alignment: .top) {
-                PanelWebView(
-                    url: url,
-                    progress: $progress,
-                    error: $error,
-                    autoLoginUser: autoLoginUser,
-                    autoLoginPassword: autoLoginPassword
-                )
-                // v2.3.6：铺到屏幕最底。原来全屏后 WebView 只到「Home 指示条上沿」，
-                // 网页自己的底栏（代理/连接/日志/规则/设置）贴着那条线，下面留一条白带。
-                // 底栏是网页画的，不归 SwiftUI 管，所以只能把视口拉满、让它自己贴到底。
-                .ignoresSafeArea(.container, edges: .bottom)
-                if progress > 0 && progress < 1 {
-                    ProgressView(value: progress)
-                        .progressViewStyle(.linear)
-                        .tint(.blue)
-                }
-                if let error {
-                    VStack(spacing: 10) {
-                        Text("页面加载失败").font(.headline)
-                        Text(error).font(.caption).foregroundStyle(.secondary)
-                        Button("重试") {
-                            NotificationCenter.default.post(name: .panelReload, object: nil)
-                        }
+            // v2.5.6：网页铺满整屏，改用 contentInset 把网页内容推到玻璃栏下面。
+            // 这样导航栏背后是网页自己的背景，白栏那条硬边就没了。
+            GeometryReader { proxy in
+                ZStack(alignment: .top) {
+                    PanelWebView(
+                        url: url,
+                        topInset: proxy.safeAreaInsets.top,
+                        progress: $progress,
+                        error: $error,
+                        autoLoginUser: autoLoginUser,
+                        autoLoginPassword: autoLoginPassword
+                    )
+                    // v2.3.6：铺到屏幕最底。原来全屏后 WebView 只到「Home 指示条上沿」，
+                    // 网页自己的底栏（代理/连接/日志/规则/设置）贴着那条线，下面留一条白带。
+                    // 底栏是网页画的，不归 SwiftUI 管，所以只能把视口拉满、让它自己贴到底。
+                    // v2.5.6：顶边也一起拉满（见上面的 topInset）。
+                    .ignoresSafeArea(.container)
+                    if progress > 0 && progress < 1 {
+                        ProgressView(value: progress)
+                            .progressViewStyle(.linear)
+                            .tint(.blue)
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color(.systemGroupedBackground))
+                    if let error {
+                        VStack(spacing: 10) {
+                            Text("页面加载失败").font(.headline)
+                            Text(error).font(.caption).foregroundStyle(.secondary)
+                            Button("重试") {
+                                NotificationCenter.default.post(name: .panelReload, object: nil)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Color(.systemGroupedBackground))
+                    }
                 }
             }
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
+            // v2.5.6：栏底色从「不透明白」换成毛玻璃，网页从它底下穿过。
+            // 白底在网页灰顶栏上方会切出一条硬边（用户 2026-11-14 指的就是这条线）。
+            .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("关闭") { dismiss() }
@@ -108,6 +118,13 @@ extension Notification.Name {
 
 private struct PanelWebView: UIViewRepresentable {
     let url: URL
+    /// 导航栏占掉的高度（状态栏 + 栏本身）。
+    ///
+    /// v2.5.6 起网页铺满整屏，靠这个内边距把网页内容顶到玻璃栏下面：
+    /// 栏背后露出的是网页自己的背景，不再有「白栏一刀切」的那条边。
+    /// 不能改成把网页硬顶到最上沿——这一页自带「面板 / 地址 / 搜索」那一行，
+    /// 会整行躲到状态栏后面，用户就点不到面板切换了。
+    var topInset: CGFloat = 0
     @Binding var progress: Double
     @Binding var error: String?
     var autoLoginUser: String?
@@ -124,18 +141,42 @@ private struct PanelWebView: UIViewRepresentable {
         // 不让 WKWebView 自己再叠一层安全区内边距：SwiftUI 那边已经把视口拉到底，
         // .automatic 会再缩一次，网页底栏就又浮起来、底下重新露出底色（v2.3.6）。
         webView.scrollView.contentInsetAdjustmentBehavior = .never
-        webView.isOpaque = true
-        webView.backgroundColor = .white
-        webView.scrollView.backgroundColor = .white
+        // v2.5.6：底色透明，玻璃栏才能透出网页自己的背景。不透明的话栏背后
+        // 永远是那块白，换什么材质都还是白的。
+        webView.isOpaque = false
+        webView.backgroundColor = .clear
+        webView.scrollView.backgroundColor = .clear
         context.coordinator.webView = webView
         context.coordinator.observe()
+        applyTopInset(to: webView)
         webView.load(URLRequest(url: url))
         return webView
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
+        applyTopInset(to: webView)
         if webView.url == nil {
             webView.load(URLRequest(url: url))
+        }
+    }
+
+    /// 只动 top：底部要留 0，网页自己的底栏才能贴到屏幕最下沿（v2.3.6）。
+    ///
+    /// 用「网页顶边在窗口里的实际 y」反推该空多少：真铺满了（y≈0）就空一整条栏，
+    /// 万一 `ignoresSafeArea` 没生效（y 已经等于栏高），就空 0——这样不会出现
+    /// 「栏下面又空一条」的双重留白。两处都靠这个自校正，不靠猜。
+    private func applyTopInset(to webView: WKWebView) {
+        let originY = webView.window == nil ? 0 : webView.convert(CGPoint.zero, to: nil).y
+        let top = max(0, topInset - max(0, originY))
+        if abs(webView.scrollView.contentInset.top - top) > 0.5 {
+            var inset = webView.scrollView.contentInset
+            inset.top = top
+            webView.scrollView.contentInset = inset
+        }
+        if abs(webView.scrollView.verticalScrollIndicatorInsets.top - top) > 0.5 {
+            var indicator = webView.scrollView.verticalScrollIndicatorInsets
+            indicator.top = top
+            webView.scrollView.verticalScrollIndicatorInsets = indicator
         }
     }
 
