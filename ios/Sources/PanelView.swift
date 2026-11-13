@@ -12,6 +12,9 @@ struct PanelView: View {
     @State private var error: String?
     /// 清除网页数据的确认浮层（v2.5.5）。
     @State private var confirmClear = false
+    /// v2.5.9 排查用：自动去掉顶部那条亮带失败时，这里放一句「它到底是什么」，
+    /// 贴在页面底部显示，截一张图就能定位，不用再靠猜。
+    @State private var probe = ""
 
     var body: some View {
         NavigationStack {
@@ -20,6 +23,7 @@ struct PanelView: View {
                     url: url,
                     progress: $progress,
                     error: $error,
+                    probe: $probe,
                     autoLoginUser: autoLoginUser,
                     autoLoginPassword: autoLoginPassword
                 )
@@ -42,6 +46,20 @@ struct PanelView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(Color(.systemGroupedBackground))
+                }
+                // v2.5.9：只有「自动去掉那条亮带」没命中时才会有内容，用来把罪魁
+                // 祸首的名字显示出来。贴在页面最底下，不挡上面的内容。
+                if !probe.isEmpty {
+                    Text(probe)
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 7))
+                        .padding(.horizontal, 8)
+                        .padding(.bottom, 26)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                        .allowsHitTesting(false)
                 }
             }
             .navigationTitle(title)
@@ -147,6 +165,8 @@ private struct PanelWebView: UIViewRepresentable {
     let url: URL
     @Binding var progress: Double
     @Binding var error: String?
+    /// v2.5.9：顶边亮带的排查结果（空 = 已经自动处理掉，不用显示）。
+    @Binding var probe: String
     var autoLoginUser: String?
     var autoLoginPassword: String?
 
@@ -179,6 +199,7 @@ private struct PanelWebView: UIViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate {
         private let progress: Binding<Double>
         private let error: Binding<String?>
+        private let probe: Binding<String>
         private let autoLoginUser: String?
         private let autoLoginPassword: String?
         weak var webView: WKWebView?
@@ -191,6 +212,7 @@ private struct PanelWebView: UIViewRepresentable {
         init(_ parent: PanelWebView) {
             self.progress = parent.$progress
             self.error = parent.$error
+            self.probe = parent.$probe
             self.autoLoginUser = parent.autoLoginUser
             self.autoLoginPassword = parent.autoLoginPassword
             self.initialURL = parent.url
@@ -243,13 +265,72 @@ private struct PanelWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
             error.wrappedValue = nil
+            probe.wrappedValue = ""
             progress.wrappedValue = 0.05
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             progress.wrappedValue = 1
+            stripTopBand()
             attemptAutoLogin()
         }
+
+        /// 去掉网页顶部那条横穿全屏的亮带（v2.5.9）。
+        ///
+        /// 这条带子只在网页顶栏上一截，不随内容滚动，是页面上某个**空的全宽小元素**
+        /// 画出来的（主题给刘海留的白条之类）。系统的边缘薄雾已经排除：v2.5.8 把那类
+        /// 视图全隐藏了，带子一点没变。
+        ///
+        /// 做法：找出「贴着页面顶边、全宽、高度 3~24pt、没有文字」的元素，直接
+        /// `display:none`。命中就不必再报告；一个都没命中，就把页面顶层结构拼成一句话
+        /// 交给界面上那块小字，下次照着它改，不再靠猜。
+        private func stripTopBand() {
+            guard let webView else { return }
+            webView.evaluateJavaScript(Self.stripScript) { [weak self] result, _ in
+                guard let self, let text = result as? String, !text.isEmpty else { return }
+                DispatchQueue.main.async { self.probe.wrappedValue = text }
+            }
+        }
+
+        private static let stripScript = #"""
+        (function(){
+          var vw = window.innerWidth;
+          function desc(el){
+            var n = el.tagName ? el.tagName.toLowerCase() : '?';
+            if (el.id) n += '#' + el.id;
+            var cls = (typeof el.className === 'string' ? el.className : '').trim();
+            if (cls) n += '.' + cls.split(/\s+/)[0];
+            return n;
+          }
+          if (!document.body) return '';
+          var removed = 0;
+          var all = document.body.getElementsByTagName('*');
+          for (var i = 0; i < all.length; i++) {
+            var el = all[i];
+            var r = el.getBoundingClientRect();
+            if (r.top < -2 || r.top > 2) continue;
+            if (r.height < 3 || r.height > 24) continue;
+            if (r.width < vw * 0.95) continue;
+            var st = getComputedStyle(el);
+            if (st.display === 'none' || st.visibility === 'hidden') continue;
+            if (el.innerText && el.innerText.trim().length > 0) continue;
+            el.style.setProperty('display', 'none', 'important');
+            removed++;
+            if (removed >= 4) break;
+          }
+          if (removed > 0) return '';
+          var out = [];
+          var kids = document.body.children;
+          for (var j = 0; j < kids.length && out.length < 3; j++) {
+            var k = kids[j];
+            var kr = k.getBoundingClientRect();
+            if (kr.height < 1) continue;
+            out.push(desc(k) + ' y' + Math.round(kr.top) + ' h' + Math.round(kr.height));
+          }
+          var hit = document.elementFromPoint(vw / 2, 4);
+          return 'at4=' + (hit ? desc(hit) : 'none') + ' | body: ' + out.join(' , ');
+        })();
+        """#
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             self.error.wrappedValue = error.localizedDescription
