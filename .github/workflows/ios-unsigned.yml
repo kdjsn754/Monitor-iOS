@@ -396,11 +396,33 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ios/build/spm
-          # v1 是这份缓存布局的版本号；依赖一变（Package.swift 里的 url / 版本 /
-          # checksum 任何一项改了）哈希就变，自动换一份新的，不会拿到旧二进制。
-          key: spm-bins-v1-${{ runner.os }}-${{ hashFiles('ios/Packages/libssh2-apple/Package.swift') }}
+          # v2（2026-11-13）：v1 的缓存里有一份坏状态——workspace-state.json 在，
+          # artifacts/ 下的 xcframework 却没有，恢复回来 archive 直接报
+          # 「There is no XCFramework found at .../build/spm/artifacts/...」。
+          # 换版本号让下一位跑的人从零解析一次，顺便把坏缓存晾在那儿自然过期。
+          # 依赖一变（Package.swift 里的 url / 版本 / checksum 任何一项改了）
+          # 哈希也会变，自动换一份新的，不会拿到旧二进制。
+          key: spm-bins-v2-${{ runner.os }}-${{ hashFiles('ios/Packages/libssh2-apple/Package.swift') }}
           restore-keys: |
-            spm-bins-v1-${{ runner.os }}-
+            spm-bins-v2-${{ runner.os }}-
+
+      # 2026-11-13：缓存恢复不保证完整（v1 就这么栽过），而归档时**不会**
+      # 因为 artifact 缺失重新下载——它只看 workspace-state.json。所以开工前
+      # 先核对：状态说已解析、artifacts 里却一个 xcframework 都没有，就整块丢掉重来。
+      - name: 校验 SPM 缓存是否完整
+        working-directory: ios
+        run: |
+          set -eu
+          if [ ! -d build/spm ]; then
+            echo "没有缓存，跳过校验"
+            exit 0
+          fi
+          found=$(find build/spm/artifacts -maxdepth 4 -name '*.xcframework' 2>/dev/null | wc -l | tr -d ' ')
+          echo "artifacts 里的 xcframework 数量：$found"
+          if [ -f build/spm/workspace-state.json ] && [ "$found" = "0" ]; then
+            echo "::warning::SPM 缓存不完整（有 workspace-state.json 但没有 xcframework），丢弃后重新解析"
+            rm -rf build/spm
+          fi
       - name: 构建（不签名）
         working-directory: ${{ env.IOS_DIR }}
         timeout-minutes: 20
