@@ -309,6 +309,10 @@ private struct PanelWebView: UIViewRepresentable {
         private var observer: NSObjectProtocol?
         private var clearObserver: NSObjectProtocol?
         private var autoLoginAttempts = 0
+        /// 进度条兜底（v2.6.4）：见 `armProgressWatchdog()`。
+        private var progressWatchdog: DispatchWorkItem?
+        private var progressRounds = 0
+        private var hasLoadedOnce = false
         /// 首次请求的地址：网页加载失败时 `webView.url` 是 nil，清除后还得有处可回。
         private let initialURL: URL
 
@@ -345,6 +349,7 @@ private struct PanelWebView: UIViewRepresentable {
         /// 相当于一次「硬刷新」。路由器本身的数据一点没动，清掉的只是这台手机上
         /// 关于这个网页的痕迹。
         private func clearWebsiteData() {
+            cancelProgressWatchdog()
             progress.wrappedValue = 0.02
             error.wrappedValue = nil
             autoLoginAttempts = 0
@@ -370,13 +375,75 @@ private struct PanelWebView: UIViewRepresentable {
             error.wrappedValue = nil
             probe.wrappedValue = ""
             progress.wrappedValue = 0.05
+            // 首次加载给足时间（真的可能慢）；已经加载过一遍的，后面这些多是页面自己
+            // 发起的重导航，两秒足够，别让用户再盯着一条死条。
+            progressRounds = 0
+            armProgressWatchdog(after: hasLoadedOnce ? 2.5 : 5)
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            cancelProgressWatchdog()
             progress.wrappedValue = 1
+            hasLoadedOnce = true
             verifyTopBand()
             attemptAutoLogin()
         }
+
+        // MARK: - 进度条兜底（v2.6.4）
+
+        /// 页面「看起来好了」就把进度条收掉，不再等那些永远等不到的资源。
+        ///
+        /// 现象：面板内容已经完整显示（代理组卡片都在），顶上那条蓝条却停在 5% 不动。
+        /// 原因是 `didFinish` 要等 `load` 事件，而 `load` 会一直等所有子资源；zashboard
+        /// 页面上有几个外链请求（字体 / CDN 资源），网络稍差就一直挂着，`load` 于是
+        /// 永远不来，进度条也永远不走完。
+        ///
+        /// 进度条的意义是「还要等多久」，主文档画出来就已经没有意义了，所以给个上限：
+        /// 到点检查一次，页面有内容就直接收；还在白屏、或者进度已经过半（确实在往前走）
+        /// 就再等一轮，最多两轮。
+        private func armProgressWatchdog(after seconds: Double) {
+            progressWatchdog?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                self?.progressWatchdog = nil
+                self?.settleProgressIfPainted()
+            }
+            progressWatchdog = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
+        }
+
+        private func cancelProgressWatchdog() {
+            progressWatchdog?.cancel()
+            progressWatchdog = nil
+        }
+
+        private func settleProgressIfPainted() {
+            guard let webView else { return }
+            webView.evaluateJavaScript(Self.paintedScript) { [weak self] result, _ in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    let painted = (result as? NSNumber)?.boolValue ?? false
+                    // 已经画出来、或者早就不在加载了 —— 都算加载完。
+                    if painted || !webView.isLoading || self.progressRounds >= 2 {
+                        self.progress.wrappedValue = 1
+                        self.verifyTopBand()
+                    } else {
+                        self.progressRounds += 1
+                        self.armProgressWatchdog(after: 4)
+                    }
+                }
+            }
+        }
+
+        /// 页面有没有实际内容：body 有可见高度，或者已经有子节点且高度够。
+        private static let paintedScript = #"""
+        (function(){
+          var b = document.body;
+          if (!b) return false;
+          var h = b.getBoundingClientRect().height;
+          if (h > 60) return true;
+          return b.children.length > 0 && document.documentElement.scrollHeight > 60;
+        })();
+        """#
 
         /// 确认那条亮带真的没了（v2.5.10）。
         ///
@@ -413,11 +480,13 @@ private struct PanelWebView: UIViewRepresentable {
         """#
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            cancelProgressWatchdog()
             self.error.wrappedValue = error.localizedDescription
             progress.wrappedValue = 0
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            cancelProgressWatchdog()
             self.error.wrappedValue = error.localizedDescription
             progress.wrappedValue = 0
         }
