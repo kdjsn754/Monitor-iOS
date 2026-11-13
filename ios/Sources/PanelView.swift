@@ -12,8 +12,9 @@ struct PanelView: View {
     @State private var error: String?
     /// 清除网页数据的确认浮层（v2.5.5）。
     @State private var confirmClear = false
-    /// v2.5.9 排查用：自动去掉顶部那条亮带失败时，这里放一句「它到底是什么」，
-    /// 贴在页面底部显示，截一张图就能定位，不用再靠猜。
+    /// v2.5.10：顶边那条亮带已经用注入样式的方式按掉了，正常这里永远是空字符串。
+    /// 只有哪天它又冒出来（主题改名、规则被覆盖）才写一句「它还在、长什么样」，
+    /// 贴在页面底部，截一张图就能定位。
     @State private var probe = ""
 
     var body: some View {
@@ -47,8 +48,8 @@ struct PanelView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(Color(.systemGroupedBackground))
                 }
-                // v2.5.9：只有「自动去掉那条亮带」没命中时才会有内容，用来把罪魁
-                // 祸首的名字显示出来。贴在页面最底下，不挡上面的内容。
+                // v2.5.10：只有「注入的样式没生效、亮带还在」时才会有内容。平时
+                // 这块小字根本不出现，不影响界面上任何东西。
                 if !probe.isEmpty {
                     Text(probe)
                         .font(.system(size: 9, design: .monospaced))
@@ -127,13 +128,15 @@ extension Notification.Name {
 /// 去掉滚动视图顶边那层系统「边缘薄雾」。
 ///
 /// iOS 26 会给贴边滚动的视图顶部叠一层 10pt 上下的浅色模糊（liquid glass 的边缘效果）。
-/// 控制面板里它就表现成导航栏下面多出**一条更亮的横带**：网页自己的顶栏（‹ 面板 ▾ |
-/// 地址 | 搜索）正好被它罩住一截，看上去像控件错位。v2.5.6 把网页铺到栏下面时这层雾
+/// 控制面板里它就表现成导航栏下面多出**一条更亮的横带**。v2.5.6 把网页铺到栏下面时这层雾
 /// 被放大到一百多点，更明显。
 ///
 /// 系统的这个视图没有公开 API 可以关，只能在布局时按类名把它找出来隐藏。不引用任何
 /// 版本相关的类型：老系统里根本没有这类子视图，找不到就什么也不做。已经隐藏过的不再
 /// 重复写，避免 `setNeedsLayout` 打转。
+///
+/// v2.5.10 实锤：那条 12pt 亮带其实是**网页自己画的**（zashboard 的 `.status-bar-tint`），
+/// 不是这层系统雾——所以下面这段留着当保险即可，真正修掉它的是 `cssFixScript`。
 private final class EdgeFreeWebView: WKWebView {
     override func layoutSubviews() {
         super.layoutSubviews()
@@ -165,7 +168,7 @@ private struct PanelWebView: UIViewRepresentable {
     let url: URL
     @Binding var progress: Double
     @Binding var error: String?
-    /// v2.5.9：顶边亮带的排查结果（空 = 已经自动处理掉，不用显示）。
+    /// v2.5.10：亮带的自检结果（空 = 已经没了，界面上不显示任何东西）。
     @Binding var probe: String
     var autoLoginUser: String?
     var autoLoginPassword: String?
@@ -175,6 +178,21 @@ private struct PanelWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        // v2.5.10：那条 12pt 亮带是 zashboard 的 `.status-bar-tint`——一条
+        // `position:fixed; top:0; height:12px; opacity:.12` 的白色薄膜，本来只给
+        // Safari/PWA 铺到状态栏下面时染色用。它默认 `display:none`，靠
+        // `@supports (-webkit-touch-callout:none)` 才在 iOS 上变成可见，所以别的
+        // 平台看是好的，只有手机会多这么一条。
+        //
+        // 在**文档开始**时就挂一条 `!important` 规则盖掉它，而不是等加载完再删：
+        // 那条规则什么时候被应用说不准（v2.5.9 就是等 `didFinish` 去量元素，那会儿
+        // 它还是 `display:none`、高度 0，被当成「没有」跳过了，结果一直没修掉）。
+        // 样式表按 `!important` 盖，先挂后挂都算数，也不会先闪一下亮带。
+        configuration.userContentController.addUserScript(WKUserScript(
+            source: Self.cssFixScript,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
         let webView = EdgeFreeWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
@@ -189,6 +207,48 @@ private struct PanelWebView: UIViewRepresentable {
         webView.load(URLRequest(url: url))
         return webView
     }
+
+    /// 盖掉 zashboard 那条 12pt「状态栏染色膜」（v2.5.10）。
+    ///
+    /// 只在文档开始时执行一次：把 `<style id="owmPanelCssFix">` 尽早塞进 `<head>`，
+    /// 之后无论那条 `@supports` 规则什么时候生效，`.status-bar-tint` 都被压成
+    /// `display:none!important`。文档刚开始时 `<head>` 可能还没建出来，所以先
+    /// 试一次、没成就盯住 `documentElement` 的子节点变化再补，补上进就收手。
+    static let cssFixScript = #"""
+    (function(){
+      var CSS = '.status-bar-tint{display:none!important}';
+      var ID = 'owmPanelCssFix';
+      var obs = null;
+      function ensure(){
+        var head = document.head || document.documentElement;
+        if (!head) return false;
+        var el = document.getElementById(ID);
+        if (el) {
+          if (el.parentNode !== head) head.appendChild(el);
+          return true;
+        }
+        el = document.createElement('style');
+        el.id = ID;
+        el.textContent = CSS;
+        head.appendChild(el);
+        return true;
+      }
+      function boot(){
+        if (ensure()) {
+          if (obs) { obs.disconnect(); obs = null; }
+          return;
+        }
+        if (!document.documentElement) { setTimeout(boot, 10); return; }
+        if (!obs) {
+          obs = new MutationObserver(boot);
+          obs.observe(document.documentElement, {childList: true, subtree: false});
+        }
+      }
+      boot();
+      document.addEventListener('DOMContentLoaded', ensure);
+      window.addEventListener('load', ensure);
+    })();
+    """#
 
     func updateUIView(_ webView: WKWebView, context: Context) {
         if webView.url == nil {
@@ -271,64 +331,41 @@ private struct PanelWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             progress.wrappedValue = 1
-            stripTopBand()
+            verifyTopBand()
             attemptAutoLogin()
         }
 
-        /// 去掉网页顶部那条横穿全屏的亮带（v2.5.9）。
+        /// 确认那条亮带真的没了（v2.5.10）。
         ///
-        /// 这条带子只在网页顶栏上一截，不随内容滚动，是页面上某个**空的全宽小元素**
-        /// 画出来的（主题给刘海留的白条之类）。系统的边缘薄雾已经排除：v2.5.8 把那类
-        /// 视图全隐藏了，带子一点没变。
-        ///
-        /// 做法：找出「贴着页面顶边、全宽、高度 3~24pt、没有文字」的元素，直接
-        /// `display:none`。命中就不必再报告；一个都没命中，就把页面顶层结构拼成一句话
-        /// 交给界面上那块小字，下次照着它改，不再靠猜。
-        private func stripTopBand() {
+        /// 正常情况下 `.status-bar-tint` 已经被 `cssFixScript` 压成 `display:none`，
+        /// 这里一个字符都不返回，界面上不会多出任何东西。万一哪天主题改了类名、
+        /// 或者有别的样式把它顶回可见，就现场再按一次，并把「它还在、多高、什么
+        /// 定位、我们的样式有没有注进去」写进底部小字——只有出问题时才看得到。
+        private func verifyTopBand() {
             guard let webView else { return }
-            webView.evaluateJavaScript(Self.stripScript) { [weak self] result, _ in
+            webView.evaluateJavaScript(Self.checkScript) { [weak self] result, _ in
                 guard let self, let text = result as? String, !text.isEmpty else { return }
                 DispatchQueue.main.async { self.probe.wrappedValue = text }
             }
         }
 
-        private static let stripScript = #"""
+        /// 只看那条薄膜还在不在。被 `<style>` 压成 `display:none` 就什么也不返回。
+        private static let checkScript = #"""
         (function(){
-          var vw = window.innerWidth;
-          function desc(el){
-            var n = el.tagName ? el.tagName.toLowerCase() : '?';
-            if (el.id) n += '#' + el.id;
-            var cls = (typeof el.className === 'string' ? el.className : '').trim();
-            if (cls) n += '.' + cls.split(/\s+/)[0];
-            return n;
-          }
-          if (!document.body) return '';
-          var removed = 0;
-          var all = document.body.getElementsByTagName('*');
-          for (var i = 0; i < all.length; i++) {
-            var el = all[i];
-            var r = el.getBoundingClientRect();
-            if (r.top < -2 || r.top > 2) continue;
-            if (r.height < 3 || r.height > 24) continue;
-            if (r.width < vw * 0.95) continue;
+          var els = document.querySelectorAll('.status-bar-tint');
+          if (!els.length) return '';
+          var out = [];
+          for (var i = 0; i < els.length; i++) {
+            var el = els[i];
             var st = getComputedStyle(el);
             if (st.display === 'none' || st.visibility === 'hidden') continue;
-            if (el.innerText && el.innerText.trim().length > 0) continue;
+            var r = el.getBoundingClientRect();
+            out.push('h' + Math.round(r.height) + ' ' + st.position + ' op' + st.opacity);
             el.style.setProperty('display', 'none', 'important');
-            removed++;
-            if (removed >= 4) break;
           }
-          if (removed > 0) return '';
-          var out = [];
-          var kids = document.body.children;
-          for (var j = 0; j < kids.length && out.length < 3; j++) {
-            var k = kids[j];
-            var kr = k.getBoundingClientRect();
-            if (kr.height < 1) continue;
-            out.push(desc(k) + ' y' + Math.round(kr.top) + ' h' + Math.round(kr.height));
-          }
-          var hit = document.elementFromPoint(vw / 2, 4);
-          return 'at4=' + (hit ? desc(hit) : 'none') + ' | body: ' + out.join(' , ');
+          if (!out.length) return '';
+          var fix = document.getElementById('owmPanelCssFix') ? 'css=ok' : 'css=missing';
+          return 'tint 还在 ' + out.join(' / ') + ' ; ' + fix;
         })();
         """#
 
