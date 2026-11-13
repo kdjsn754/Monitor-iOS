@@ -106,6 +106,43 @@ extension Notification.Name {
     static let panelClearData = Notification.Name("OpenWrtPanelClearData")
 }
 
+/// 去掉滚动视图顶边那层系统「边缘薄雾」。
+///
+/// iOS 26 会给贴边滚动的视图顶部叠一层 10pt 上下的浅色模糊（liquid glass 的边缘效果）。
+/// 控制面板里它就表现成导航栏下面多出**一条更亮的横带**：网页自己的顶栏（‹ 面板 ▾ |
+/// 地址 | 搜索）正好被它罩住一截，看上去像控件错位。v2.5.6 把网页铺到栏下面时这层雾
+/// 被放大到一百多点，更明显。
+///
+/// 系统的这个视图没有公开 API 可以关，只能在布局时按类名把它找出来隐藏。不引用任何
+/// 版本相关的类型：老系统里根本没有这类子视图，找不到就什么也不做。已经隐藏过的不再
+/// 重复写，避免 `setNeedsLayout` 打转。
+private final class EdgeFreeWebView: WKWebView {
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        // 先在自己身上找（这层雾平时挂在滚动视图上）；一个都没找到，再看一眼外面那层
+        // 容器——有的系统版本把效果视图放在宿主视图里，不扫就漏。
+        if hideEdgeEffects(in: scrollView, depth: 3) == 0, let container = superview {
+            hideEdgeEffects(in: container, depth: 2)
+        }
+    }
+
+    @discardableResult
+    private func hideEdgeEffects(in view: UIView, depth: Int) -> Int {
+        guard depth >= 0 else { return 0 }
+        var hidden = 0
+        for sub in view.subviews where !sub.isHidden {
+            let name = String(describing: type(of: sub))
+            if name.contains("EdgeEffect") || name.contains("ScrollEdge") {
+                sub.isHidden = true
+                hidden += 1
+            } else {
+                hidden += hideEdgeEffects(in: sub, depth: depth - 1)
+            }
+        }
+        return hidden
+    }
+}
+
 private struct PanelWebView: UIViewRepresentable {
     let url: URL
     @Binding var progress: Double
@@ -118,7 +155,7 @@ private struct PanelWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
-        let webView = WKWebView(frame: .zero, configuration: configuration)
+        let webView = EdgeFreeWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
         // 不让 WKWebView 自己再叠一层安全区内边距：SwiftUI 那边已经把视口拉到底，
