@@ -65,13 +65,14 @@ struct PanelView: View {
             }
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
-            // v2.6.2：这一页的导航栏不要毛玻璃，用不透明白底。
+            // v2.6.2：这一页的导航栏用实色底，不要毛玻璃。
             //
             // iOS 26 的玻璃栏要在每一帧重新采样它下面的内容才算得出模糊。面板横滑时
-            // 下面整个网页都在平移，等于每帧重新模糊一整条栏——这是掉帧第二大来源
-            // （第一是网页里那堆玻璃卡片，由注入样式一并处理）。
+            // 下面整个网页都在平移，等于每帧重新模糊一整条栏。换成实色以后完全不采样。
             //
-            // 换成实色以后完全不采样，外观就是一条普通白栏，和面板自己的白底也对得上。
+            // 注意这跟面板里的磨砂是两件事：磨砂回来的是**网页里**那些卡片、底栏、弹层
+            // （v2.6.3 已原样保留），这里只是 App 自己在网页上方画的那一条，面板自己的
+            // 顶行本来就是白底，接上去看不出接缝。
             .toolbarBackground(Color(.systemBackground), for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
             .toolbar {
@@ -220,6 +221,9 @@ private struct PanelWebView: UIViewRepresentable {
         // 在同一个方向上互相等对方让路，手感就变成「拖一下才动、还回弹」。
         // 面板退回上一页有自己的「关闭」钮，用不上这个手势。
         webView.allowsBackForwardNavigationGestures = false
+        // v2.6.3：长按链接预览也关掉。它在 WebView 里装了一套自己的手势识别器，
+        // 横滑时 WebKit 还要判断「这一下是不是要唤出预览」，纯属多余，观感上没区别。
+        webView.allowsLinkPreview = false
         // 不让 WKWebView 自己再叠一层安全区内边距：SwiftUI 那边已经把视口拉到底，
         // .automatic 会再缩一次，网页底栏就又浮起来、底下重新露出底色（v2.3.6）。
         webView.scrollView.contentInsetAdjustmentBehavior = .never
@@ -232,8 +236,7 @@ private struct PanelWebView: UIViewRepresentable {
         return webView
     }
 
-    /// 盖掉 zashboard 那条 12pt「状态栏染色膜」（v2.5.10），并压掉横滑时的重绘开销
-    /// （v2.6.2）。
+    /// 盖掉 zashboard 那条 12pt「状态栏染色膜」（v2.5.10），并给翻页容器一个合成层提示。
     ///
     /// 只在文档开始时执行一次：把 `<style id="owmPanelCssFix">` 尽早塞进 `<head>`，
     /// 之后无论那条 `@supports` 规则什么时候生效，`.status-bar-tint` 都被压成
@@ -242,37 +245,20 @@ private struct PanelWebView: UIViewRepresentable {
     ///
     /// ----
     ///
-    /// **横滑卡顿（v2.6.2 重做）**
+    /// **关于横滑卡顿的两次尝试，结论要记牢**
     ///
-    /// v2.6.1 的做法是「横滑时临时关掉毛玻璃」，结果两头不讨好：关的那一下整页
-    /// 一起变了外观，看着一闪一闪；而且 `html.owm-swiping *` 这种通配选择器会让
-    /// WebKit 把整棵树的样式重算一遍，手势刚起就卡一下，等于把省下的又还回去了。
+    /// v2.6.1：横滑时临时把毛玻璃关掉。错——开／关那一下整页外观一起变，看着闪；
+    /// 而且 `html.owm-swiping *` 是通配选择器，加类／去类各触发一次全树样式重算，
+    /// 手势刚起就卡一下。
     ///
-    /// 真正的问题在于**毛玻璃是常驻的、数量还多**：
+    /// v2.6.2：干脆把毛玻璃常驻撤掉（`.custom-background{--app-glass:none}`）。
+    /// 也不对——用户要的就是磨砂的观感，这是外观取舍，不是 bug 修复。
     ///
-    /// ```css
-    /// .custom-background :is(.bg-base-100,.card,.collapse,.base-container,…){backdrop-filter:var(--app-glass)}
-    /// .custom-background .table-glass:before{height:100dvh;position:sticky;backdrop-filter:var(--app-glass)}
-    /// .custom-background .tab-bar{backdrop-filter:var(--app-glass-overlay) saturate(180%)}
-    /// ```
-    ///
-    /// 翻页时 zashboard 是把整个 `.pageRef` 做 `translate3d`，上面这些玻璃面每一帧
-    /// 都要重新采样背景、重新模糊一遍，表格页那层还是**整屏 100dvh**。
-    ///
-    /// 所以改成「一次到位」：把 `--app-glass` / `--app-glass-overlay` 这两个变量在
-    /// 壁纸那一层上定成 `none`，所有玻璃面一起失去模糊，**外观从头到尾是同一个样子**，
-    /// 不会闪。损失几乎看不出来——这些面的底色是 `color-mix(base-100 90%, transparent)`，
-    /// 本来就九成不透明，被模糊的只是最后那一成。
-    ///
-    /// 只挂在 `.custom-background` 上：没设壁纸时页面本来就是实底，玻璃只有底栏那一条，
-    /// 而且底色只有 20% 不透明、全靠模糊撑着，那种情况下不能撤。
-    ///
-    /// 另外给翻页容器加 `will-change: transform`：让它自己成为一个合成层，拖动时
-    /// 只做图层位移，不再每帧重画整页。
+    /// 所以 v2.6.3 把磨砂**原样还回来**，滑动只做「不改观感」的事：给翻页容器
+    /// `will-change: transform`，让它自己成为合成层，拖动时只做图层位移。
     static let cssFixScript = #"""
     (function(){
       var CSS = '.status-bar-tint{display:none!important}' +
-        '.custom-background{--app-glass:none!important;--app-glass-overlay:none!important}' +
         '.home-page > .overflow-hidden > .absolute{will-change:transform}';
       var ID = 'owmPanelCssFix';
       var obs = null;
