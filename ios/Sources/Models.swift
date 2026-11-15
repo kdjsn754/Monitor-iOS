@@ -169,6 +169,19 @@ struct NetworkInfo {
     var ports: [NetPortInfo] = []
     var clients: [NetClient] = []
 
+    /// 黑名单里的 MAC（大写）。用来把「阻止入网」的状态画到设备行上；
+    /// 数据来自 `uci show gl-black_white_list`，与内核那层走的是同一份配置。
+    var blockedMACs: [String] = []
+
+    /// 出口对应的 netifd 接口名：中继是 `wwan`，有线是 `wan`。断线重连要按名字调 `ifup`。
+    var uplinkInterface: String {
+        switch uplink {
+        case .repeater: return "wwan"
+        case .wired: return "wan"
+        case .none: return "wan"
+        }
+    }
+
     var onlineClients: [NetClient] { clients.filter(\.online) }
     var offlineClients: [NetClient] { clients.filter { !$0.online } }
     var wifiClients: Int { bands.reduce(0) { $0 + $1.clients } }
@@ -231,6 +244,9 @@ struct NetClient: Identifiable, Equatable {
     var onlineTime: Double = 0
     /// dBm，0 表示没读到（有线设备本来就没有）
     var signal = 0
+    /// 已加入黑名单（`gl-black_white_list`），当前不允许访问网络。
+    /// 由 `uci show gl-black_white_list` 的 MAC 列表判定，不看缓存，写完立刻能核对。
+    var blocked = false
 
     var id: String { mac.isEmpty ? name + ip : mac }
 
@@ -275,6 +291,20 @@ struct WifiBandInfo: Identifiable, Equatable {
     var txPower = 0
     /// 同一 radio 上除主 SSID 之外的网络个数（访客 / IoT / MLO）。
     var extraNets = 0
+
+    // ---- 下面几个只有编辑 Wi-Fi 时才用得到（v2.7.0 起这一页可写）----
+
+    /// 主 SSID 的 UCI 段名（`ra0` / `rai0`）。改名称、密码、开关都写这一段。
+    var section = ""
+    /// 所属 radio 的 UCI 段名（`MT7993_1_2`）。`wifi reload` 按 radio 生效。
+    var radio = ""
+    /// 当前密码（UCI `key`）；编辑页要回填。读不到就是空，界面上留空表示「不改密码」。
+    var key = ""
+    /// SSID 是否隐藏（`hidden=1`）。
+    var hidden = false
+
+    /// 能不能在这一页改：段名都拿不到就不放编辑入口，免得点进去写错段。
+    var editable: Bool { !section.isEmpty && !radio.isEmpty }
 
     var id: String { ifname.isEmpty ? band : ifname }
 

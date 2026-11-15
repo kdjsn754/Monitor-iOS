@@ -1,24 +1,30 @@
 import SwiftUI
 
-/// 网络页（v2.6.5 新增；v2.6.7 顶部换拓扑树；v2.6.8 按官方 App 的字段补全）。
+/// 网络页（v2.6.5 新增；v2.6.7 顶部换拓扑树；v2.6.8 按官方 App 补字段；
+/// v2.7.0 这一页可写，并把版式压成四块）。
 ///
-/// **只读**：全部字段来自 `PollItem.network` 那一条采集脚本（`ubus` / `uci` / `iwinfo` /
-/// `gl-clients`），这一页没有任何写操作。
+/// **数据来自 `PollItem.network` 那一条采集脚本**（`ubus` / `uci` / `iwinfo` /
+/// `gl-clients`），字段组织照 GL.iNet 官方 App 的 `internet_*` / `client_*` / `eth_*` /
+/// `lan_*` 四组来，不是自己编的。
 ///
-/// 版式与字段都照 GL.iNet 官方 App 的组织来（`intl_zh.arb` 里的 `internet_*` / `client_*` /
-/// `eth_*` / `lan_*` 四组就是它的页面结构，不是我自己编的）：
-///   - 顶部**拓扑图**：互联网 → 路由器 → 2.4G / 5G / 有线。出口可能是**中继**，
-///     不一定是有线 WAN——这台机器当时 WAN 口就空着（v2.6.7 整页「未连接」的根源）；
-///   - 「上网」：方式 / 上级网络 / 信号 / 协商速率 / 地址 / 网关 / DNS / 在线时长；
-///   - 「在线设备」：名称 / IP / 接入方式 / 累计流量（官方客户端列表那几项）；
-///   - 「无线」：每频段 SSID / 信道与频宽 / 加密 / 台数；
-///   - 「网络端口」：已连接或未连接 / 协商速率 / 全双工；
-///   - 「局域网」：路由器 IP / DHCP 池 / 租期与租约数。
+/// **v2.7.0 起能改**（用户 2026-11-15：「要能修改不能只看」）：
+///   - 无线：点一行改名称 / 密码 / 隐藏 / 开关，写 `uci wireless` 后 `wifi reload`；
+///   - 在线设备：点一行改名（`gl-client` 的 alias）或阻止入网（GL 黑名单）；
+///   - 上网：重连出口（中继先 `repeater reload`，再 `ifdown/ifup`）。
 ///
-/// **没有一行说明性小字**（用户 2026-10-31 定的规矩）：卡片里只有「名字 → 值」。
+/// **版式只有四块**：拓扑 → 上网 → 无线 → 设备 → 局域网与端口。
+/// 原来「上网 / 在线设备 / 无线 / 网络端口 / 局域网」五张卡、二十多行文字，
+/// 一屏塞不下也看不出重点。现在被动信息进两列网格（标签在上、值在下），
+/// 只有能点的地方才排成整行。
+///
+/// **没有一行说明性小字**（用户 2026-10-31 定的规矩）。
 struct NetworkView: View {
     @Environment(AppModel.self) private var model: AppModel
     @State private var refreshing = false
+    @State private var reconnecting = false
+    @State private var editingBand: WifiBandInfo?
+    @State private var editingClient: NetClient?
+    @State private var togglingBand: String?
 
     private var info: NetworkInfo { model.network }
 
@@ -27,12 +33,11 @@ struct NetworkView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 18) {
+                VStack(spacing: 16) {
                     topology
                     uplinkCard
-                    clientsCard
                     wifiCard
-                    portCard
+                    clientsCard
                     lanCard
                 }
                 .padding(.horizontal, 18)
@@ -60,6 +65,14 @@ struct NetworkView: View {
                     }
                 }
             }
+            .sheet(item: $editingBand) { band in
+                BandEditorSheet(band: band)
+                    .presentationBackground(Color.clear)
+            }
+            .sheet(item: $editingClient) { client in
+                ClientEditorSheet(client: client)
+                    .presentationBackground(Color.clear)
+            }
         }
     }
 
@@ -72,7 +85,7 @@ struct NetworkView: View {
 
     // MARK: - 拓扑
 
-    /// 竖着排的一条链路：互联网 → 路由器 → 分叉 → 叶子。
+    /// 竖着排的一条链路：出口 → 路由器 → 分叉 → 叶子。
     /// 连线由 `trunk` / `TopoFork` 画，节点各自是独立的小卡片，
     /// 这样断线只要把那一节变灰，不用重算整张图。
     private var topology: some View {
@@ -95,9 +108,6 @@ struct NetworkView: View {
     }
 
     /// 出口那一个胶囊：走什么方式、上级是谁、什么协议。
-    ///
-    /// 中继时是「中继 · @Ruijie-s0051」，有线时是「以太网 · 192.168.1.2」，
-    /// 都没通才是「未联网」——不会再出现「WAN 没插线所以整页说没网」那种误判。
     private var internetNode: some View {
         let on = info.uplinkOK
         return HStack(spacing: 8) {
@@ -124,7 +134,7 @@ struct NetworkView: View {
         .frame(maxWidth: .infinity, alignment: .center)
     }
 
-    /// 互联网 → 路由器 的那一截竖线。断线时变灰并降透明度，不画成虚线
+    /// 出口 → 路由器 的那一截竖线。断线时变灰，不画成虚线
     /// （虚线在 22pt 的高度里看着像没画完）。
     private func trunk(ok: Bool, color: Color) -> some View {
         Rectangle()
@@ -132,10 +142,9 @@ struct NetworkView: View {
             .frame(width: 1.6, height: 22)
     }
 
-    /// 中心节点：型号 / 局域网地址 / 实时下行速率。整页的视觉重心就是这一块。
+    /// 中心节点：型号 / 局域网地址 / 实时上下行。整页的视觉重心就是这一块。
     private var routerNode: some View {
-        let speed = speedParts
-        return HStack(spacing: 12) {
+        HStack(spacing: 12) {
             Image(systemName: "router")
                 .font(.system(size: 17, weight: .medium))
                 .foregroundStyle(.secondary)
@@ -152,20 +161,13 @@ struct NetworkView: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 10)
-            HStack(alignment: .firstTextBaseline, spacing: 3) {
-                Text(speed.value)
-                    .font(.system(size: 30, weight: .light, design: .rounded))
-                    .monospacedDigit()
-                    .contentTransition(.numericText())
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.6)
-                Text(speed.unit)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
+            VStack(alignment: .trailing, spacing: 3) {
+                rateLine("arrow.down", info.rxSpeed)
+                rateLine("arrow.up", info.txSpeed)
             }
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 12)
+        .padding(.vertical, 11)
         .background {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(Color(.secondarySystemGroupedBackground))
@@ -177,8 +179,26 @@ struct NetworkView: View {
         }
     }
 
+    /// 路由器节点右侧一行速率：小箭头 + 数字 + 单位。上下行各一行，
+    /// 比原来只显示下行多一行高，但省掉了「上网」卡里重复的那一行。
+    private func rateLine(_ symbol: String, _ bytes: Double) -> some View {
+        let parts = speedParts(bytes)
+        return HStack(spacing: 4) {
+            Image(systemName: symbol)
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(.secondary)
+            Text(parts.value)
+                .font(.system(size: 17, weight: .medium, design: .rounded))
+                .monospacedDigit()
+                .contentTransition(.numericText())
+                .lineLimit(1)
+            Text(parts.unit)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(.secondary)
+        }
+    }
+
     /// 叶子：2.4G / 5G 各一片，最后一片是有线。
-    /// 这一层只回答「通不通、几台」，明细都在下面的卡片里。
     private var leafNodes: [TopoLeaf] {
         var out: [TopoLeaf] = []
         for band in info.bands.prefix(2) {
@@ -238,9 +258,9 @@ struct NetworkView: View {
             }
     }
 
-    /// 路由器节点里那两个值：把 `12.4 MB/s` 拆成数字和单位，数字才能用大字号。
-    private var speedParts: (value: String, unit: String) {
-        let parts = formatBytes(info.rxSpeed).split(separator: " ")
+    /// 把 `12.4 MB/s` 拆成数字和单位，数字才能用大字号。
+    private func speedParts(_ bytes: Double) -> (value: String, unit: String) {
+        let parts = formatBytes(max(bytes, 0)).split(separator: " ")
         let value = parts.first.map(String.init) ?? "0"
         let unit = parts.count > 1 ? String(parts[1]) : "B"
         return (value, unit + "/s")
@@ -259,46 +279,38 @@ struct NetworkView: View {
 
     private var uplinkCard: some View {
         card("上网", trailing: info.uplink == .none ? "未联网" : info.protoLabel) {
-            infoRow("方式", info.uplink.title)
-            if info.uplink == .repeater {
-                if !info.upstreamSSID.isEmpty {
-                    hairline
-                    infoRow("上级网络", info.upstreamSSID)
-                }
-                if info.upstreamSignal != 0 {
-                    hairline
-                    infoRow("信号", "\(info.upstreamSignal) dBm",
-                            valueColor: signalColor(info.upstreamSignal))
-                }
-                if !info.upstreamRate.isEmpty {
-                    hairline
-                    infoRow("协商速率", info.upstreamRate)
-                }
+            metricGrid([
+                [("方式", info.uplink.title, nil),
+                 ("信号", info.uplink == .repeater && info.upstreamSignal != 0
+                  ? "\(info.upstreamSignal) dBm" : "—",
+                  info.upstreamSignal != 0 ? signalColor(info.upstreamSignal) : nil)],
+                [("上级网络", info.upstreamSSID.isEmpty ? "—" : info.upstreamSSID, nil),
+                 ("协商速率", info.upstreamRate.isEmpty ? "—" : info.upstreamRate, nil)],
+                [("地址", info.uplinkIP.isEmpty ? "—" : info.uplinkIP, nil),
+                 ("网关", info.uplinkGateway.isEmpty ? "—" : info.uplinkGateway, nil)],
+                [("DNS", info.uplinkDNS.isEmpty ? "—" : info.uplinkDNS.prefix(2).joined(separator: "  "), nil),
+                 ("在线时长", info.uplinkUptime > 0 ? durationLabel(info.uplinkUptime) : "—", nil)]
+            ])
+            divider
+            actionRow(reconnecting ? "正在重连…" : "重新连接",
+                      symbol: "arrow.triangle.2.circlepath",
+                      busy: reconnecting) {
+                Task { await reconnect() }
             }
-            if !info.uplinkIP.isEmpty {
-                hairline
-                infoRow("地址", info.uplinkIP)
-            }
-            if !info.uplinkGateway.isEmpty {
-                hairline
-                infoRow("网关", info.uplinkGateway)
-            }
-            // 网关和 DNS 相同时只显示一行：中继上游这两项基本永远是同一个地址。
-            if let dns = info.uplinkDNS.first, dns != info.uplinkGateway {
-                hairline
-                infoRow("DNS", info.uplinkDNS.prefix(2).joined(separator: "  "))
-            }
-            if info.uplinkUptime > 0 {
-                hairline
-                infoRow("在线时长", durationLabel(info.uplinkUptime))
-            }
-            hairline
-            infoRow("实时速率", "↓ \(rateText(info.rxSpeed))   ↑ \(rateText(info.txSpeed))")
         }
     }
 
-    private func rateText(_ bytes: Double) -> String {
-        formatBytes(max(bytes, 0)) + "/s"
+    private func reconnect() async {
+        guard !reconnecting else { return }
+        reconnecting = true
+        let problem = await model.reconnectUplink()
+        await model.manualRefresh()
+        reconnecting = false
+        if let problem {
+            model.presentError(problem)
+        } else {
+            model.notice = Notice(kind: .ok, title: "已重新连接", detail: info.uplinkLabel)
+        }
     }
 
     private func durationLabel(_ seconds: Double) -> String {
@@ -317,6 +329,101 @@ struct NetworkView: View {
         return Color(red: 0.85, green: 0.25, blue: 0.22)
     }
 
+    // MARK: - 无线
+
+    private var wifiCard: some View {
+        card("无线") {
+            if info.bands.isEmpty {
+                emptyLine
+            } else {
+                ForEach(info.bands) { band in
+                    if band.id != info.bands.first?.id { divider }
+                    bandRow(band)
+                }
+            }
+        }
+    }
+
+    /// 一行一个频段：左半边点了进编辑，右边是开关。
+    /// 开关直接写配置（不弹窗），因为「关掉 2.4G」是高频动作，不值得两步走。
+    private func bandRow(_ band: WifiBandInfo) -> some View {
+        let live = band.up && band.ssidOn
+        return HStack(spacing: 10) {
+            Button {
+                editingBand = band
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "wifi")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(live ? NetPalette.wifi : Color(.systemGray3))
+                        .frame(width: 28, height: 28)
+                        .background {
+                            Circle().fill((live ? NetPalette.wifi : Color(.systemGray4)).opacity(0.12))
+                        }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(band.bandName)
+                            .font(.system(size: 15))
+                            .foregroundStyle(live ? Color.primary : Color.secondary)
+                        Text(band.ssid.isEmpty ? "—" : band.ssid)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 8)
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(band.channelLabel)
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                        Text(bandStatus(band))
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!band.editable || togglingBand != nil)
+
+            Toggle("", isOn: Binding(
+                get: { band.ssidOn },
+                set: { on in Task { await toggle(band, on) } }
+            ))
+            .labelsHidden()
+            .disabled(!band.editable || togglingBand != nil)
+        }
+        .padding(.vertical, 9)
+    }
+
+    private func toggle(_ band: WifiBandInfo, _ on: Bool) async {
+        guard togglingBand == nil else { return }
+        togglingBand = band.id
+        let problem = await model.setBandEnabled(band, on)
+        await model.manualRefresh()
+        togglingBand = nil
+        if let problem {
+            model.presentError(problem)
+        } else {
+            model.notice = Notice(kind: .ok,
+                                  title: on ? "\(band.bandName) 已开启" : "\(band.bandName) 已关闭",
+                                  detail: band.ssid)
+        }
+    }
+
+    /// 主 SSID 关掉但访客 / IoT / MLO 还在广播是常见操作（这台机器 2.4G 就是这样），
+    /// 所以状态按「这条路还通不通」说，而不是按 radio 的开关说。
+    private func bandStatus(_ band: WifiBandInfo) -> String {
+        guard band.up, band.ssidOn else { return "已关闭" }
+        var parts: [String] = []
+        if !band.encryption.isEmpty { parts.append(band.securityLabel) }
+        parts.append("\(band.clients) 台")
+        if band.extraNets > 0 { parts.append("另 \(band.extraNets) 个") }
+        return parts.joined(separator: " · ")
+    }
+
     // MARK: - 在线设备
 
     private var clientsCard: some View {
@@ -326,8 +433,13 @@ struct NetworkView: View {
                 emptyLine
             } else {
                 ForEach(clients) { client in
-                    if client.id != clients.first?.id { hairline }
-                    clientRow(client)
+                    if client.id != clients.first?.id { divider }
+                    Button {
+                        editingClient = client
+                    } label: {
+                        clientRow(client)
+                    }
+                    .buttonStyle(.plain)
                 }
             }
         }
@@ -347,9 +459,21 @@ struct NetworkView: View {
                     Circle().fill((wired ? NetPalette.wired : NetPalette.wifi).opacity(0.12))
                 }
             VStack(alignment: .leading, spacing: 2) {
-                Text(client.displayName)
-                    .font(.system(size: 15))
-                    .lineLimit(1)
+                HStack(spacing: 5) {
+                    Text(client.displayName)
+                        .font(.system(size: 15))
+                        .lineLimit(1)
+                    if client.blocked {
+                        Text("已拦截")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Color(red: 0.85, green: 0.25, blue: 0.22))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background {
+                                Capsule().fill(Color(red: 0.85, green: 0.25, blue: 0.22).opacity(0.12))
+                            }
+                    }
+                }
                 Text(second)
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
@@ -366,126 +490,45 @@ struct NetworkView: View {
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
+            Image(systemName: "chevron.right")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color(.tertiaryLabel))
         }
         .padding(.vertical, 9)
+        .contentShape(Rectangle())
     }
 
-    // MARK: - 无线
-
-    private var wifiCard: some View {
-        card("无线", trailing: info.wifiClients > 0 ? "\(info.wifiClients) 台在线" : "") {
-            if info.bands.isEmpty {
-                emptyLine
-            } else {
-                ForEach(info.bands) { band in
-                    if band.id != info.bands.first?.id { hairline }
-                    bandRow(band)
-                }
-            }
-        }
-    }
-
-    private func bandRow(_ band: WifiBandInfo) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text(band.bandName)
-                    .font(.system(size: 15))
-                    .foregroundStyle(band.up ? Color.primary : Color.secondary)
-                Spacer(minLength: 8)
-                Text(band.channelLabel)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
-            HStack(spacing: 10) {
-                Text(band.ssid.isEmpty ? "—" : band.ssid)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                Spacer(minLength: 8)
-                Text(bandStatus(band))
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-            }
-        }
-        .padding(.vertical, 10)
-    }
-
-    /// 主 SSID 关掉但访客 / IoT / MLO 还在广播是常见操作（这台机器 2.4G 就是这样），
-    /// 所以状态按「这条路还通不通」说，而不是按 radio 的开关说。
-    private func bandStatus(_ band: WifiBandInfo) -> String {
-        guard band.up, band.ssidOn else { return "已关闭" }
-        var parts: [String] = []
-        if !band.encryption.isEmpty { parts.append(band.securityLabel) }
-        parts.append("\(band.clients) 台")
-        if band.extraNets > 0 { parts.append("另 \(band.extraNets) 个网络") }
-        return parts.joined(separator: " · ")
-    }
-
-    // MARK: - 网络端口
-
-    private var portCard: some View {
-        card("网络端口", trailing: info.ports.filter(\.up).isEmpty ? "" : "\(info.ports.filter(\.up).count) 个已连接") {
-            if info.ports.isEmpty {
-                emptyLine
-            } else {
-                ForEach(info.ports) { port in
-                    if port.id != info.ports.first?.id { hairline }
-                    portRow(port)
-                }
-            }
-        }
-    }
-
-    private func portRow(_ port: NetPortInfo) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(port.up ? Color(red: 0.13, green: 0.66, blue: 0.38) : Color(.systemGray4))
-                    .frame(width: 6, height: 6)
-                Text(port.role)
-                    .font(.system(size: 15))
-                Text(port.name)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 8)
-                Text(port.detailLabel)
-                    .font(.system(size: 13))
-                    .foregroundStyle(port.up ? Color.primary : Color.secondary)
-                    .monospacedDigit()
-            }
-            if port.role == "WAN" && !port.up {
-                Text(info.wanCable ? "已插网线，未联网" : "未插网线")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .padding(.vertical, 10)
-    }
-
-    // MARK: - 局域网
+    // MARK: - 局域网与端口
 
     private var lanCard: some View {
-        card("局域网", trailing: info.leaseCount > 0 ? "\(info.leaseCount) 个租约" : "") {
-            infoRow("路由器", info.lanMask.isEmpty ? info.lanIP : "\(info.lanIP) / \(info.lanMask)")
-            if !info.dhcpStart.isEmpty {
-                hairline
-                infoRow("DHCP 池", dhcpPoolLabel)
-            }
-            if !info.dhcpLease.isEmpty {
-                hairline
-                infoRow("租期", info.dhcpLease)
-            }
-            hairline
-            infoRow("客户端", "\(info.onlineClients.count) 台在线 · \(info.clients.count) 台记录")
+        card("局域网与端口", trailing: info.ports.filter(\.up).isEmpty ? "" : "\(info.ports.filter(\.up).count) 个已连接") {
+            metricGrid([
+                portCells,
+                [("路由器", info.lanMask.isEmpty ? info.lanIP : "\(info.lanIP) / \(info.lanMask)", nil),
+                 ("DHCP 池", dhcpPoolLabel.isEmpty ? "—" : dhcpPoolLabel, nil)],
+                [("租期", info.dhcpLease.isEmpty ? "—" : info.dhcpLease, nil),
+                 ("租约", info.leaseCount > 0 ? "\(info.leaseCount) 个" : "—", nil)]
+            ])
         }
+    }
+
+    /// 网口那两格：WAN 和 LAN 各一格，值直接说「通没通 + 协商速率」。
+    /// WAN 没插线时值写「未插网线」——比「未连接」多一个有用的判断。
+    private var portCells: [(String, String, Color?)] {
+        var cells: [(String, String, Color?)] = []
+        for port in info.ports.prefix(2) {
+            let label = port.name.isEmpty ? port.role : "\(port.role) \(port.name)"
+            var value = port.detailLabel
+            if port.role == "WAN" && !port.up {
+                value = info.wanCable ? "已插网线，未联网" : "未插网线"
+            }
+            cells.append((label, value, port.up ? nil : Color.secondary))
+        }
+        while cells.count < 2 { cells.append(("端口", "—", nil)) }
+        return cells
     }
 
     /// `dhcp.lan.start=100` + `limit=150` → `192.168.8.100 – 249`。
-    /// 直接拼网段的最后一节：池永远是「同网段 + 起止数字」，不需要真的算地址。
     private var dhcpPoolLabel: String {
         guard let start = Int(info.dhcpStart), let limit = Int(info.dhcpLimit), limit > 0 else {
             return info.dhcpStart
@@ -498,7 +541,6 @@ struct NetworkView: View {
     // MARK: - 小组件
 
     /// 卡片：白底 + 一条 0.6pt 细边，没有阴影。靠留白分层，不靠色块。
-    /// `trailing` 是标题右侧那一个总览值（「3 台」「12 个租约」）。
     private func card<Content: View>(_ title: String,
                                      trailing: String = "",
                                      @ViewBuilder content: () -> Content) -> some View {
@@ -515,12 +557,12 @@ struct NetworkView: View {
                         .monospacedDigit()
                 }
             }
-            .padding(.bottom, 2)
+            .padding(.bottom, 4)
             content()
         }
         .padding(.horizontal, 16)
         .padding(.top, 14)
-        .padding(.bottom, 6)
+        .padding(.bottom, 8)
         .background {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(Color(.secondarySystemGroupedBackground))
@@ -531,24 +573,65 @@ struct NetworkView: View {
         }
     }
 
-    private func infoRow(_ title: String, _ value: String,
-                         valueColor: Color? = nil) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text(title)
-                .font(.system(size: 14))
-            Spacer(minLength: 8)
+    /// 两列的数据网格：标签小字在上、值在下。比「标题 …… 值」省一半高度，
+    /// 而且同一列的值左边缘齐平，扫起来不跳。
+    private func metricGrid(_ rows: [[(String, String, Color?)]]) -> some View {
+        VStack(spacing: 0) {
+            ForEach(rows.indices, id: \.self) { index in
+                let row = rows[index]
+                if index > 0 { divider }
+                HStack(alignment: .top, spacing: 12) {
+                    ForEach(row.indices, id: \.self) { column in
+                        metricCell(row[column].0, row[column].1, row[column].2)
+                    }
+                    if row.count == 1 { Color.clear.frame(maxWidth: .infinity) }
+                }
+                .padding(.vertical, 9)
+            }
+        }
+    }
+
+    private func metricCell(_ label: String, _ value: String, _ color: Color?) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
             Text(value)
-                .font(.system(size: 13))
-                .foregroundStyle(valueColor ?? Color.secondary)
+                .font(.system(size: 15))
+                .foregroundStyle(color ?? Color.primary)
                 .monospacedDigit()
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .minimumScaleFactor(0.8)
+                .minimumScaleFactor(0.75)
         }
-        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var hairline: some View {
+    /// 卡片底部的动作行：左图标 + 文字，整行可点，忙的时候转圈。
+    private func actionRow(_ title: String, symbol: String, busy: Bool,
+                           action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 9) {
+                if busy {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: symbol)
+                        .font(.system(size: 13, weight: .medium))
+                }
+                Text(title)
+                    .font(.system(size: 14))
+                Spacer(minLength: 8)
+            }
+            .foregroundStyle(NetPalette.wan)
+            .padding(.vertical, 12)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(busy)
+    }
+
+    private var divider: some View {
         Rectangle()
             .fill(Color(.separator).opacity(0.45))
             .frame(height: 0.5)
@@ -560,6 +643,247 @@ struct NetworkView: View {
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 10)
+    }
+}
+
+// MARK: - 编辑 Wi-Fi
+
+/// 一个频段的编辑页：名称 / 密码 / 隐藏 / 开关。
+///
+/// 版式跟「连接设备」「切换连接」那几个弹窗一致：`Form` + 右上角保存。
+/// 保存成功后自己关掉并让上一页刷新；失败就把原因留在表单里，不关窗——
+/// 关掉再弹提示，用户还得重新点进来一次。
+private struct BandEditorSheet: View {
+    @Environment(AppModel.self) private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+
+    let band: WifiBandInfo
+
+    @State private var ssid: String
+    @State private var key: String
+    @State private var hidden: Bool
+    @State private var enabled: Bool
+    @State private var busy = false
+    @State private var errorText: String?
+
+    init(band: WifiBandInfo) {
+        self.band = band
+        _ssid = State(initialValue: band.ssid)
+        _key = State(initialValue: band.key)
+        _hidden = State(initialValue: band.hidden)
+        _enabled = State(initialValue: band.ssidOn)
+    }
+
+    /// 有密码的加密方式才显示密码行（`none` 时写了也没意义）。
+    private var needsKey: Bool {
+        !band.encryption.isEmpty && band.encryption != "none"
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    HStack {
+                        Text("名称")
+                        TextField("", text: $ssid)
+                            .multilineTextAlignment(.trailing)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    }
+                    .adaptiveRowBackground()
+
+                    if needsKey {
+                        HStack {
+                            Text("密码")
+                            SecureField("", text: $key)
+                                .multilineTextAlignment(.trailing)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                        }
+                        .adaptiveRowBackground()
+                    }
+
+                    Toggle("隐藏网络", isOn: $hidden)
+                        .adaptiveRowBackground()
+                    Toggle("启用", isOn: $enabled)
+                        .adaptiveRowBackground()
+                }
+
+                if let errorText {
+                    Section {
+                        Text(errorText)
+                            .font(.system(size: 13))
+                            .foregroundStyle(Color(red: 0.85, green: 0.25, blue: 0.22))
+                            .adaptiveRowBackground()
+                    }
+                }
+            }
+            .themedFormBackground()
+            .navigationTitle(band.bandName)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("取消") { dismiss() }
+                        .navBarTint()
+                        .disabled(busy)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    if busy {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Button("保存") { Task { await save() } }
+                            .navBarTint()
+                            .fontWeight(.semibold)
+                    }
+                }
+            }
+        }
+    }
+
+    private func save() async {
+        guard !busy else { return }
+        busy = true
+        errorText = nil
+        let problem = await model.saveBand(band,
+                                           ssid: ssid,
+                                           key: key,
+                                           hidden: hidden,
+                                           enabled: enabled)
+        busy = false
+        guard let problem else {
+            model.notice = Notice(kind: .ok,
+                                  title: "\(band.bandName) 已保存",
+                                  detail: ssid)
+            dismiss()
+            await model.manualRefresh()
+            return
+        }
+        errorText = problem
+    }
+}
+
+// MARK: - 设备操作
+
+/// 一台设备的操作页：改名 / 阻止入网。
+/// 两件事分开写、一次提交：改名写 `gl-client.alias`，阻止写 GL 黑名单。
+private struct ClientEditorSheet: View {
+    @Environment(AppModel.self) private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+
+    let client: NetClient
+
+    @State private var name: String
+    @State private var blocked: Bool
+    @State private var busy = false
+    @State private var errorText: String?
+
+    init(client: NetClient) {
+        self.client = client
+        _name = State(initialValue: client.name == "*" ? "" : client.name)
+        _blocked = State(initialValue: client.blocked)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    HStack {
+                        Text("名称")
+                        TextField("", text: $name)
+                            .multilineTextAlignment(.trailing)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    }
+                    .adaptiveRowBackground()
+
+                    Toggle("阻止入网", isOn: $blocked)
+                        .adaptiveRowBackground()
+                }
+
+                Section {
+                    HStack {
+                        Text("IP")
+                        Spacer(minLength: 8)
+                        Text(client.ip.isEmpty ? "—" : client.ip)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                    .adaptiveRowBackground()
+                    HStack {
+                        Text("接入")
+                        Spacer(minLength: 8)
+                        Text(client.iface.isEmpty ? "—" : client.iface)
+                            .foregroundStyle(.secondary)
+                    }
+                    .adaptiveRowBackground()
+                    HStack {
+                        Text("MAC")
+                        Spacer(minLength: 8)
+                        Text(client.mac)
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                    .adaptiveRowBackground()
+                }
+
+                if let errorText {
+                    Section {
+                        Text(errorText)
+                            .font(.system(size: 13))
+                            .foregroundStyle(Color(red: 0.85, green: 0.25, blue: 0.22))
+                            .adaptiveRowBackground()
+                    }
+                }
+            }
+            .themedFormBackground()
+            .navigationTitle(client.displayName)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("取消") { dismiss() }
+                        .navBarTint()
+                        .disabled(busy)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    if busy {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Button("保存") { Task { await save() } }
+                            .navBarTint()
+                            .fontWeight(.semibold)
+                    }
+                }
+            }
+        }
+    }
+
+    private func save() async {
+        guard !busy else { return }
+        busy = true
+        errorText = nil
+
+        // 先改名（不痛不痒），再动网络权限。任何一步失败都停在这儿，把原因写在表单里。
+        if let problem = await model.renameClient(mac: client.mac, name: name) {
+            busy = false
+            errorText = problem
+            return
+        }
+        if blocked != client.blocked,
+           let problem = await model.setClientBlocked(mac: client.mac, blocked: blocked) {
+            busy = false
+            errorText = problem
+            return
+        }
+
+        busy = false
+        model.notice = Notice(kind: .ok,
+                              title: blocked == client.blocked
+                              ? "名称已保存"
+                              : (blocked ? "已禁止上网" : "已允许上网"),
+                              detail: name.isEmpty ? client.displayName : name)
+        dismiss()
+        await model.manualRefresh()
     }
 }
 

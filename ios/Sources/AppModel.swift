@@ -1311,6 +1311,19 @@ private struct NetVap {
             clientsByIface[ifname] = count
         }
 
+        // ---- 黑名单：哪些设备被禁止上网 ----
+        //
+        // `gl-black_white_list` 就是 GL 官方 App 里那个「阻止入网」：内核模块读
+        // `/proc/gl-black_white_list/control`，配置面是这一段的一个个 `list mac`。
+        // 这里只当只读事实用——设备行上要能看出「这台已经被拦了」，
+        // 否则改完看不出效果，用户会以为写操作没生效。
+        var blocked: [String] = []
+        for (key, value) in uciValues(sections["BLACK"] ?? "")
+        where key.hasSuffix(".mac") && !value.isEmpty {
+            blocked.append(value.uppercased())
+        }
+        info.blockedMACs = blocked
+
         var clients: [NetClient] = []
         for rawLine in (sections["CLIENTS"] ?? "").split(separator: "\n") {
             let text = String(rawLine).trimmingCharacters(in: .whitespaces)
@@ -1327,6 +1340,7 @@ private struct NetVap {
             client.totalTx = looseNumber(object["total_tx"]) ?? 0
             client.onlineTime = looseNumber(object["online_time"]) ?? 0
             client.signal = signalByMAC[client.mac] ?? 0
+            client.blocked = blocked.contains(client.mac)
             clients.append(client)
         }
         clients.sort { left, right in
@@ -1391,6 +1405,13 @@ private struct NetVap {
             band.up = !radioOff && band.ssidOn
             band.channel = Int(wifi["wireless.\(radio).channel"] ?? "") ?? 0
             band.width = widthDigits(wifi["wireless.\(radio).htmode"] ?? "")
+            // 写回配置要用的三样：段名、当前密码、是否隐藏。
+            band.radio = radio
+            band.section = main?.section ?? ""
+            if let sec = main?.section, !sec.isEmpty {
+                band.key = wifi["wireless.\(sec).key"] ?? ""
+                band.hidden = (wifi["wireless.\(sec).hidden"] ?? "0") == "1"
+            }
 
             // 台数：这个 radio 下**所有** VAP 的关联客户端加起来。只数主 SSID 会漏掉
             // 连在访客 / IoT / MLO 上的设备（官方客户端列表不分 VAP，这里也别分）。
@@ -1449,6 +1470,188 @@ private struct NetVap {
         if let value = any as? String { return Double(value) }
         return nil
     }
+
+    // MARK: - 网络页的写操作
+    //
+    // 这一页原来只读，用户 2026-11-15 要求「要能修改」。能改的四件事都写路由器
+    // 自己的配置，和 GL 官方 App 同一套（不是自己发明的通道）：
+    //   - 无线：`uci set wireless.<段>.*` + `wifi reload`，只 reload 配置，不重启机器；
+    //   - 设备改名：`uci set gl-client.<段>.alias`——官方客户端列表显示的就是 alias；
+    //   - 阻止入网：`gl-black_white_list` 的 `list mac` + 重启那支服务（内核模块读 /proc）；
+    //   - 出口重连：中继先 `repeater reload`，再 `ifdown/ifup <wan|wwan>`。
+    //
+    // 每个写操作都会**回读**：写进去不算成功，`uci get` 读回来对得上才算。
+    // 之前吃过「界面报成功、路由器没动」的亏（段名写错时 uci 只打一行 warning）。
+
+    /// 改一个频段的 Wi-Fi。返回 `nil` 表示成功，否则是要显示给用户的错误文案。
+    @discardableResult
+    func saveBand(_ band: WifiBandInfo, ssid: String, key: String,
+                  hidden: Bool, enabled: Bool) async -> String? {
+        guard connected else { return "还没连上路由器" }
+        guard band.editable else { return "读不到这个频段的配置段名，改不了" }
+
+        let name = ssid.trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.isEmpty { return "Wi-Fi 名称不能为空" }
+        if name.count > 32 { return "Wi-Fi 名称不能超过 32 个字符" }
+
+        // 有密码的那种加密（psk2 / sae-mixed …）才管密码；`none` 时不动 `key`。
+        let needsKey = !band.encryption.isEmpty && band.encryption != "none"
+        let secret = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        let keyChanged = needsKey && secret != band.key
+        if keyChanged, secret.count < 8 || secret.count > 63 {
+            return "密码要 8–63 个字符"
+        }
+
+        var lines: [String] = []
+        lines.append("uci -q set wireless.\(band.section).ssid=\(shQuote(name))")
+        if keyChanged { lines.append("uci -q set wireless.\(band.section).key=\(shQuote(secret))") }
+        lines.append("uci -q set wireless.\(band.section).hidden='\(hidden ? "1" : "0")'")
+        lines.append("uci -q set wireless.\(band.section).disabled='\(enabled ? "0" : "1")'")
+        // 打开时顺手把整个 radio 也拉起来：这台机器出现过「主 SSID 开着、radio 被关」
+        // 的状态，只改 VAP 的话开关看着亮了、信号还是没有。
+        if enabled, !band.radio.isEmpty {
+            lines.append("uci -q set wireless.\(band.radio).disabled='0'")
+        }
+        lines.append("uci -q commit wireless")
+        // 回读三项：名称、隐藏、开关。密码不回读（不把明文再拉到手机上）。
+        lines.append("echo @@SSID; uci -q get wireless.\(band.section).ssid")
+        lines.append("echo @@HIDDEN; uci -q get wireless.\(band.section).hidden")
+        lines.append("echo @@OFF; uci -q get wireless.\(band.section).disabled")
+        // 生效：`wifi reload` 只按新配置重建无线，不动系统时钟、不断 SSH。
+        lines.append("wifi reload >/dev/null 2>&1 && echo @@RELOAD ok || echo @@RELOAD fail")
+        lines.append("echo @@DONE ok")
+
+        do {
+            let sections = parseSections(try await execute(lines.joined(separator: "; "), timeout: 60))
+            guard (sections["DONE"] ?? "").contains("ok") else { return "路由器没有回应，配置可能没写进去" }
+            let readBack = (sections["SSID"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard readBack == name else { return "名称没写进去（读回来是「\(readBack)」）" }
+            let hiddenBack = (sections["HIDDEN"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard hiddenBack == (hidden ? "1" : "0") else { return "隐藏开关没写进去" }
+            let offBack = (sections["OFF"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard offBack == (enabled ? "0" : "1") else { return "启用开关没写进去" }
+            if (sections["RELOAD"] ?? "").contains("fail") {
+                return "配置已保存，但无线没重新加载，重启路由器后才生效"
+            }
+            return nil
+        } catch {
+            return describe(error)
+        }
+    }
+
+    /// 只切某个频段的开关（列表里那个 Toggle 用）。其余字段原样传回去。
+    @discardableResult
+    func setBandEnabled(_ band: WifiBandInfo, _ on: Bool) async -> String? {
+        await saveBand(band, ssid: band.ssid, key: band.key,
+                       hidden: band.hidden, enabled: on)
+    }
+
+    /// 给一台设备改名（写 `gl-client` 的 `alias`，官方 App 显示的也是这一项）。
+    /// 传空字符串等于清掉别名，界面退回 IP / MAC。
+    @discardableResult
+    func renameClient(mac: String, name: String) async -> String? {
+        guard connected else { return "还没连上路由器" }
+        let target = mac.uppercased()
+        guard target.count == 17 else { return "这台设备没有可用的 MAC" }
+        let alias = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if alias.count > 32 { return "名称不能超过 32 个字符" }
+
+        var lines: [String] = []
+        // 先按 MAC 找已有的段；没有就新建一段——GL 自己的客户端表也是这么存的。
+        lines.append("S=$(uci -q show gl-client 2>/dev/null | grep -i \(shQuote(target)) | head -1 | cut -d. -f2)")
+        lines.append("if [ -z \"$S\" ]; then uci -q add gl-client client >/dev/null; S=@client[-1]; uci -q set gl-client.$S.mac=\(shQuote(target)); fi")
+        if alias.isEmpty {
+            lines.append("uci -q delete gl-client.$S.alias")
+        } else {
+            lines.append("uci -q set gl-client.$S.alias=\(shQuote(alias))")
+        }
+        lines.append("uci -q commit gl-client")
+        // 回读时重新按 MAC 找段名：新加的段在提交后索引会变，别拿旧变量去读。
+        lines.append("S2=$(uci -q show gl-client 2>/dev/null | grep -i \(shQuote(target)) | head -1 | cut -d. -f2)")
+        lines.append("echo @@ALIAS; uci -q get gl-client.$S2.alias 2>/dev/null")
+        lines.append("ubus -t 5 call gl-clients sync >/dev/null 2>&1")
+        lines.append("echo @@DONE ok")
+
+        do {
+            let sections = parseSections(try await execute(lines.joined(separator: "; "), timeout: 40))
+            guard (sections["DONE"] ?? "").contains("ok") else { return "路由器没有回应，名称可能没写进去" }
+            let back = (sections["ALIAS"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard back == alias else { return "名称没写进去（读回来是「\(back)」）" }
+            return nil
+        } catch {
+            return describe(error)
+        }
+    }
+
+    /// 禁止 / 允许一台设备上网。
+    ///
+    /// 走 GL 的黑名单：内核模块读 `/proc/gl-black_white_list/control`，
+    /// 配置面是 `gl-black_white_list` 里那一个个 `list mac`，
+    /// 改完必须重启这支服务才会推到内核（直接 `uci commit` 是不生效的）。
+    @discardableResult
+    func setClientBlocked(mac: String, blocked: Bool) async -> String? {
+        guard connected else { return "还没连上路由器" }
+        let target = mac.uppercased()
+        guard target.count == 17 else { return "这台设备没有可用的 MAC" }
+
+        var lines: [String] = []
+        if blocked {
+            lines.append("uci -q add_list gl-black_white_list.black.mac=\(shQuote(target))")
+        } else {
+            lines.append("uci -q del_list gl-black_white_list.black.mac=\(shQuote(target))")
+        }
+        lines.append("uci -q commit gl-black_white_list")
+        lines.append("/etc/init.d/gl-black_white_list restart >/dev/null 2>&1")
+        lines.append("sleep 1")
+        // 回读两处：配置里还有没有这个 MAC、内核名单里挂上了没有。
+        lines.append("echo @@CFG; uci -q show gl-black_white_list 2>/dev/null | grep -ci \(shQuote(target))")
+        lines.append("echo @@KERNEL; grep -ci \(shQuote(target)) /proc/gl-black_white_list/list 2>/dev/null")
+        lines.append("echo @@DONE ok")
+
+        do {
+            let sections = parseSections(try await execute(lines.joined(separator: "; "), timeout: 40))
+            guard (sections["DONE"] ?? "").contains("ok") else { return "路由器没有回应，名单可能没改" }
+            let config = Int(firstLine(sections["CFG"])) ?? 0
+            let kernel = Int(firstLine(sections["KERNEL"])) ?? 0
+            if blocked, config == 0 { return "没写进黑名单" }
+            if !blocked, config > 0 { return "黑名单里还有这台设备" }
+            // 内核那层要等防火墙/驱动下一次同步；写进去了但还没生效时如实说。
+            if blocked, kernel == 0 {
+                return "已加入黑名单，但内核还没挂上，可能要再点一次或重启路由器"
+            }
+            return nil
+        } catch {
+            return describe(error)
+        }
+    }
+
+    /// 重新连接出口。中继先让 repeater 重连一次，再重启 netifd 接口把地址要回来。
+    /// 断网几十秒是正常的（中继要重新握手），界面会等这里跑完再刷新。
+    @discardableResult
+    func reconnectUplink() async -> String? {
+        guard connected else { return "还没连上路由器" }
+        let iface = network.uplinkInterface
+        let lines = [
+            iface == "wwan" ? "ubus -t 10 call repeater reload >/dev/null 2>&1" : "true",
+            "ifdown \(iface) >/dev/null 2>&1",
+            "sleep 1",
+            "ifup \(iface) >/dev/null 2>&1",
+            "sleep 4",
+            "echo @@ROUTE; ip route 2>/dev/null | grep -c '^default'",
+            "echo @@DONE ok"
+        ]
+        do {
+            let sections = parseSections(try await execute(lines.joined(separator: "; "), timeout: 60))
+            guard (sections["DONE"] ?? "").contains("ok") else { return "路由器没有回应" }
+            if (Int(firstLine(sections["ROUTE"])) ?? 0) == 0 {
+                return "已重连，但还没有默认路由——上级 Wi-Fi 或网线可能没准备好"
+            }
+            return nil
+        } catch {
+            return describe(error)
+        }
+    }
+
 
     /// UCI 的 `band`：`2g` / `5g` / `6g`（个别固件写 `2.4g`）。
     private func bandLabel(_ code: String) -> String {
@@ -3484,7 +3687,9 @@ private extension AppModel {
             echo @@DHCPCFG
             uci show dhcp 2>/dev/null
             echo @@WLCFG
-            uci show wireless 2>/dev/null | grep -E '\\.(band|channel|htmode|disabled|ssid|ifname|mode|device|encryption|guest|iot|multi_ap)='
+            uci show wireless 2>/dev/null | grep -E '\\.(band|channel|htmode|disabled|ssid|ifname|mode|device|encryption|guest|iot|multi_ap|key|hidden)='
+            echo @@BLACK
+            uci show gl-black_white_list 2>/dev/null | grep -E '\\.(mac|mode|enable)='
             for d in /sys/class/net/*; do
               n=${d##*/}
               case "$n" in lo|br-*|*.*|ppp*|apcli*|ra*|rai*|rax*|wlan*|sit*|gre*|tun*|tap*|bond*|veth*|docker*|ifb*) continue;; esac
