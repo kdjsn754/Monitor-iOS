@@ -639,18 +639,34 @@ struct NetworkView: View {
             .buttonStyle(.plain)
             .disabled(!group.editable)
 
-            Toggle("", isOn: memberBinding(member))
-                .labelsHidden()
-                .blueSwitch()
-                .disabled(!member.editable)
+            // 写入期间把开关换成转圈：重启无线要 6~8 秒（见 `reloadWireless`），
+            // 只把开关置灰的话看着就是「点了没反应」。
+            if busyGroups.contains(member.id) {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 51, height: 31)
+            } else {
+                Toggle("", isOn: memberBinding(member))
+                    .labelsHidden()
+                    .blueSwitch()
+                    .disabled(!member.editable)
+            }
         }
     }
 
     private func groupToggle(_ group: WifiNetGroup) -> some View {
-        Toggle("", isOn: groupBinding(group))
-            .labelsHidden()
-            .blueSwitch()
-            .disabled(!group.editable || busyGroups.contains(group.kind.rawValue))
+        Group {
+            if busyGroups.contains(group.kind.rawValue) {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 51, height: 31)
+            } else {
+                Toggle("", isOn: groupBinding(group))
+                    .labelsHidden()
+                    .blueSwitch()
+                    .disabled(!group.editable)
+            }
+        }
     }
 
     /// 组开关的绑定：先按住开关（`busyGroups`），写完刷新再放开。

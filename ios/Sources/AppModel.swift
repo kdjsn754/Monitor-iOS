@@ -1863,8 +1863,10 @@ private struct NetVap {
             lines.append("echo @@HT; uci -q get wireless.\(band.radio).htmode")
             lines.append("echo @@TP; uci -q get wireless.\(band.radio).txpower")
         }
-        // 生效：`wifi reload` 只按新配置重建无线，不动系统时钟、不断 SSH。
-        lines.append("wifi reload >/dev/null 2>&1 && echo @@RELOAD ok || echo @@RELOAD fail")
+        // 生效：`wifi reload` 单独发，不在这条命令里。
+        // 以前这里写着「只按新配置重建无线，不动系统时钟、不断 SSH」——**断不断 SSH
+        // 跟时钟没关系**：手机连的就是这台路由器，reload 一跑连接就断，后面的
+        // `@@DONE ok` 收不到，于是误判成「没写进去」。见 `reloadWireless`。
         lines.append("echo @@DONE ok")
 
         do {
@@ -1890,9 +1892,7 @@ private struct NetVap {
                 let back = (sections["TP"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 guard back == String(power) else { return "发射功率没写进去（读回来是「\(back)」）" }
             }
-            if (sections["RELOAD"] ?? "").contains("fail") {
-                return "配置已保存，但无线没重新加载，重启路由器后才生效"
-            }
+            await reloadWireless()
             return nil
         } catch {
             return describe(error)
@@ -1938,6 +1938,12 @@ private struct NetVap {
         lines.append("uci -q commit wireless")
         if !net.isEmpty { lines.append("uci -q commit network") }
 
+        // 桥接先起：`ifup guest` 会建 `br-guest`，hostapd 重启时才有地方挂 VAP。
+        // 顺序很重要——放在 `wifi reload` 之后的话，VAP 起来时桥还不存在。
+        if !net.isEmpty {
+            lines.append("\(on ? "ifup" : "ifdown") \(net) >/dev/null 2>&1")
+        }
+
         // 回读：每条成员的 disabled、mld0、独立 network 段都要对上。
         var expect: [(String, String)] = []
         for member in group.members where !member.section.isEmpty {
@@ -1951,11 +1957,6 @@ private struct NetVap {
         if !net.isEmpty {
             expect.append((net, off))
             lines.append("echo \"@@RB \(net) $(uci -q get network.\(net).disabled)\"")
-        }
-        lines.append("wifi reload >/dev/null 2>&1 && echo @@RELOAD ok || echo @@RELOAD fail")
-        // 网桥启停：只改 uci 不 ifup，DHCP 不会重新起来。
-        if !net.isEmpty {
-            lines.append("\(on ? "ifup" : "ifdown") \(net) >/dev/null 2>&1")
         }
         lines.append("echo @@DONE ok")
 
@@ -1972,14 +1973,40 @@ private struct NetVap {
                 let got = readBack[name] ?? "空"
                 return "「\(name)」没写进去（读回来是「\(got)」）"
             }
-            if text.contains("@@RELOAD fail") {
-                return "配置已保存，但无线没重新加载，重启路由器后才生效"
-            }
+            // 配置已经确认写进去了，最后才重启无线（这一步会断线，见 reloadWireless）
+            await reloadWireless()
             // 界面自己 refresh（saveBand 的做法一致），这里不重复采一轮
             return nil
         } catch {
             return describe(error)
         }
+    }
+
+    /// 重启无线，让刚写的配置真正生效。
+    ///
+    /// **这一步一定会把 App 自己的连接掐断**：手机连的就是这台路由器的 Wi-Fi，
+    /// `wifi reload` 会把所有 AP 停掉再拉起来（实测 3~6 秒）。
+    ///
+    /// v3.0.9 之前 `wifi reload`、回读、`@@DONE ok` 串在同一条命令里，于是：
+    /// reload 一执行连接就断，后半段回读和 DONE 全收不到 → `text` 里没有 `@@DONE` →
+    /// 判成「路由器没有回应，配置可能没写进去」→ 开关弹回原位。
+    /// 用户看到的就是「开关不生效」（2026-11-16 03:30 三个开关全中）。
+    /// 实际上配置早就写进去了——**这就是修之前的真 bug**。
+    ///
+    /// 所以现在：写配置与重启分成两条命令，前一条只做 UCI 并回读（不会断线），
+    /// 这一条**不等结果**（`try?`），断线是预期现象；随后主动丢掉旧会话、
+    /// 等 AP 起来再重连，否则之后每一拍采集都会拿死会话报错。
+    private func reloadWireless() async {
+        // 断线这几秒里别让轮询拿死会话去撞：先停掉，reconnect 成功后它会自己重开。
+        pollTask?.cancel()
+        pollTask = nil
+        _ = try? await execute("wifi reload >/dev/null 2>&1", timeout: 20)
+        // 旧会话已经随无线一起没了，显式丢掉，让下一步的 connect 从干净状态开始。
+        ssh.disconnect()
+        // 8 秒 = AP 自己回来（3~6 秒）+ iOS 重新连上 Wi-Fi（2~4 秒）。宁可多等一秒，
+        // 也别在 AP 还没起来的时候去连——那会直接弹一个「连接中断」的红字。
+        try? await Task.sleep(nanoseconds: 8_000_000_000)
+        await reconnect(force: true)
     }
 
     /// 改一组网络的名称 / 密码 / 隐藏。返回 `nil` 表示成功。
@@ -2022,7 +2049,6 @@ private struct NetVap {
             sections.append(member.section)
             lines.append("echo \"@@RB \(member.section) $(uci -q get wireless.\(member.section).ssid)\"")
         }
-        lines.append("wifi reload >/dev/null 2>&1 && echo @@RELOAD ok || echo @@RELOAD fail")
         lines.append("echo @@DONE ok")
 
         do {
@@ -2038,9 +2064,8 @@ private struct NetVap {
             for section in sections where readBack[section] != name {
                 return "名称没写进去（「\(section)」读回来是「\(readBack[section] ?? "空")」）"
             }
-            if text.contains("@@RELOAD fail") {
-                return "配置已保存，但无线没重新加载，重启路由器后才生效"
-            }
+            // 改名也要重建无线才对外可见；这一步会断线，见 reloadWireless
+            await reloadWireless()
             // 界面自己 refresh（saveBand 的做法一致），这里不重复采一轮
             return nil
         } catch {
@@ -2086,7 +2111,7 @@ private struct NetVap {
             lines.append("uci -q set network.\(net).disabled='0'")
             lines.append("uci -q commit wireless")
             lines.append("uci -q commit network")
-            lines.append("wifi reload >/dev/null 2>&1")
+            // 桥接先起（不碰无线），hostapd 重启时才有地方挂 VAP。
             lines.append("ifup \(net) >/dev/null 2>&1")
             lines.append("echo \"@@RB \(net) $(uci -q get network.\(net).disabled)\"")
             lines.append("echo @@DONE ok")
@@ -2094,6 +2119,8 @@ private struct NetVap {
             let text = try await execute(lines.joined(separator: "; "), timeout: 90)
             guard text.contains("@@DONE ok") else { return "路由器没有回应，配置可能没写进去" }
             guard text.contains("@@RB \(net) 0") else { return "网络没启用成功，请稍后再试" }
+            // 新建的网络要靠重启无线才对外广播；这一步会断线，见 reloadWireless
+            await reloadWireless()
             // 界面自己 refresh（saveBand 的做法一致），这里不重复采一轮
             return nil
         } catch {
