@@ -556,39 +556,30 @@ struct OverviewView: View {
         .background { Capsule().fill(color.opacity(0.10)) }
     }
 
-    /// 概览里的一台设备：圆底图标 + 名称 + 「地址 · 接入」，右边是实时下载速率。
+    /// 概览里的一台设备：圆底图标 + 名称 + 「地址 · 接入」，右边是速率与累计流量。
+    ///
     /// 行里不再放箭头——整段底部那一行才是入口，逐行加箭头会到处是尖角。
+    /// 右侧与网络页「设备」用同一个 `ClientMetricColumn`，两页数字才对得上，
+    /// 副标题也换成了同一个 `ClientDetailLine`（去掉设备类型、长度规整）。
     private func deviceRow(_ client: NetClient) -> some View {
         let tint = client.wired ? NetPalette.wired : NetPalette.wifi
-        var bits: [String] = []
-        if !client.ip.isEmpty { bits.append(client.ip) }
-        if !client.iface.isEmpty { bits.append(client.iface) }
-        if !client.deviceClass.isEmpty { bits.append(client.classLabel) }
         return HStack(spacing: 10) {
             Image(systemName: client.icon)
                 .font(.system(size: 12.5, weight: .medium))
                 .foregroundStyle(tint)
-                .frame(width: 30, height: 30)
+                .frame(width: 28, height: 28)
                 .background { Circle().fill(tint.opacity(0.12)) }
             VStack(alignment: .leading, spacing: 2) {
                 Text(client.displayName)
-                    .font(.system(size: 14.5))
+                    .font(.system(size: 15))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
-                Text(bits.isEmpty ? client.mac : bits.joined(separator: " · "))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+                ClientDetailLine(client: client)
             }
-            Spacer(minLength: 6)
-            if !client.rateLabel.isEmpty {
-                Text(client.rateLabel)
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(tint)
-                    .monospacedDigit()
-            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .layoutPriority(1)
+
+            ClientMetricColumn(client: client, rateColor: tint)
         }
         .padding(.vertical, 9)
         .contentShape(Rectangle())

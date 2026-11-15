@@ -484,13 +484,17 @@ struct NetworkView: View {
     /// 无线四组：主网络 / 访客网络 / IoT 网络 / 多链路，做成**一块块瓦片**摆在
     /// 同一张「无线」卡里。
     ///
-    /// 走过的三版，别退回去：
+    /// 走过的四版，别退回去：
     /// - v3.0.0 每组一张卡，四块白底各带标题铺满一屏（用户：「不要全散落在这个界面」）；
     /// - v3.0.1 合成一张但压成「60pt 灰组名列 + 灰 SSID + 开关」的密表格，
     ///   两层灰叠在一起没层次，主网络第二行还空出一截（用户：「太丑了」）；
-    /// - **v3.0.2 现在这版**：四块瓦片。主网络、多链路各占一整行，访客与 IoT 并排；
-    ///   瓦片底色用 `tertiarySystemGroupedBackground`，比卡片浅一档，
-    ///   块感和上面拓扑那三片叶子是一套语言，不靠文字对齐取胜。
+    /// - v3.0.2 用 `LazyVGrid` + `.gridCellColumns(2)` 想让主网络占整行——**这个修饰符
+    ///   只对 `Grid` 生效，`LazyVGrid` 没有跨列这回事**。结果四块全成半宽：主网络被挤成
+    ///   「2.4 GHz …」、SSID 一个字都看不见，右边还空出半块（用户 2026-11-16：
+    ///   「实际是这样的很乱」）；
+    /// - **v3.0.3 现在这版**：不用网格，直接 VStack 排——主网络整行、访客与 IoT 并排、
+    ///   多链路整行。宽度是写死的，不靠网格猜跨列。瓦片底色仍用
+    ///   `tertiarySystemGroupedBackground`，比卡片浅一档。
     ///
     /// 分组本身照 GL 官方 App（用户 2026-11-15「全量对齐」），但**不搬它那些灰色
     /// 说明文字**——2026-10-31 定的规矩：页面上不放解释性小字。
@@ -498,21 +502,25 @@ struct NetworkView: View {
     /// 主网络按频段各给一个开关：这台机器常见「5G 开、2.4G 关」，整组一个开关表达不了。
     /// 访客 / IoT / 多链路是整组一个开关，因为它们的 2.4G 与 5G 本来就是同一个名字。
     private var wifiCard: some View {
-        let total = info.wifiGroups.reduce(0) { $0 + $1.clients }
+        let groups = info.wifiGroups
+        let total = groups.reduce(0) { $0 + $1.clients }
+        let main = groups.first { $0.kind == .main }
+        let sides = groups.filter { $0.kind == .guest || $0.kind == .iot }
+        let mlo = groups.first { $0.kind == .mlo }
         return card("无线", trailing: total > 0 ? "\(total) 台" : "") {
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 8),
-                                GridItem(.flexible())],
-                      alignment: .leading,
-                      spacing: 8) {
-                ForEach(info.wifiGroups) { group in
-                    // 主网络要装两行频段、多链路要装完整 SSID，都占满整行；
-                    // 访客和 IoT 各半行并排。
-                    switch group.kind {
-                    case .main, .mlo:
-                        wifiTile(group).gridCellColumns(2)
-                    case .guest, .iot:
-                        wifiTile(group)
+            VStack(spacing: 8) {
+                if let main = main {
+                    wifiTile(main)
+                }
+                if !sides.isEmpty {
+                    HStack(alignment: .top, spacing: 8) {
+                        ForEach(sides) { group in
+                            wifiTile(group)
+                        }
                     }
+                }
+                if let mlo = mlo {
+                    wifiTile(mlo)
                 }
             }
             .padding(.top, 6)
@@ -528,17 +536,13 @@ struct NetworkView: View {
                 Text(group.kind.title)
                     .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(.primary)
+                    .lineLimit(1)
                 Spacer(minLength: 2)
 
-                if group.kind == .main {
-                    // 主网络的开关在下面每个频段上，头行只报台数。
-                    if group.clients > 0 {
-                        Text("\(group.clients) 台")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                    }
-                } else if !group.members.isEmpty {
+                // 主网络的开关在下面每个频段上，头行只留组名。
+                // 台数不在这里重复一遍——卡片标题右上角已经有总数了（v3.0.2 两处都写，
+                // 同一个数字讲两遍，看着更乱）。
+                if group.kind != .main && !group.members.isEmpty {
                     groupToggle(group)
                 }
             }
@@ -596,21 +600,27 @@ struct NetworkView: View {
     }
 
     /// 主网络瓦片里的一个频段：频段名 + SSID + 独立开关。
+    ///
+    /// 频段名以前是 `.tertiary` + 46pt 死宽，半宽瓦片里连「2.4 GHz」都放不下、
+    /// 名字又淡得快要看不见（v3.0.2 实机截图）。现在改成 `.secondary`、`fixedSize`
+    /// 保住频段名不被压，宽度交给 SSID——主网络整行了，SSID 有地方站。
     private func tileBandRow(_ member: WifiBandInfo, group: WifiNetGroup) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             Button {
                 editingGroup = group
             } label: {
-                HStack(spacing: 6) {
+                HStack(spacing: 8) {
                     Text(member.bandName)
                         .font(.system(size: 12))
-                        .foregroundStyle(.tertiary)
-                        .frame(width: 46, alignment: .leading)
+                        .foregroundStyle(.secondary)
+                        .fixedSize()
+                        .frame(minWidth: 44, alignment: .leading)
                     Text(member.ssid.isEmpty ? "—" : member.ssid)
                         .font(.system(size: 13))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                         .truncationMode(.middle)
+                        .layoutPriority(1)
                     Spacer(minLength: 2)
                 }
                 .contentShape(Rectangle())
@@ -719,16 +729,9 @@ struct NetworkView: View {
     }
 
     private func clientRow(_ client: NetClient) -> some View {
-        // 第二行是「地址 · 接入 · 设备类型」，右侧留给速率与累计流量
-        // （在线时才变的那两个数）。设备类型是官方 App 判好的 `gl-client.class`，
-        // 没归类就不占位；信号不再显示——官方接口里没有这一项，抓 iwinfo 又对不上 MAC。
-        var bits: [String] = []
-        if !client.ip.isEmpty { bits.append(client.ip) }
-        if !client.iface.isEmpty { bits.append(client.iface) }
-        if !client.deviceClass.isEmpty { bits.append(client.classLabel) }
-        if !client.reservedIP.isEmpty { bits.append("固定") }
-        let detail = bits.isEmpty ? client.mac : bits.joined(separator: " · ")
-
+        // 名字下面只留「地址 · 接入」两段，设备类型交给左边那个图标
+        // （`client.icon` 就是按 `gl-client.class` 给的，再写一遍纯占长度）。
+        // 右侧两列数字走 `ClientMetricColumn`，和概览的「连接设备」是同一个视图。
         return HStack(spacing: 10) {
             Image(systemName: client.icon)
                 .font(.system(size: 13, weight: .medium))
@@ -752,24 +755,12 @@ struct NetworkView: View {
                             }
                     }
                 }
-                Text(detail)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+                ClientDetailLine(client: client)
             }
-            Spacer(minLength: 6)
-            VStack(alignment: .trailing, spacing: 2) {
-                Text(client.online ? client.rateLabel : "离线")
-                    .font(.system(size: 13))
-                    .foregroundStyle(client.online ? rowColor(client) : Color.secondary)
-                    .monospacedDigit()
-                Text(client.trafficLabel)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .layoutPriority(1)
+
+            ClientMetricColumn(client: client, rateColor: rowColor(client))
             Image(systemName: "chevron.right")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Color(.tertiaryLabel))
@@ -1290,6 +1281,11 @@ private struct ClientEditorSheet: View {
     @State private var address: String
     @State private var busy = false
     @State private var errorText: String?
+    /// 设备类型是**点一下就直接写**的，不跟「保存」走：官方 App 也是单独一个弹窗，
+    /// 选完立即生效。写成功才更新这里，失败保持原值。
+    @State private var classValue: String
+    @State private var pickingClass = false
+    @State private var savingClass = false
 
     private let originalName: String
 
@@ -1301,6 +1297,7 @@ private struct ClientEditorSheet: View {
         _blocked = State(initialValue: client.blocked)
         _pinned = State(initialValue: !client.reservedIP.isEmpty)
         _address = State(initialValue: client.reservedIP.isEmpty ? client.ip : client.reservedIP)
+        _classValue = State(initialValue: client.deviceClass)
     }
 
     var body: some View {
@@ -1354,12 +1351,28 @@ private struct ClientEditorSheet: View {
                             .foregroundStyle(.secondary)
                     }
                     .adaptiveRowBackground()
-                    HStack {
-                        Text("设备类型")
-                        Spacer(minLength: 8)
-                        Text(client.classLabel)
-                            .foregroundStyle(.secondary)
+                    Button {
+                        pickingClass = true
+                    } label: {
+                        HStack(spacing: 8) {
+                            Text("设备类型")
+                                .foregroundStyle(Color.primary)
+                            Spacer(minLength: 8)
+                            if savingClass {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Text(shownClass)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(Color(.tertiaryLabel))
+                        }
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
+                    .disabled(savingClass)
                     .adaptiveRowBackground()
                     HStack {
                         Text("MAC")
@@ -1437,6 +1450,33 @@ private struct ClientEditorSheet: View {
                 }
             }
         }
+        .sheet(isPresented: $pickingClass) {
+            ClientClassSheet(current: classValue) { picked in
+                pickingClass = false
+                Task { await applyClass(picked) }
+            }
+        }
+    }
+
+    /// 行里显示的类型名：认得的走官方文案，认不得（设备还没类型）就说有线 / 无线。
+    private var shownClass: String {
+        if let known = ClientClass(rawValue: classValue) { return known.title }
+        return client.classLabel
+    }
+
+    /// 选完立刻写，不走「保存」——类型是独立的配置，跟名称/地址那几项没有先后关系。
+    private func applyClass(_ value: String) async {
+        guard !savingClass else { return }
+        savingClass = true
+        errorText = nil
+        let problem = await model.setClientClass(mac: client.mac, value: value)
+        savingClass = false
+        if let problem {
+            errorText = problem
+        } else {
+            classValue = value
+            await model.manualRefresh()
+        }
     }
 
     private func save() async {
@@ -1475,6 +1515,57 @@ private struct ClientEditorSheet: View {
                               detail: trimmed.isEmpty ? client.displayName : trimmed)
         dismiss()
         await model.manualRefresh()
+    }
+}
+
+/// 「设备类型」选择器。
+///
+/// 照官方 App 的「修改客户端设备」：一列类型、当前项打勾，点一下就写回，
+/// 不等详情页那个「保存」——类型和名称/地址是各自独立的配置。
+private struct ClientClassSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let current: String
+    let pick: (String) -> Void
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    ForEach(ClientClass.allCases, id: \.rawValue) { item in
+                        Button {
+                            pick(item.rawValue)
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: item.icon)
+                                    .font(.system(size: 14, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 24, alignment: .center)
+                                Text(item.title)
+                                    .foregroundStyle(Color.primary)
+                                Spacer(minLength: 8)
+                                if item.rawValue == current {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundStyle(Color.accentColor)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .adaptiveRowBackground()
+                    }
+                }
+            }
+            .themedFormBackground()
+            .navigationTitle("设备类型")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("取消") { dismiss() }
+                        .navBarTint()
+                }
+            }
+        }
     }
 }
 

@@ -483,48 +483,77 @@ struct NetClient: Identifiable, Equatable {
 
     var wired: Bool { iface == "有线" }
 
-    /// 设备类型的中文名，直接照官方 App 的 `client_*` 文案。
+    /// 设备类型的中文名。取值照官方固件 `/www/i18n/gl-sdk4-ui-clients.*.json`
+    /// 里的 `clients.*` 键——固件前端就是 `t('clients.' + class)`，键和 class
+    /// 是同一套字符串。以前这里抄的是 `gamepad` / `homeAppliances` / `router`
+    /// 这些猜出来的名字，固件根本不发（2026-11-16 核对语言包时发现的）。
     var classLabel: String {
-        switch deviceClass {
-        case "phone": return "手机"
-        case "pad": return "平板电脑"
-        case "laptop": return "笔记本"
-        case "computer": return "电脑"
-        case "television": return "电视"
-        case "camera": return "相机"
-        case "sound": return "音响"
-        case "printer": return "打印机"
-        case "watch": return "可穿戴设备"
-        case "gamepad": return "游戏机"
-        case "homeAppliances": return "智能家电"
-        case "router": return "网关"
-        case "nas": return "NAS"
-        case "server": return "服务器"
-        case "switch": return "交换机"
-        case "": return wired ? "有线设备" : "无线设备"
-        default: return deviceClass
-        }
+        if let known = ClientClass(rawValue: deviceClass) { return known.title }
+        if deviceClass.isEmpty { return wired ? "有线设备" : "无线设备" }
+        return deviceClass
     }
 
     /// 设备行左边那个图标：优先用官方给的类型，认不出来再按有线 / 无线分。
     var icon: String {
-        switch deviceClass {
-        case "phone": return "iphone"
-        case "pad": return "ipad"
-        case "laptop": return "laptopcomputer"
-        case "computer": return "desktopcomputer"
-        case "television": return "tv"
-        case "camera": return "video"
-        case "sound": return "hifispeaker"
-        case "printer": return "printer"
-        case "watch": return "applewatch"
-        case "gamepad": return "gamecontroller"
-        case "homeAppliances": return "lightbulb"
-        case "router": return "wifi.router"
-        case "nas": return "externaldrive"
-        case "server": return "server.rack"
-        case "switch": return "network"
-        default: return wired ? "cable.connector" : "wifi"
+        if let known = ClientClass(rawValue: deviceClass) { return known.icon }
+        return wired ? "cable.connector" : "wifi"
+    }
+}
+
+/// 官方固件支持的设备类型。
+///
+/// 原始值、中文名、顺序都照官方客户端语言包
+/// （`/www/i18n/gl-sdk4-ui-clients.zh-cn.json` 的 `clients` 段），也就是官方 App
+/// 那个「修改客户端设备」弹窗里能选的 13 项。选中后写回
+/// `/etc/config/gl-client` 里那台设备的 `class`。
+enum ClientClass: String, CaseIterable {
+    case phone
+    case pad
+    case laptop
+    case computer
+    case television
+    case camera
+    case sound
+    case printer
+    case watch
+    case games
+    case smartAppliances = "smart_appliances"
+    case gateway
+    case unknown
+
+    var title: String {
+        switch self {
+        case .phone: return "手机"
+        case .pad: return "平板电脑"
+        case .laptop: return "笔记本电脑"
+        case .computer: return "台式电脑"
+        case .television: return "电视机"
+        case .camera: return "摄像头"
+        case .sound: return "音响"
+        case .printer: return "打印机"
+        case .watch: return "可穿戴设备"
+        case .games: return "游戏机"
+        case .smartAppliances: return "智能家电"
+        case .gateway: return "网关"
+        case .unknown: return "未知"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .phone: return "iphone"
+        case .pad: return "ipad"
+        case .laptop: return "laptopcomputer"
+        case .computer: return "desktopcomputer"
+        case .television: return "tv"
+        case .camera: return "video"
+        case .sound: return "hifispeaker"
+        case .printer: return "printer"
+        case .watch: return "applewatch"
+        case .games: return "gamecontroller"
+        case .smartAppliances: return "lightbulb"
+        case .gateway: return "wifi.router"
+        case .unknown: return "questionmark.circle"
         }
     }
 }

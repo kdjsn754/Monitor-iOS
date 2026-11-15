@@ -2382,6 +2382,50 @@ private struct NetVap {
         }
     }
 
+    /// 改一台设备的类型。
+    ///
+    /// 固件的 `gl-clients` ubus **没有 set 接口**（`ubus -v list gl-clients` 只有
+    /// list / sync / remove_offline / clean_traffic…），类型只躺在
+    /// `/etc/config/gl-client` 的 `class` 里，所以直接改 UCI 再 commit——
+    /// 官方 App 那个「修改客户端设备」写的是同一个地方。
+    /// 这台设备还没有配置段时（固件还没给它建档）现建一个，只写 mac + class。
+    @discardableResult
+    func setClientClass(mac: String, value: String) async -> String? {
+        guard connected else { return "还没连上路由器" }
+        let target = mac.uppercased()
+        guard target.count == 17 else { return "这台设备没有可用的 MAC" }
+        guard let picked = ClientClass(rawValue: value) else { return "不认识这个设备类型" }
+
+        // 段名形如 `gl-client.@client[2]`。锚定行首再按 MAC 找第一条，
+        // 然后只留前两段——不锚定的话 mac 值里也有点，`cut` 会切错位置。
+        //
+        // ⚠️ 赋值时**不能**再套 shell 单引号：`uci set "x.class='phone'"`
+        // 里那对单引号在双引号内是字面量，uci 会把引号一起存进配置
+        // （2026-11-16 在路由器上试出来的，回读是 `'laptop'` 而不是 `laptop`）。
+        // `@client[-1]` 里的方括号也一样要用双引号包住，否则 shell 当通配符。
+        let pattern = "^gl-client\\.[^.]*\\.mac='" + target + "'$"
+        var lines: [String] = []
+        lines.append("S=$(uci -q show gl-client 2>/dev/null | grep -i \(shQuote(pattern)) | cut -d. -f1,2 | head -1)")
+        lines.append("[ -n \"$S\" ] && uci -q set \"$S.class=\(picked.rawValue)\"")
+        lines.append("[ -z \"$S\" ] && uci -q add gl-client client && uci -q set \"gl-client.@client[-1].mac=\(target)\" && uci -q set \"gl-client.@client[-1].class=\(picked.rawValue)\"")
+        lines.append("uci -q commit gl-client")
+        // 回读：段存在就读段里的值，新建的读最后一段。读到什么才算数，不听 exit code。
+        lines.append("echo @@CLS; [ -n \"$S\" ] && uci -q get \"$S.class\"; [ -z \"$S\" ] && uci -q get \"gl-client.@client[-1].class\"")
+        lines.append("echo @@DONE ok")
+
+        do {
+            let sections = parseSections(try await execute(lines.joined(separator: "; "), timeout: 40))
+            guard (sections["DONE"] ?? "").contains("ok") else { return "路由器没有回应，类型可能没改" }
+            let written = firstLine(sections["CLS"])
+            if written != picked.rawValue {
+                return "回读到的类型是「\(written.isEmpty ? "空" : written)」，没写进去"
+            }
+            return nil
+        } catch {
+            return describe(error)
+        }
+    }
+
     /// 给一台设备绑一个固定的局域网地址（DHCP 保留地址），传空字符串表示取消。
     ///
     /// 写的是 `dhcp` 里的 `host` 段——`config host` 的 `mac` + `ip` 就是 OpenWrt
@@ -4745,6 +4789,16 @@ private extension AppModel {
 }
 
 func formatBytes(_ value: Double) -> String {
+    let parts = splitBytes(value)
+    return "\(parts.number) \(parts.unit)"
+}
+
+/// 把字节数拆成「数值」「单位」两段，给列表右列的分列对齐用。
+///
+/// 设备行右侧那两列（实时速率、累计流量）必须**数字右对齐、单位单独一列**。
+/// 整串右对齐时，`378 B/s` 和 `42.9 KB/s` 宽度差好几个字符，箭头和单位
+/// 一列一列都错开，看着就是歪的（用户 2026-11-16：「网速长短不一样看着很乱」）。
+func splitBytes(_ value: Double) -> (number: String, unit: String) {
     let units = ["B", "KB", "MB", "GB", "TB"]
     var number = max(0, value)
     var index = 0
@@ -4752,7 +4806,7 @@ func formatBytes(_ value: Double) -> String {
         number /= 1024
         index += 1
     }
-    return String(format: index == 0 ? "%.0f %@" : "%.1f %@", number, units[index])
+    return (String(format: index == 0 ? "%.0f" : "%.1f", number), units[index])
 }
 
 /// 闪存容量：单位规则和 `formatBytes` 完全一致，只有一处不同——
