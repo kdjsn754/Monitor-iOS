@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// 网络页（v2.6.5 新增；v2.6.7 顶部换拓扑树；v2.6.8 按官方 App 补字段；
-/// v2.7.0 这一页可写；v2.8.0 补实时速率 / 累计流量 / 会话数，并把可改的项补全）。
+/// v2.7.0 这一页可写；v2.8.0 补实时速率 / 累计流量 / 会话数；
+/// v2.8.1 设备信息只走官方接口；v2.8.2 拓扑图重画并把「无线」卡并进图里）。
 ///
 /// **数据来自 `PollItem.network` 那一条采集脚本**（`ubus` / `uci` / `iwinfo` /
 /// `gl-clients`），字段组织照 GL.iNet 官方 App 的 `internet_*` / `client_*` / `eth_*` /
@@ -9,12 +10,13 @@ import SwiftUI
 ///
 /// **能改的六件事**（都写路由器自己的配置，和官方 App 同一套通道）：
 ///   - 无线：名称 / 密码 / 隐藏 / 启用 / 信道 / 频宽 / 发射功率（`uci wireless` + `wifi reload`）；
-///   - 频段开关（列表里那个 Toggle，一步到位不弹窗）；
 ///   - 设备：改名（`gl-client.alias`）、固定地址（`dhcp` 的 host 段）、阻止入网（GL 黑名单）；
 ///   - 清掉离线记录（`gl-clients remove_offline`）；
 ///   - 出口重连（中继先 `repeater reload`，再 `ifdown/ifup`）。
 ///
-/// **版式四块**：拓扑 → 上网 → 无线 → 设备 → 局域网与端口。
+/// **版式**：拓扑 → 上网 → 设备 → 局域网与端口。
+/// 「无线」不再是单独一张卡：频段节点长在拓扑图上（名称、信道、频宽、台数），
+/// 点节点进编辑页，启用开关也在那一页。
 /// 被动信息进多列网格（标签在上、值在下），只有能点的地方才排成整行。
 ///
 /// **没有一行说明性小字**（用户 2026-10-31 定的规矩）。
@@ -25,7 +27,6 @@ struct NetworkView: View {
     @State private var clearingOffline = false
     @State private var editingBand: WifiBandInfo?
     @State private var editingClient: NetClient?
-    @State private var togglingBand: String?
 
     private var info: NetworkInfo { model.network }
 
@@ -33,49 +34,59 @@ struct NetworkView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: 16) {
-                    topology
-                    uplinkCard
-                    wifiCard
-                    clientsCard
-                    lanCard
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(spacing: 16) {
+                        // 拓扑图里的节点点一下要么进频段编辑页，要么滚到对应那张卡
+                        // （出口 → 上网卡、有线 → 局域网与端口）。
+                        topology(scroll: { target in
+                            withAnimation(.easeInOut(duration: 0.35)) {
+                                proxy.scrollTo(target, anchor: .center)
+                            }
+                        })
+                        uplinkCard.id(Self.uplinkAnchor)
+                        clientsCard
+                        lanCard.id(Self.lanAnchor)
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.top, 6)
+                    .padding(.bottom, 30)
+                    // 滚动手感与另外三个根页一致（见 ScrollTuning.swift 与 7.1）：
+                    // 长页正常回弹、短页拉不动，都不碰下拉刷新。
+                    .background(ScrollBounceTuning())
                 }
-                .padding(.horizontal, 18)
-                .padding(.top, 6)
-                .padding(.bottom, 30)
-                // 滚动手感与另外三个根页一致（见 ScrollTuning.swift 与 7.1）：
-                // 长页正常回弹、短页拉不动，都不碰下拉刷新。
-                .background(ScrollBounceTuning())
-            }
-            .scrollBounceBehavior(.basedOnSize)
-            // 标题滑到状态栏下面时由系统糊一层，否则硬叠在时间上。
-            .scrollEdgeEffectStyle(.soft, for: .top)
-            // 底栏在 `MainTabs` 上挂了 `.tint(.primary)`，那是往下传的环境值，
-            // 不补这一句整页控件会跟着变黑（v2.1.17 的教训）。
-            .tint(.blue)
-            .background { AppBackground() }
-            .pageChrome("网络") {
-                if refreshing {
-                    ProgressView()
-                        .controlSize(.small)
-                        .frame(width: 38, height: 38)
-                } else {
-                    HeaderButton("arrow.clockwise") {
-                        Task { await refresh() }
+                .scrollBounceBehavior(.basedOnSize)
+                // 标题滑到状态栏下面时由系统糊一层，否则硬叠在时间上。
+                .scrollEdgeEffectStyle(.soft, for: .top)
+                // 底栏在 `MainTabs` 上挂了 `.tint(.primary)`，那是往下传的环境值，
+                // 不补这一句整页控件会跟着变黑（v2.1.17 的教训）。
+                .tint(.blue)
+                .background { AppBackground() }
+                .pageChrome("网络") {
+                    if refreshing {
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(width: 38, height: 38)
+                    } else {
+                        HeaderButton("arrow.clockwise") {
+                            Task { await refresh() }
+                        }
                     }
                 }
-            }
-            .sheet(item: $editingBand) { band in
-                BandEditorSheet(band: band)
-                    .presentationBackground(Color.clear)
-            }
-            .sheet(item: $editingClient) { client in
-                ClientEditorSheet(client: client)
-                    .presentationBackground(Color.clear)
+                .sheet(item: $editingBand) { band in
+                    BandEditorSheet(band: band)
+                        .presentationBackground(Color.clear)
+                }
+                .sheet(item: $editingClient) { client in
+                    ClientEditorSheet(client: client)
+                        .presentationBackground(Color.clear)
+                }
             }
         }
     }
+
+    private static let uplinkAnchor = "net-uplink"
+    private static let lanAnchor = "net-lan"
 
     private func refresh() async {
         guard !refreshing else { return }
@@ -86,176 +97,262 @@ struct NetworkView: View {
 
     // MARK: - 拓扑
 
-    /// 竖着排的一条链路：出口 → 路由器 → 分叉 → 叶子。
-    /// 连线由 `trunk` / `TopoFork` 画，节点各自是独立的小卡片，
-    /// 这样断线只要把那一节变灰，不用重算整张图。
-    private var topology: some View {
+    /// 一张图读完「出口 → 路由器 → 三路」。
+    ///
+    /// **v2.8.2 重画**：原来是三块彼此独立的小卡片加一条直线，看着像列表不像图；
+    /// 这次把原来单独一张「无线」卡也收了进来——频段的名称、信道、台数直接长在
+    /// 叶子节点上，点进去就是那个频段的编辑页（启用开关也在那一页）。
+    ///
+    /// 结构：出口胶囊 → 竖线 → 路由器圆环 → 分叉 → 2.4G / 5G / 有线三片叶子。
+    /// 每个节点都能点：出口 → 上网卡，路由器 / 有线 → 局域网卡，频段 → 编辑页。
+    private func topology(scroll: @escaping (String) -> Void) -> some View {
         let leaves = leafNodes
         return VStack(spacing: 0) {
-            internetNode
-            trunk(ok: info.uplinkOK, color: NetPalette.wan)
-            routerNode
+            internetNode(scroll: scroll)
+            connector(ok: info.uplinkOK)
+            routerHub(scroll: scroll)
             if !leaves.isEmpty {
                 TopoFork(leaves: leaves, spacing: Self.leafSpacing)
                 HStack(alignment: .top, spacing: Self.leafSpacing) {
                     ForEach(leaves) { leaf in
-                        leafNode(leaf)
+                        leafNode(leaf, scroll: scroll)
                     }
                 }
             }
         }
+        .padding(.horizontal, 14)
+        .padding(.top, 18)
+        .padding(.bottom, 16)
         .frame(maxWidth: .infinity)
-        .padding(.top, 4)
+        .background { topologyPanel }
     }
 
-    /// 出口那一个胶囊：走什么方式、上级是谁、什么协议。
-    private var internetNode: some View {
+    /// 图的底：一张圆角卡 + 一层从蓝到青的极淡渐变。
+    /// 有了这层底色，整块读起来是「一张图」，而不是三张并排的白卡。
+    private var topologyPanel: some View {
+        RoundedRectangle(cornerRadius: 24, style: .continuous)
+            .fill(Color(.secondarySystemGroupedBackground))
+            .overlay {
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [NetPalette.wan.opacity(0.12),
+                                     NetPalette.wifi.opacity(0.07),
+                                     Color.clear],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .strokeBorder(Color(.separator).opacity(0.45), lineWidth: 0.6)
+            }
+    }
+
+    /// 出口：一个胶囊，点了滚到「上网」卡（重新连接在那儿）。
+    private func internetNode(scroll: @escaping (String) -> Void) -> some View {
         let on = info.uplinkOK
-        return HStack(spacing: 8) {
-            Image(systemName: info.uplink == .repeater ? "wifi" : "globe")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(on ? NetPalette.wan : Color.secondary)
-            Text(info.uplinkLabel)
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(on ? Color.primary : Color.secondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
-            Text(info.uplink == .none ? "—" : info.protoLabel)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(on ? NetPalette.wan : Color.secondary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background {
-                    Capsule().fill((on ? NetPalette.wan : Color.secondary).opacity(0.12))
-                }
-        }
-        .padding(.horizontal, 13)
-        .padding(.vertical, 8)
-        .background { nodeBackground(radius: 15) }
-        .frame(maxWidth: .infinity, alignment: .center)
-    }
-
-    /// 出口 → 路由器 的那一截竖线。断线时变灰，不画成虚线
-    /// （虚线在 22pt 的高度里看着像没画完）。
-    private func trunk(ok: Bool, color: Color) -> some View {
-        Rectangle()
-            .fill(ok ? color.opacity(0.55) : Color(.systemGray4).opacity(0.8))
-            .frame(width: 1.6, height: 22)
-    }
-
-    /// 中心节点：型号 / 局域网地址 / 实时上下行。整页的视觉重心就是这一块。
-    private var routerNode: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "router")
-                .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(.secondary)
-                .frame(width: 36, height: 36)
-                .background { Circle().fill(Color.primary.opacity(0.055)) }
-            VStack(alignment: .leading, spacing: 2) {
-                Text(deviceName)
-                    .font(.system(size: 15, weight: .semibold))
+        return Button {
+            scroll(Self.uplinkAnchor)
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: info.uplink == .repeater ? "wifi" : "globe")
+                    .font(.system(size: 12, weight: .semibold))
+                Text(info.uplinkLabel)
+                    .font(.system(size: 13.5, weight: .medium))
                     .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Text(info.uplink == .none ? "—" : info.protoLabel)
+                    .font(.system(size: 10, weight: .bold))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background {
+                        Capsule().fill((on ? NetPalette.wan : Color.secondary).opacity(0.14))
+                    }
+            }
+            .foregroundStyle(on ? NetPalette.wan : Color.secondary)
+            .padding(.horizontal, 13)
+            .padding(.vertical, 7)
+            .background {
+                Capsule()
+                    .fill(Color(.systemBackground))
+                    .overlay {
+                        Capsule()
+                            .strokeBorder((on ? NetPalette.wan : Color(.separator)).opacity(0.35),
+                                          lineWidth: 0.8)
+                    }
+                    .shadow(color: Color.black.opacity(0.05), radius: 6, y: 2)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// 出口 → 路由器 的那一截竖线：上深下浅，像光从出口流进路由器；断线整段变灰。
+    private func connector(ok: Bool) -> some View {
+        let stops: [Color] = ok
+            ? [NetPalette.wan.opacity(0.55), NetPalette.wan.opacity(0.10)]
+            : [Color(.systemGray4), Color(.systemGray5)]
+        return Capsule()
+            .fill(LinearGradient(colors: stops, startPoint: .top, endPoint: .bottom))
+            .frame(width: 2, height: 20)
+    }
+
+    /// 中心：路由器画成同心圆环（两道淡环 + 白底内圆），下面是名字、局域网地址、
+    /// 实时上下行两个胶囊。整张图的视觉重心。
+    /// 点了滚到「局域网与端口」——路由器本身的地址、DHCP 都在那张卡里。
+    private func routerHub(scroll: @escaping (String) -> Void) -> some View {
+        Button {
+            scroll(Self.lanAnchor)
+        } label: {
+            VStack(spacing: 5) {
+                ZStack {
+                    Circle()
+                        .fill(NetPalette.wan.opacity(0.09))
+                        .frame(width: 78, height: 78)
+                    Circle()
+                        .strokeBorder(NetPalette.wan.opacity(0.22), lineWidth: 1)
+                        .frame(width: 78, height: 78)
+                    Circle()
+                        .strokeBorder(NetPalette.wan.opacity(0.12), lineWidth: 0.8)
+                        .frame(width: 63, height: 63)
+                    Circle()
+                        .fill(Color(.systemBackground))
+                        .frame(width: 49, height: 49)
+                        .shadow(color: Color.black.opacity(0.08), radius: 7, y: 2)
+                    Image(systemName: "wifi.router")
+                        .font(.system(size: 21, weight: .medium))
+                        .foregroundStyle(NetPalette.wan)
+                }
+                .padding(.bottom, 3)
+                Text(deviceName)
+                    .font(.system(size: 15.5, weight: .semibold))
+                    .foregroundStyle(Color.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
                 Text(info.lanIP.isEmpty ? "—" : info.lanIP)
-                    .font(.system(size: 12))
+                    .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
-                    .lineLimit(1)
+                HStack(spacing: 8) {
+                    speedChip("arrow.down", info.rxSpeed, NetPalette.wan)
+                    speedChip("arrow.up", info.txSpeed, NetPalette.wifi)
+                }
+                .padding(.top, 3)
             }
-            Spacer(minLength: 10)
-            VStack(alignment: .trailing, spacing: 3) {
-                rateLine("arrow.down", info.rxSpeed)
-                rateLine("arrow.up", info.txSpeed)
-            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .contentShape(Rectangle())
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 11)
-        .background {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color(.secondarySystemGroupedBackground))
-                .shadow(color: Color.black.opacity(0.05), radius: 10, y: 3)
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(Color(.separator).opacity(0.5), lineWidth: 0.6)
-        }
+        .buttonStyle(.plain)
     }
 
-    /// 路由器节点右侧一行速率：小箭头 + 数字 + 单位。上下行各一行。
-    private func rateLine(_ symbol: String, _ bytes: Double) -> some View {
+    /// 一个方向的实时速率：小箭头 + 数字 + 单位，套一层同色淡底。
+    private func speedChip(_ symbol: String, _ bytes: Double, _ color: Color) -> some View {
         let parts = speedParts(bytes)
-        return HStack(spacing: 4) {
+        return HStack(spacing: 3) {
             Image(systemName: symbol)
                 .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(.secondary)
             Text(parts.value)
-                .font(.system(size: 17, weight: .medium, design: .rounded))
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .contentTransition(.numericText())
-                .lineLimit(1)
             Text(parts.unit)
                 .font(.system(size: 9, weight: .medium))
-                .foregroundStyle(.secondary)
         }
+        .foregroundStyle(color)
+        .lineLimit(1)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 4)
+        .background { Capsule().fill(color.opacity(0.10)) }
     }
 
     /// 叶子：2.4G / 5G 各一片，最后一片是有线。
+    ///
+    /// 频段那两片就是原来「无线」卡里的一行——名称、信道、台数长在节点上，
+    /// 开关收进编辑页（点节点进去，里面本来就有「启用」）。
     private var leafNodes: [TopoLeaf] {
         var out: [TopoLeaf] = []
         for band in info.bands.prefix(2) {
-            let value: String
-            if !band.up || !band.ssidOn {
-                value = "已关闭"
-            } else if band.channel > 0 {
-                value = "\(band.clients) 台 · CH \(band.channel)"
-            } else {
-                value = "\(band.clients) 台"
-            }
+            let live = band.up && band.ssidOn
+            var caption: [String] = []
+            if live, band.channel > 0 { caption.append("CH \(band.channel)") }
+            if live, !band.width.isEmpty { caption.append("\(band.width)M") }
+            if live { caption.append("\(band.clients) 台") }
             out.append(TopoLeaf(id: band.id,
                                 title: band.bandName,
-                                value: value,
+                                value: band.ssid.isEmpty ? "—" : band.ssid,
+                                caption: caption.isEmpty ? "已关闭" : caption.joined(separator: " · "),
                                 icon: "wifi",
                                 color: NetPalette.wifi,
-                                on: band.up && band.ssidOn))
+                                on: live,
+                                band: band))
         }
+        let upPorts = info.ports.filter(\.up).count
         out.append(TopoLeaf(id: "wired",
                             title: "有线",
                             value: info.wiredOK ? info.bestPortLabel : "未连接",
+                            caption: upPorts > 0 ? "\(upPorts) 个端口" : "—",
                             icon: "cable.connector",
                             color: NetPalette.wired,
-                            on: info.wiredOK))
+                            on: info.wiredOK,
+                            band: nil))
         return out
     }
 
-    private func leafNode(_ leaf: TopoLeaf) -> some View {
-        VStack(spacing: 5) {
-            Image(systemName: leaf.icon)
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(leaf.on ? leaf.color : Color(.systemGray3))
-            Text(leaf.title)
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(leaf.on ? Color.primary : Color.secondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-            Text(leaf.value)
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 9)
-        .background { nodeBackground(radius: 14) }
-    }
-
-    /// 节点底：白底 + 一条细边，与下面几张卡片同一套语言（只是没有阴影）。
-    private func nodeBackground(radius: CGFloat) -> some View {
-        RoundedRectangle(cornerRadius: radius, style: .continuous)
-            .fill(Color(.secondarySystemGroupedBackground))
-            .overlay {
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .strokeBorder(Color(.separator).opacity(0.45), lineWidth: 0.6)
+    /// 一片叶子：彩色圆底图标 + 名称 + 值 + 底下一行小数字。
+    /// 频段点开是编辑页，有线点开滚到「局域网与端口」。
+    private func leafNode(_ leaf: TopoLeaf, scroll: @escaping (String) -> Void) -> some View {
+        Button {
+            if let band = leaf.band {
+                editingBand = band
+            } else {
+                scroll(Self.lanAnchor)
             }
+        } label: {
+            VStack(spacing: 5) {
+                ZStack {
+                    Circle()
+                        .fill(leaf.color.opacity(leaf.on ? 0.15 : 0.07))
+                        .frame(width: 34, height: 34)
+                    Image(systemName: leaf.icon)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(leaf.on ? leaf.color : Color(.systemGray3))
+                }
+                .padding(.bottom, 2)
+                Text(leaf.title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(leaf.on ? Color.primary : Color.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Text(leaf.value)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.65)
+                Text(leaf.caption)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 11)
+            .padding(.horizontal, 4)
+            .background {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color(.systemBackground))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .strokeBorder(leaf.on ? leaf.color.opacity(0.28) : Color(.separator).opacity(0.4),
+                                          lineWidth: 0.8)
+                    }
+                    .shadow(color: Color.black.opacity(0.04), radius: 5, y: 2)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     /// 把 `12.4 MB/s` 拆成数字和单位，数字才能用大字号。
@@ -339,103 +436,6 @@ struct NetworkView: View {
         if dbm >= -55 { return Color(red: 0.13, green: 0.66, blue: 0.38) }
         if dbm >= -70 { return Color(red: 0.90, green: 0.55, blue: 0.10) }
         return Color(red: 0.85, green: 0.25, blue: 0.22)
-    }
-
-    // MARK: - 无线
-
-    private var wifiCard: some View {
-        card("无线") {
-            if info.bands.isEmpty {
-                emptyLine
-            } else {
-                ForEach(info.bands) { band in
-                    if band.id != info.bands.first?.id { divider }
-                    bandRow(band)
-                }
-            }
-        }
-    }
-
-    /// 一行一个频段：左半边点了进编辑，右边是开关。
-    /// 开关直接写配置（不弹窗），因为「关掉 2.4G」是高频动作，不值得两步走。
-    private func bandRow(_ band: WifiBandInfo) -> some View {
-        let live = band.up && band.ssidOn
-        return HStack(spacing: 10) {
-            Button {
-                editingBand = band
-            } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: "wifi")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(live ? NetPalette.wifi : Color(.systemGray3))
-                        .frame(width: 28, height: 28)
-                        .background {
-                            Circle().fill((live ? NetPalette.wifi : Color(.systemGray4)).opacity(0.12))
-                        }
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 5) {
-                            Text(band.bandName)
-                                .font(.system(size: 15))
-                                .foregroundStyle(live ? Color.primary : Color.secondary)
-                            Text(band.ssid.isEmpty ? "—" : band.ssid)
-                                .font(.system(size: 13))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-                        // 第二行：信道 · 频宽 · 功率 · 加密 · 台数。挤在一行是为了
-                        // 让「无线」这一块只有两行高，但该看的数一个不少。
-                        Text(bandDetail(band))
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.75)
-                    }
-                    Spacer(minLength: 6)
-                    Text(band.clients > 0 ? "\(band.clients) 台" : "")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .disabled(!band.editable || togglingBand != nil)
-
-            Toggle("", isOn: Binding(
-                get: { band.ssidOn },
-                set: { on in Task { await toggle(band, on) } }
-            ))
-            .labelsHidden()
-            .disabled(!band.editable || togglingBand != nil)
-        }
-        .padding(.vertical, 9)
-    }
-
-    /// 频段第二行：`CH 56 · 80 MHz · 100% · WPA3 混合`。关闭时只写「已关闭」。
-    private func bandDetail(_ band: WifiBandInfo) -> String {
-        guard band.up, band.ssidOn else { return "已关闭" }
-        var parts: [String] = []
-        if band.channel > 0 { parts.append("CH \(band.channel)") }
-        if !band.width.isEmpty { parts.append("\(band.width) MHz") }
-        if band.txPowerPercent > 0 { parts.append("\(band.txPowerPercent)%") }
-        if !band.encryption.isEmpty { parts.append(band.securityLabel) }
-        return parts.isEmpty ? "—" : parts.joined(separator: " · ")
-    }
-
-    private func toggle(_ band: WifiBandInfo, _ on: Bool) async {
-        guard togglingBand == nil else { return }
-        togglingBand = band.id
-        let problem = await model.setBandEnabled(band, on)
-        await model.manualRefresh()
-        togglingBand = nil
-        if let problem {
-            model.presentError(problem)
-        } else {
-            model.notice = Notice(kind: .ok,
-                                  title: on ? "\(band.bandName) 已开启" : "\(band.bandName) 已关闭",
-                                  detail: band.ssid)
-        }
     }
 
     // MARK: - 设备
@@ -1071,11 +1071,16 @@ enum NetPalette {
 struct TopoLeaf: Identifiable {
     let id: String
     let title: String
+    /// 主值：频段是 SSID，有线是协商速率。
     let value: String
+    /// 底下一行：`CH 56 · 2 台` / `3 个端口` / `已关闭`。
+    let caption: String
     let icon: String
     let color: Color
     /// 这一路通不通：不通则图标、标题、连线一起变灰。
     let on: Bool
+    /// 频段节点带着自己的数据，点开就是它的编辑页；有线为 nil（点了滚到局域网卡）。
+    let band: WifiBandInfo?
 }
 
 /// 路由器节点下面那三条分叉线。

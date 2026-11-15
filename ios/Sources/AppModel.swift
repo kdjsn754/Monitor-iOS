@@ -34,6 +34,9 @@ final class AppModel {
     /// 网络页的数据（v2.6.5）。只读，采集项是 `PollItem.network`，
     /// 切到别的页就停——它跟 `stats` 一样是「这一页要看的东西」。
     var network = NetworkInfo()
+    /// 跨页跳转请求（v2.8.2）：概览页「连接设备」卡点一下要切到网络页看完整列表。
+    /// 值就是标签序号（概览 0 / 代理 1 / 网络 2 / 设置 3），`MainTabs` 处理完立刻置空。
+    var tabRequest: Int?
     /// 每台路由器上一次握手读到的设备名（`/proc/sys/kernel/hostname`），键是连接 id。
     ///
     /// 连接名称留空时拿它当显示名：`Redmi-AX6000` 比 `192.168.8.1` 好认。

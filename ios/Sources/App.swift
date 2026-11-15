@@ -254,6 +254,13 @@ struct MainTabs: View {
         .onChange(of: selection) { _, value in
             model.setActivePage(AppPage(tab: value))
         }
+        // 别的页请求跳过来（v2.8.2：概览的「连接设备」→ 网络页）。处理完立刻清空，
+        // 否则下次再点同一个目标时值没变，onChange 不会触发。
+        .onChange(of: model.tabRequest) { _, value in
+            guard let value else { return }
+            selection = value
+            model.tabRequest = nil
+        }
         .onAppear {
             model.setActivePage(AppPage(tab: selection))
         }

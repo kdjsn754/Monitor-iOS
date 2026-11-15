@@ -4,7 +4,6 @@ struct OverviewView: View {
     @Environment(AppModel.self) private var model: AppModel
     /// 闪存卡的轨道色 / 图例点色要分深浅两档，所以这一页也得读主题。
     @Environment(\.colorScheme) private var colorScheme
-    @State private var showAllDevices = false
     /// 风扇控制页（点「风扇」那块打开，见 hardwareSection）。
     /// v1.28.28 起是 push 进来的独立页面，不再是半屏面板。
     @State private var showFanControl = false
@@ -73,12 +72,6 @@ struct OverviewView: View {
             // 更糟的是它一下拉就触发一整轮 SSH 采集（`/traffic` 是流式接口，至少一秒才吐第一行），
             // 采集回来又是一次全页重排，正好撞在手指还在拖的那几帧上。
             // 刷新入口保留在导航栏右上角那颗按钮（v2.3.3 起由 `pageChrome` 挂上去），功能不缺。
-            .sheet(isPresented: $showAllDevices) {
-                DeviceListView()
-                    // v2.4.6：sheet 的系统材质底换成清底，壁纸由页内的
-                    // `themedFormBackground()` 自己铺，二级页也照得到。
-                    .presentationBackground(Color.clear)
-            }
             .navigationDestination(isPresented: $showFanControl) {
                 // v2.1.16 起二级页**不再** `.toolbar(.hidden, for: .tabBar)`。
                 // 之前藏掉底栏，返回时系统要把它重新显示，那一下动画在 iOS 26 的玻璃底栏上
@@ -449,80 +442,107 @@ struct OverviewView: View {
         .plainTile(radius: 12)
     }
 
-    /// 连接设备只给一个概括：总数 + 来源 + 入口。
-    /// 概览页不再把设备名一条条铺出来——名字长短不一会把整张卡撑得参差不齐，
-    /// 也挡住了下面真正要看的系统信息。明细都留在弹窗里。
-    ///
-    /// 以前这一行是「44pt 浅蓝圆 + 24pt 亮蓝数字 + 浅蓝胶囊」：三种深浅不同的蓝叠在
-    /// 一起，而卡片标题里已经有一枚同样的图标，圆里再画一次纯属重复。
-    /// 现在整行是白底 + 一圈细边，数字回归主色文字；右边「查看全部」也不再套浅蓝胶囊，
-    /// 只留蓝色文字和箭头 —— 一行里只强调一处，不再靠铺色块做层级。
-    private var onlineDeviceCount: Int {
-        model.devices.filter { $0.online }.count
-    }
+    // MARK: - 连接设备（v2.8.2 重做）
 
-    /// 副标题只在「全都离线」这种反常情况多说一句，正常就一句话带过。
-    private var devicesCaption: String {
-        if model.devices.isEmpty {
-            // 清理过离线设备时，这里不能再说「还没有设备」——用户刚点完删除，
-            // 看到「暂无设备」会以为整份列表被清空了。
-            return model.hiddenDeviceCount > 0
-                ? "已清理 \(model.hiddenDeviceCount) 台离线设备"
-                : "DHCP 租约里还没有设备"
-        }
-        if onlineDeviceCount == 0 {
-            return "\(model.devices.count) 台只有租约，此刻都没连上"
-        }
-        return "DHCP 租约 · 点开查看"
-    }
+    /// 概览只放「结论 + 前三台」，完整名单与所有编辑都在网络页。
+    ///
+    /// 以前这张卡读 `model.devices`——那是「DHCP 租约 + ARP」推出来的另一套名单，
+    /// 和网络页的官方客户端列表（`gl-clients`）对不上：台数不同、名字不同，
+    /// 点开还是个另一套弹窗。用户 2026-11-15：「概览页的连接设备重做，跟现版本不对。」
+    /// 现在两边只有一个来源（`model.network.clients`），点一下直接切到网络页。
+    private var onlineClients: [NetClient] { model.network.clients.filter(\.online) }
 
     private var devicesContent: some View {
-        Button {
-            // 列表被清空、但确实隐藏过设备时，这一格还得能点开——
-            // 否则用户在概览页看到「0 台在线」，却没有任何入口能进面板恢复。
-            guard !model.devices.isEmpty || model.hiddenDeviceCount > 0 else { return }
-            showAllDevices = true
-        } label: {
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 3) {
+        let clients = model.network.clients
+        let online = onlineClients
+        let offlineCount = clients.count - online.count
+        return VStack(spacing: 0) {
+            Button { model.tabRequest = 2 } label: {
+                HStack(alignment: .center, spacing: 8) {
                     HStack(alignment: .firstTextBaseline, spacing: 4) {
-                        // 这里以前直接数 model.devices.count，而那是「租约条数」——
-                        // 关掉的设备租约还在，数字就一直虚高。现在只数真在线的。
-                        Text("\(onlineDeviceCount)")
+                        Text("\(online.count)")
                             .font(.system(size: 24, weight: .semibold, design: .rounded))
                             .monospacedDigit()
                             .foregroundStyle(.primary)
                         Text("台在线")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        if offlineCount > 0 {
+                            Text("· \(offlineCount) 台离线")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
-                    Text(devicesCaption)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+                    if !clients.isEmpty {
+                        HStack(spacing: 3) {
+                            Text("查看全部")
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 9, weight: .semibold))
+                        }
+                        .font(.caption.weight(.medium))
+                        // 用会自己适配深浅的 systemBlue：写死 .blue（#007AFF）
+                        // 压在深色卡片上偏暗，几乎和背景糊在一起。
+                        .foregroundStyle(Color(.systemBlue))
+                    }
                 }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 11)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .rowTile(radius: 14)
+                .cardTapShape()
+            }
+            .buttonStyle(.plain)
 
-                Spacer(minLength: 8)
-
-                if !model.devices.isEmpty || model.hiddenDeviceCount > 0 {
-                    HStack(spacing: 3) {
-                        Text("查看全部")
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 9, weight: .semibold))
+            if clients.isEmpty {
+                Text("—")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 10)
+            } else {
+                ForEach(Array(online.prefix(3))) { client in
+                    Divider().padding(.top, 2)
+                    Button { model.tabRequest = 2 } label: {
+                        deviceRow(client)
                     }
-                    .font(.caption.weight(.medium))
-                    // 用会自己适配深浅的 systemBlue：写死 .blue（#007AFF）
-                    // 压在深色卡片上偏暗，几乎和背景糊在一起。
-                    .foregroundStyle(Color(.systemBlue))
+                    .buttonStyle(.plain)
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 11)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .rowTile(radius: 14)
-            .cardTapShape()
         }
-        .buttonStyle(.plain)
-        .disabled(model.devices.isEmpty && model.hiddenDeviceCount == 0)
+    }
+
+    /// 概览里的一台设备：图标 + 名称 + 「接入 · 地址」，右边是实时下载速率。
+    private func deviceRow(_ client: NetClient) -> some View {
+        let tint = client.wired ? NetPalette.wired : NetPalette.wifi
+        var bits: [String] = []
+        if !client.iface.isEmpty { bits.append(client.iface) }
+        if !client.ip.isEmpty { bits.append(client.ip) }
+        return HStack(spacing: 9) {
+            Image(systemName: client.icon)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(tint)
+                .frame(width: 26, height: 26)
+                .background { Circle().fill(tint.opacity(0.12)) }
+            VStack(alignment: .leading, spacing: 1) {
+                Text(client.displayName)
+                    .font(.system(size: 14))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text(bits.isEmpty ? client.mac : bits.joined(separator: " · "))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 6)
+            Text(client.rateLabel)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+        }
+        .padding(.vertical, 8)
+        .contentShape(Rectangle())
     }
 
     private var systemContent: some View {

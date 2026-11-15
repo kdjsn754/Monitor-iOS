@@ -81,6 +81,15 @@ enum TabGlyphImage {
                 cg.setLineCap(.round)
                 cg.setLineJoin(.round)
                 cg.strokePath()
+                // 未选中态的「实心笔画」：盾牌里那枚对勾。
+                // v2.8.2 之前空心态只描一个空盾，24pt 下看着像个空壳（用户：
+                // 「代理图标没选时太空了，没选时里面有个黑色实心勾，跟选中时反着的」）。
+                // 现在未选中 = 空盾 + 实心勾，选中 = 实心盾 + 挖空的勾，正好反过来。
+                if let ink = glyph.ink {
+                    cg.addPath(ink.cgPath)
+                    cg.setLineWidth(2.1)
+                    cg.strokePath()
+                }
             }
         }
         return img.withRenderingMode(.alwaysTemplate)
@@ -88,19 +97,34 @@ enum TabGlyphImage {
 
     // MARK: - 路径（与 backup-tabbar-b87 的 TabGlyph 同一套，只是去掉了缩放变换）
 
+    /// 一张图的三层：外形、实心态要挖掉的笔画、空心态额外描的笔画。
+    private struct GlyphPaths {
+        let outline: Path
+        var cut: Path?
+        var ink: Path?
+    }
+
     /// 24 单位设计框下的原始路径。旧 View 里按显示尺寸缩放，这里固定 24pt 一次画死。
     ///
-    /// 返回两样：`outline` 是外形（实心时整片填、空心时描边），
-    /// `cut` 是实心态要擦掉的笔画（目前只有盾牌里的对勾），空心时为 nil。
-    private static func designPath(_ kind: TabGlyphKind, filled: Bool) -> (outline: Path, cut: Path?) {
+    /// `outline` 是外形（实心时整片填、空心时描边），`cut` 是实心态要擦掉的笔画
+    /// （盾牌里的对勾、球上的经纬圈），`ink` 是空心态要额外描的笔画（目前只有代理的对勾）。
+    private static func designPath(_ kind: TabGlyphKind, filled: Bool) -> GlyphPaths {
         switch kind {
-        case .overview: return (overviewPath(), nil)
-        case .proxy: return (proxyPath(), filled ? proxyCheckStroke() : nil)
+        case .overview:
+            return GlyphPaths(outline: overviewPath())
+        case .proxy:
+            // 选中：实心盾 + 挖空的对勾；未选中：空盾 + 实心对勾。
+            return filled
+                ? GlyphPaths(outline: proxyPath(), cut: proxyCheckStroke())
+                : GlyphPaths(outline: proxyPath(), ink: proxyCheckStroke())
         case .network:
             // 球不能三条子路径一起填：even-odd 会把圈内的区域挖成条带。
             // 实心版只填外圆，两条圈交给 `cut` 擦出来（和盾牌的对勾同一招）。
-            return filled ? (globeDisc(), globeWire(inset: 1.1)) : (networkPath(), nil)
-        case .settings: return (settingsPath(), nil)
+            return filled
+                ? GlyphPaths(outline: globeDisc(), cut: globeWire(inset: 1.1))
+                : GlyphPaths(outline: networkPath())
+        case .settings:
+            return GlyphPaths(outline: settingsPath())
         }
     }
 
