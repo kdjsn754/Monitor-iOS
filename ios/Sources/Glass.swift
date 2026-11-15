@@ -466,11 +466,16 @@ extension View {
 struct HeaderButton: View {
     let systemImage: String
     let label: String
+    /// 图标颜色。`nil` 就跟随全 App 的「栏上按钮＝主色」规矩（黑/白）；
+    /// 网络页给了蓝色，那一页的按钮统一走自己的强调色（用户 2026-11-15 要求）。
+    var tint: Color?
     let action: () -> Void
 
-    init(_ systemImage: String, label: String = "刷新", action: @escaping () -> Void) {
+    init(_ systemImage: String, label: String = "刷新",
+         tint: Color? = nil, action: @escaping () -> Void) {
         self.systemImage = systemImage
         self.label = label
+        self.tint = tint
         self.action = action
     }
 
@@ -478,7 +483,7 @@ struct HeaderButton: View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.primary)
+                .foregroundStyle(tint ?? Color.primary)
                 .frame(width: 38, height: 38)
                 .modifier(HeaderButtonSurface())
                 .contentShape(Circle())

@@ -442,91 +442,137 @@ struct OverviewView: View {
         .plainTile(radius: 12)
     }
 
-    // MARK: - 连接设备（v2.8.2 重做）
+    // MARK: - 连接设备（v2.9.0 重设计）
 
     /// 概览只放「结论 + 前三台」，完整名单与所有编辑都在网络页。
     ///
-    /// 以前这张卡读 `model.devices`——那是「DHCP 租约 + ARP」推出来的另一套名单，
-    /// 和网络页的官方客户端列表（`gl-clients`）对不上：台数不同、名字不同，
-    /// 点开还是个另一套弹窗。用户 2026-11-15：「概览页的连接设备重做，跟现版本不对。」
-    /// 现在两边只有一个来源（`model.network.clients`），点一下直接切到网络页。
-    private var onlineClients: [NetClient] { model.network.clients.filter(\.online) }
-
+    /// 数据只有一个来源（`model.network.clients`，官方 `gl-clients`）——
+    /// 以前这里读 DHCP 租约，和网络页的台数、名字都对不上（用户 2026-11-15 反馈）。
+    ///
+    /// **v2.9.0 版式重做**（用户：「太丑了，重新设计布局和显示」）：
+    /// 原来是一个浅底小方块（数字 + 「查看全部」）下面接三条设备，方块套在卡片里，
+    /// 变成「卡里套卡」；三行设备又没有收口。现在拆成三段：
+    ///   ① 顶部一行结论：大数字 + 台在线 + 离线标签 + 右边「无线 n / 有线 n」彩点胶囊；
+    ///   ② 三条设备：图标圆底 → 名字 / 地址·接入 → 实时速率，行间用细线分；
+    ///   ③ 底部一行「查看全部 + 总台数 + ›」，把整段收住。
     private var devicesContent: some View {
         let clients = model.network.clients
-        let online = onlineClients
-        let offlineCount = clients.count - online.count
+        let online = clients.filter(\.online)
+        let offline = clients.count - online.count
+        let preview = Array(online.prefix(3))
+
         return VStack(spacing: 0) {
             Button { model.tabRequest = 2 } label: {
-                HStack(alignment: .center, spacing: 8) {
+                HStack(alignment: .center, spacing: 6) {
                     HStack(alignment: .firstTextBaseline, spacing: 4) {
                         Text("\(online.count)")
-                            .font(.system(size: 24, weight: .semibold, design: .rounded))
+                            .font(.system(size: 28, weight: .semibold, design: .rounded))
                             .monospacedDigit()
                             .foregroundStyle(.primary)
                         Text("台在线")
-                            .font(.caption)
+                            .font(.system(size: 13))
                             .foregroundStyle(.secondary)
-                        if offlineCount > 0 {
-                            Text("· \(offlineCount) 台离线")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
                     }
+
+                    if offline > 0 {
+                        Text("\(offline) 台离线")
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background { Capsule().fill(Color(.systemGray5)) }
+                    }
+
                     Spacer(minLength: 8)
-                    if !clients.isEmpty {
-                        HStack(spacing: 3) {
-                            Text("查看全部")
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 9, weight: .semibold))
-                        }
-                        .font(.caption.weight(.medium))
-                        // 用会自己适配深浅的 systemBlue：写死 .blue（#007AFF）
-                        // 压在深色卡片上偏暗，几乎和背景糊在一起。
-                        .foregroundStyle(Color(.systemBlue))
-                    }
+                    accessPills(online)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 11)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .rowTile(radius: 14)
-                .cardTapShape()
+                .padding(.bottom, 10)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
             if clients.isEmpty {
+                Divider()
                 Text("—")
-                    .font(.subheadline)
+                    .font(.system(size: 15))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 10)
+                    .padding(.vertical, 10)
             } else {
-                ForEach(Array(online.prefix(3))) { client in
-                    Divider().padding(.top, 2)
-                    Button { model.tabRequest = 2 } label: {
-                        deviceRow(client)
+                if !preview.isEmpty {
+                    Divider()
+                    ForEach(preview) { client in
+                        if client.id != preview.first?.id { Divider().opacity(0.6) }
+                        Button { model.tabRequest = 2 } label: { deviceRow(client) }
+                            .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
+
+                Divider()
+                Button { model.tabRequest = 2 } label: {
+                    HStack(spacing: 5) {
+                        Text("查看全部")
+                            .font(.system(size: 13, weight: .medium))
+                        Spacer(minLength: 6)
+                        Text("\(clients.count) 台")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .foregroundStyle(Color(.systemBlue))
+                    .padding(.vertical, 10)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
             }
         }
     }
 
-    /// 概览里的一台设备：图标 + 名称 + 「接入 · 地址」，右边是实时下载速率。
+    /// 顶部右侧的两枚彩点胶囊：无线几台、有线几台。
+    /// 只报「有人的那一路」，都为空就不占位。
+    private func accessPills(_ online: [NetClient]) -> some View {
+        let wifi = online.filter { !$0.wired }.count
+        let wired = online.filter(\.wired).count
+        return HStack(spacing: 5) {
+            if wifi > 0 { accessPill("无线", wifi, NetPalette.wifi) }
+            if wired > 0 { accessPill("有线", wired, NetPalette.wired) }
+        }
+    }
+
+    private func accessPill(_ title: String, _ count: Int, _ color: Color) -> some View {
+        HStack(spacing: 3) {
+            Circle()
+                .fill(color)
+                .frame(width: 5, height: 5)
+            Text("\(title) \(count)")
+                .font(.system(size: 10.5, weight: .medium))
+                .monospacedDigit()
+        }
+        .foregroundStyle(color)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background { Capsule().fill(color.opacity(0.10)) }
+    }
+
+    /// 概览里的一台设备：圆底图标 + 名称 + 「地址 · 接入」，右边是实时下载速率。
+    /// 行里不再放箭头——整段底部那一行才是入口，逐行加箭头会到处是尖角。
     private func deviceRow(_ client: NetClient) -> some View {
         let tint = client.wired ? NetPalette.wired : NetPalette.wifi
         var bits: [String] = []
-        if !client.iface.isEmpty { bits.append(client.iface) }
         if !client.ip.isEmpty { bits.append(client.ip) }
-        return HStack(spacing: 9) {
+        if !client.iface.isEmpty { bits.append(client.iface) }
+        if !client.deviceClass.isEmpty { bits.append(client.classLabel) }
+        return HStack(spacing: 10) {
             Image(systemName: client.icon)
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(size: 12.5, weight: .medium))
                 .foregroundStyle(tint)
-                .frame(width: 26, height: 26)
+                .frame(width: 30, height: 30)
                 .background { Circle().fill(tint.opacity(0.12)) }
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(client.displayName)
-                    .font(.system(size: 14))
+                    .font(.system(size: 14.5))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                 Text(bits.isEmpty ? client.mac : bits.joined(separator: " · "))
@@ -534,14 +580,17 @@ struct OverviewView: View {
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
                     .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
             Spacer(minLength: 6)
-            Text(client.rateLabel)
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
+            if !client.rateLabel.isEmpty {
+                Text(client.rateLabel)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(tint)
+                    .monospacedDigit()
+            }
         }
-        .padding(.vertical, 8)
+        .padding(.vertical, 9)
         .contentShape(Rectangle())
     }
 

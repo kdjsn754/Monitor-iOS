@@ -14,10 +14,16 @@ import SwiftUI
 ///   - 清掉离线记录（`gl-clients remove_offline`）；
 ///   - 出口重连（中继先 `repeater reload`，再 `ifdown/ifup`）。
 ///
-/// **版式**：拓扑 → 上网 → 设备 → 局域网与端口。
+/// **版式**：拓扑 → 上网 → 设备。
 /// 「无线」不再是单独一张卡：频段节点长在拓扑图上（名称、信道、频宽、台数），
 /// 点节点进编辑页，启用开关也在那一页。
+/// 「局域网与端口」也不再占一卡：点拓扑中间的路由器（或有线那片叶子）进二级页，
+/// 端口状态与 DHCP 地址池都在那儿改（v2.9.0，用户 2026-11-15）。
 /// 被动信息进多列网格（标签在上、值在下），只有能点的地方才排成整行。
+///
+/// **按钮一律走蓝色**（本页 `.tint(.blue)` 收在最外层，工具栏与弹出的编辑页都盖到）。
+/// 别的页导航栏按钮是黑的（`navBarTint` 的用户要求），但这一页用户明确说「全是黑的」，
+/// 所以这里连「保存 / 取消」也不再用 `navBarTint()`。
 ///
 /// **没有一行说明性小字**（用户 2026-10-31 定的规矩）。
 struct NetworkView: View {
@@ -27,6 +33,8 @@ struct NetworkView: View {
     @State private var clearingOffline = false
     @State private var editingBand: WifiBandInfo?
     @State private var editingClient: NetClient?
+    /// 局域网二级页（点拓扑中间那个路由器、或有线那片叶子进来）。
+    @State private var showLan = false
 
     private var info: NetworkInfo { model.network }
 
@@ -37,16 +45,15 @@ struct NetworkView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(spacing: 16) {
-                        // 拓扑图里的节点点一下要么进频段编辑页，要么滚到对应那张卡
-                        // （出口 → 上网卡、有线 → 局域网与端口）。
+                        // 拓扑里的节点：出口滚到「上网」卡，频段进编辑页，
+                        // 路由器与有线进局域网二级页。
                         topology(scroll: { target in
                             withAnimation(.easeInOut(duration: 0.35)) {
                                 proxy.scrollTo(target, anchor: .center)
                             }
-                        })
+                        }, openLan: { showLan = true })
                         uplinkCard.id(Self.uplinkAnchor)
                         clientsCard
-                        lanCard.id(Self.lanAnchor)
                     }
                     .padding(.horizontal, 18)
                     .padding(.top, 6)
@@ -58,9 +65,6 @@ struct NetworkView: View {
                 .scrollBounceBehavior(.basedOnSize)
                 // 标题滑到状态栏下面时由系统糊一层，否则硬叠在时间上。
                 .scrollEdgeEffectStyle(.soft, for: .top)
-                // 底栏在 `MainTabs` 上挂了 `.tint(.primary)`，那是往下传的环境值，
-                // 不补这一句整页控件会跟着变黑（v2.1.17 的教训）。
-                .tint(.blue)
                 .background { AppBackground() }
                 .pageChrome("网络") {
                     if refreshing {
@@ -68,7 +72,7 @@ struct NetworkView: View {
                             .controlSize(.small)
                             .frame(width: 38, height: 38)
                     } else {
-                        HeaderButton("arrow.clockwise") {
+                        HeaderButton("arrow.clockwise", tint: Color.blue) {
                             Task { await refresh() }
                         }
                     }
@@ -81,12 +85,21 @@ struct NetworkView: View {
                     ClientEditorSheet(client: client)
                         .presentationBackground(Color.clear)
                 }
+                .navigationDestination(isPresented: $showLan) {
+                    LanSettingsView()
+                }
+                // 底栏在 `MainTabs` 上挂了 `.tint(.primary)`，那是往下传的环境值，
+                // 不补这一句整页控件会跟着变黑（v2.1.17 的教训）。
+                //
+                // ⚠️ 必须放在 `sheet` / `navigationDestination` **之后**：环境值只往下传，
+                // 挂在滚动视图上时弹出的编辑页拿不到，里面的开关、选择器、保存按钮全是黑的
+                // ——这正是用户 2026-11-15 说的「网络里面所有按钮都是黑色的」。
+                .tint(.blue)
             }
         }
     }
 
     private static let uplinkAnchor = "net-uplink"
-    private static let lanAnchor = "net-lan"
 
     private func refresh() async {
         guard !refreshing else { return }
@@ -104,18 +117,20 @@ struct NetworkView: View {
     /// 叶子节点上，点进去就是那个频段的编辑页（启用开关也在那一页）。
     ///
     /// 结构：出口胶囊 → 竖线 → 路由器圆环 → 分叉 → 2.4G / 5G / 有线三片叶子。
-    /// 每个节点都能点：出口 → 上网卡，路由器 / 有线 → 局域网卡，频段 → 编辑页。
-    private func topology(scroll: @escaping (String) -> Void) -> some View {
+    /// 每个节点都能点：出口 → 上网卡，频段 → 编辑页，
+    /// 路由器 / 有线 → 局域网与端口二级页（v2.9.0 起）。
+    private func topology(scroll: @escaping (String) -> Void,
+                          openLan: @escaping () -> Void) -> some View {
         let leaves = leafNodes
         return VStack(spacing: 0) {
             internetNode(scroll: scroll)
             connector(ok: info.uplinkOK)
-            routerHub(scroll: scroll)
+            routerHub(openLan: openLan)
             if !leaves.isEmpty {
                 TopoFork(leaves: leaves, spacing: Self.leafSpacing)
                 HStack(alignment: .top, spacing: Self.leafSpacing) {
                     ForEach(leaves) { leaf in
-                        leafNode(leaf, scroll: scroll)
+                        leafNode(leaf, openLan: openLan)
                     }
                 }
             }
@@ -200,10 +215,10 @@ struct NetworkView: View {
 
     /// 中心：路由器画成同心圆环（两道淡环 + 白底内圆），下面是名字、局域网地址、
     /// 实时上下行两个胶囊。整张图的视觉重心。
-    /// 点了滚到「局域网与端口」——路由器本身的地址、DHCP 都在那张卡里。
-    private func routerHub(scroll: @escaping (String) -> Void) -> some View {
+    /// 点进去是局域网与端口二级页（地址池、端口状态、租期都在那儿改）。
+    private func routerHub(openLan: @escaping () -> Void) -> some View {
         Button {
-            scroll(Self.lanAnchor)
+            openLan()
         } label: {
             VStack(spacing: 5) {
                 ZStack {
@@ -223,6 +238,19 @@ struct NetworkView: View {
                     Image(systemName: "wifi.router")
                         .font(.system(size: 21, weight: .medium))
                         .foregroundStyle(NetPalette.wan)
+                    // 右下角一枚小箭头：这一圈能点进去（不然看不出是个入口）。
+                    Circle()
+                        .fill(Color(.systemBackground))
+                        .frame(width: 19, height: 19)
+                        .overlay {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 8.5, weight: .bold))
+                                .foregroundStyle(NetPalette.wan)
+                        }
+                        .overlay {
+                            Circle().strokeBorder(NetPalette.wan.opacity(0.25), lineWidth: 0.8)
+                        }
+                        .offset(x: 27, y: 27)
                 }
                 .padding(.bottom, 3)
                 Text(deviceName)
@@ -301,13 +329,13 @@ struct NetworkView: View {
     }
 
     /// 一片叶子：彩色圆底图标 + 名称 + 值 + 底下一行小数字。
-    /// 频段点开是编辑页，有线点开滚到「局域网与端口」。
-    private func leafNode(_ leaf: TopoLeaf, scroll: @escaping (String) -> Void) -> some View {
+    /// 频段点开是编辑页，有线点开是局域网与端口二级页（端口状态在那儿）。
+    private func leafNode(_ leaf: TopoLeaf, openLan: @escaping () -> Void) -> some View {
         Button {
             if let band = leaf.band {
                 editingBand = band
             } else {
-                scroll(Self.lanAnchor)
+                openLan()
             }
         } label: {
             VStack(spacing: 5) {
@@ -555,48 +583,6 @@ struct NetworkView: View {
         return client.wired ? NetPalette.wired : NetPalette.wifi
     }
 
-    // MARK: - 局域网与端口
-
-    private var lanCard: some View {
-        card("局域网与端口", trailing: info.ports.filter(\.up).isEmpty ? "" : "\(info.ports.filter(\.up).count) 个已连接") {
-            // 这一卡统一两列：网口名 + 协商速率那一格要放「1000 Mbps 全双工」，
-            // 挤成三分之一宽会被截断。
-            metricGrid([
-                portCells,
-                [("路由器", info.lanMask.isEmpty ? info.lanIP : "\(info.lanIP) / \(info.lanMask)", nil),
-                 ("DHCP 池", dhcpPoolLabel.isEmpty ? "—" : dhcpPoolLabel, nil)],
-                [("租期", info.dhcpLease.isEmpty ? "—" : info.dhcpLease, nil),
-                 ("租约", info.leaseCount > 0 ? "\(info.leaseCount) 个" : "—", nil)]
-            ])
-        }
-    }
-
-    /// 网口那两格：WAN 和 LAN 各一格，值直接说「通没通 + 协商速率」。
-    /// WAN 没插线时值写「未插网线」——比「未连接」多一个有用的判断。
-    private var portCells: [(String, String, Color?)] {
-        var cells: [(String, String, Color?)] = []
-        for port in info.ports.prefix(2) {
-            let label = port.name.isEmpty ? port.role : "\(port.role) \(port.name)"
-            var value = port.detailLabel
-            if port.role == "WAN" && !port.up {
-                value = info.wanCable ? "已插网线，未联网" : "未插网线"
-            }
-            cells.append((label, value, port.up ? nil : Color.secondary))
-        }
-        while cells.count < 2 { cells.append(("端口", "—", nil)) }
-        return cells
-    }
-
-    /// `dhcp.lan.start=100` + `limit=150` → `192.168.8.100 – 249`。
-    private var dhcpPoolLabel: String {
-        guard let start = Int(info.dhcpStart), let limit = Int(info.dhcpLimit), limit > 0 else {
-            return info.dhcpStart
-        }
-        let prefix = info.lanIP.split(separator: ".").dropLast().joined(separator: ".")
-        let end = start + limit - 1
-        return prefix.isEmpty ? "\(start) – \(end)" : "\(prefix).\(start) – \(end)"
-    }
-
     // MARK: - 小组件
 
     /// 卡片：白底 + 一条 0.6pt 细边，没有阴影。靠留白分层，不靠色块。
@@ -812,12 +798,14 @@ private struct BandEditorSheet: View {
                 }
             }
             .themedFormBackground()
+            // 弹窗是独立的 NavigationStack，拿不到页面最外层那句 `.tint(.blue)`
+            // （环境值只往下传）。不补这一句：开关、选择器、"保存"全是黑的。
+            .tint(.blue)
             .navigationTitle(band.bandName)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("取消") { dismiss() }
-                        .navBarTint()
                         .disabled(busy)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
@@ -825,7 +813,6 @@ private struct BandEditorSheet: View {
                         ProgressView().controlSize(.small)
                     } else {
                         Button("保存") { Task { await save() } }
-                            .navBarTint()
                             .fontWeight(.semibold)
                     }
                 }
@@ -999,12 +986,12 @@ private struct ClientEditorSheet: View {
                 }
             }
             .themedFormBackground()
+            .tint(.blue)
             .navigationTitle(client.displayName)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("取消") { dismiss() }
-                        .navBarTint()
                         .disabled(busy)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
@@ -1012,7 +999,6 @@ private struct ClientEditorSheet: View {
                         ProgressView().controlSize(.small)
                     } else {
                         Button("保存") { Task { await save() } }
-                            .navBarTint()
                             .fontWeight(.semibold)
                     }
                 }

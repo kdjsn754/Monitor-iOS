@@ -1531,6 +1531,42 @@ private struct NetVap {
     // 每个写操作都会**回读**：写进去不算成功，`uci get` 读回来对得上才算。
     // 之前吃过「界面报成功、路由器没动」的亏（段名写错时 uci 只打一行 warning）。
 
+    /// 改局域网 DHCP 地址池与租期（v2.9.0，局域网与端口二级页）。返回 `nil` 表示成功。
+    ///
+    /// **只动 `dhcp.lan` 的 `start` / `limit` / `leasetime` 三个字段，不碰 LAN IP**：
+    /// 改局域网地址等于换掉这条 SSH 的对端，保存成功的下一帧就再也连不上，
+    /// 那不是一次「保存」应该承担的操作（官方 App 也是改完要求重新登录）。
+    ///
+    /// 池子大小由 `limit` 表示，所以传进来的「结束地址」在这里换算成 `end - start + 1`。
+    func saveLanDHCP(start: Int, end: Int, lease: String) async -> String? {
+        let limit = max(end - start + 1, 1)
+        var lines: [String] = []
+        lines.append("uci -q set dhcp.lan.start=\(shQuote(String(start)))")
+        lines.append("uci -q set dhcp.lan.limit=\(shQuote(String(limit)))")
+        lines.append("uci -q set dhcp.lan.leasetime=\(shQuote(lease))")
+        lines.append("uci -q commit dhcp")
+        // dnsmasq 读的是配置，不重启这支服务新池子不生效（和黑名单那支同一个道理）。
+        lines.append("/etc/init.d/dnsmasq restart >/dev/null 2>&1")
+        lines.append("echo @@LANRB")
+        lines.append("uci -q get dhcp.lan.start; uci -q get dhcp.lan.limit; uci -q get dhcp.lan.leasetime")
+        do {
+            let output = try await execute(lines.joined(separator: "; "), timeout: 30)
+            let body = output.components(separatedBy: "@@LANRB").last ?? ""
+            let values = body.split(separator: "\n")
+                .map { String($0).trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            guard values.count >= 3 else { return "路由器没有回读配置，请稍后再试" }
+            guard values[0] == String(start),
+                  values[1] == String(limit),
+                  values[2] == lease else {
+                return "写入未生效（回读 \(values.joined(separator: " / "))）"
+            }
+            return nil
+        } catch {
+            return "写入失败：\(error.localizedDescription)"
+        }
+    }
+
     /// 改一个频段的 Wi-Fi。返回 `nil` 表示成功，否则是要显示给用户的错误文案。
     ///
     /// `channel` / `width` / `power` 传 `nil` 表示「这一项不动」：
