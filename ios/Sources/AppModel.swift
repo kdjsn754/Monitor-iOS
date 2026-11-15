@@ -1145,7 +1145,7 @@ private struct NetVap {
                 let rest = key.dropFirst("repeater.@network[".count)
                 guard let close = rest.firstIndex(of: "]") else { continue }
                 let index = Int(rest[..<close]) ?? 0
-                let name = String(rest[rest.index(after: close)...]).dropFirst()
+                let name = String(String(rest[rest.index(after: close)...]).dropFirst())
                 if nets[index] == nil {
                     nets[index] = [:]
                     order.append(index)
