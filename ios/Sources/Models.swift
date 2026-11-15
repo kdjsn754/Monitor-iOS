@@ -242,6 +242,19 @@ struct NetworkInfo {
         Self.speedLabel(wanPort?.speed ?? 0)
     }
 
+    /// 局域网这一侧的网口（除 WAN 之外的都是 LAN）。
+    ///
+    /// **拓扑图那片「有线」叶子说的是这一侧**（网线接了几台设备、跑多少速率），
+    /// 跟「以太网出口」是两件事：WAN 口可以空着，同时 LAN 口接着一台千兆设备。
+    /// v2.9.2 把两件事混成了一个 `wiredOK`，于是拓扑上「有线」写着「未连接」、
+    /// 底下却又写「1 个端口」——用户 2026-11-15 说「有线显示逻辑还是有问题」就是这个。
+    var lanPorts: [NetPortInfo] { ports.filter { $0.role != "WAN" } }
+    var lanUpPorts: [NetPortInfo] { lanPorts.filter(\.up) }
+    /// 有线侧有没有设备插着（任意一个 LAN 口有链路）。
+    var lanOK: Bool { !lanUpPorts.isEmpty }
+    /// 有线侧在用的最高协商速率（多口取最快的那根线）。
+    var lanSpeedLabel: String { Self.speedLabel(lanUpPorts.map(\.speed).max() ?? 0) }
+
     static func speedLabel(_ speed: Int) -> String {
         guard speed > 0 else { return "—" }
         if speed >= 2500 { return "2.5G" }

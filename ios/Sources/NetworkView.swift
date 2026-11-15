@@ -321,14 +321,18 @@ struct NetworkView: View {
                                 on: live,
                                 band: band))
         }
-        let upPorts = info.ports.filter(\.up).count
+        // 有线这一片说的是**局域网侧**（LAN 口接着几台设备），不是「以太网出口」。
+        // v2.9.2 用 `wiredOK`（只看 WAN 口）画它，结果 WAN 口空着、LAN 口明明接著
+        // 一台千兆设备，这片叶子却写「未连接」，底下一行又写「1 个端口」——
+        // 自相矛盾，用户 2026-11-15 说的「有线显示逻辑还是有问题」。
+        let lanUp = info.lanUpPorts
         out.append(TopoLeaf(id: "wired",
                             title: "有线",
-                            value: info.wiredOK ? info.bestPortLabel : "未连接",
-                            caption: upPorts > 0 ? "\(upPorts) 个端口" : "—",
+                            value: lanUp.isEmpty ? "未插网线" : info.lanSpeedLabel,
+                            caption: lanUp.isEmpty ? "—" : "\(lanUp.count) 个端口",
                             icon: "cable.connector",
                             color: NetPalette.wired,
-                            on: info.wiredOK,
+                            on: info.lanOK,
                             band: nil))
         return out
     }
