@@ -444,8 +444,7 @@ struct NetworkView: View {
                  ("上级网络", info.upstreamSSID.isEmpty ? "—" : info.upstreamSSID, nil)],
                 [("IP 地址", info.uplinkIP.isEmpty ? "—" : info.uplinkIP, nil),
                  ("网关", info.uplinkGateway.isEmpty ? "—" : info.uplinkGateway, nil)],
-                [("信号", info.upstreamSignal != 0 ? "\(info.upstreamSignal) dBm" : "—",
-                  info.upstreamSignal != 0 ? signalColor(info.upstreamSignal) : nil),
+                [("信号", signalText(info.upstreamSignal), nil),
                  ("协商速率", info.upstreamRate.isEmpty ? "—" : info.upstreamRate, nil)],
                 [("在线时长", info.uplinkUptime > 0 ? durationLabel(info.uplinkUptime) : "—", nil),
                  ("会话", info.connections > 0 ? "\(info.connections)" : "—", nil)]
@@ -475,10 +474,21 @@ struct NetworkView: View {
         return "\(minutes) 分钟"
     }
 
-    private func signalColor(_ dbm: Int) -> Color {
-        if dbm >= -55 { return Color(red: 0.13, green: 0.66, blue: 0.38) }
-        if dbm >= -70 { return Color(red: 0.90, green: 0.55, blue: 0.10) }
-        return Color(red: 0.85, green: 0.25, blue: 0.22)
+    /// 「信号」那一格：`-58 dBm · 强`。
+    ///
+    /// **v3.0.8 改**（用户 2026-11-16 03:05：「信号的字体不要颜色，加上强中弱」）：
+    /// 原来数值按强度上绿/橙/红，一屏里就那三个数字最跳，和「只有开关是蓝的」那套规矩也冲突。
+    /// 现在值一律走默认色，强弱改用文字说。阈值沿用上色时的分界：
+    /// **≥ -55 强 / ≥ -70 中 / 其余弱**，别改数值——用户已经按这三档认了。
+    private func signalText(_ dbm: Int) -> String {
+        guard dbm != 0 else { return "—" }
+        return "\(dbm) dBm · \(signalGrade(dbm))"
+    }
+
+    private func signalGrade(_ dbm: Int) -> String {
+        if dbm >= -55 { return "强" }
+        if dbm >= -70 { return "中" }
+        return "弱"
     }
 
     // MARK: - 无线（v3.0.0）

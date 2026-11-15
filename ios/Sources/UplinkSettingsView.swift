@@ -184,7 +184,7 @@ struct UplinkSettingsView: View {
                 metricRow(("IP 地址", emptyDash(info.uplinkIP), nil),
                           ("网关", emptyDash(info.uplinkGateway), nil))
                 divider
-                metricRow(("信号", signalText, info.upstreamSignal != 0 ? signalColor(info.upstreamSignal) : nil),
+                metricRow(("信号", signalText, nil),
                           ("在线时长", info.uplinkUptime > 0 ? durationLabel(info.uplinkUptime) : "—", nil))
                 divider
                 metricRow(("DNS", emptyDash(info.uplinkDNS.prefix(2).joined(separator: "  ")), nil))
@@ -270,9 +270,17 @@ struct UplinkSettingsView: View {
         rep.saved.filter { !$0.selected }
     }
 
+    /// 「信号」那一格：`-58 dBm · 强`。v3.0.8 起不再上色，强弱用文字说
+    /// （与网络页上网卡同一套写法、同一组阈值，见 `NetworkView.signalGrade`）。
     private var signalText: String {
         guard info.upstreamSignal != 0 else { return "—" }
-        return "\(info.upstreamSignal) dBm"
+        return "\(info.upstreamSignal) dBm · \(signalGrade(info.upstreamSignal))"
+    }
+
+    private func signalGrade(_ dbm: Int) -> String {
+        if dbm >= -55 { return "强" }
+        if dbm >= -70 { return "中" }
+        return "弱"
     }
 
     // MARK: - 方式条
@@ -508,9 +516,9 @@ struct UplinkSettingsView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer(minLength: 8)
-            Text("\(item.signal) dBm")
+            Text(item.signal != 0 ? "\(item.signal) dBm · \(signalGrade(item.signal))" : "—")
                 .font(.system(size: 12.5))
-                .foregroundStyle(signalColor(item.signal))
+                .foregroundStyle(.secondary)
                 .monospacedDigit()
         }
         .padding(.vertical, 10)
@@ -752,12 +760,6 @@ struct UplinkSettingsView: View {
         case "6g": return "6G"
         default: return raw
         }
-    }
-
-    private func signalColor(_ dbm: Int) -> Color {
-        if dbm >= -55 { return Color(red: 0.13, green: 0.66, blue: 0.38) }
-        if dbm >= -70 { return Color(red: 0.90, green: 0.55, blue: 0.10) }
-        return Color(red: 0.85, green: 0.25, blue: 0.22)
     }
 
     private func durationLabel(_ seconds: Double) -> String {
