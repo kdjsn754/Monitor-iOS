@@ -1,19 +1,18 @@
 import SwiftUI
 
-/// 网络页（v2.6.5 新增，用户 2026-11-15：「在代理和设置中间增加一页网络设置，
-/// 页面风格要大气华丽的图形界面」）。
+/// 网络页（v2.6.5 新增；v2.6.6 按用户要求换成 C 版：细线分层 + 状态环）。
 ///
-/// **只读**：全部字段来自 `PollItem.network` 那条采集脚本（`uci show` /
-/// `ubus call network.interface…` / `iw dev`），这一页没有任何写操作。
+/// **只读**：全部字段来自 `PollItem.network` 那条采集脚本（`uci` / `ubus` / `iwinfo`），
+/// 这一页没有任何写操作。
 ///
-/// 版式按用户选定的「拓扑头图」方案：
-///   - 顶部一块深蓝渐变卡，画「互联网 → 路由器 → 设备」的拓扑，底边三枚胶囊给
-///     有线速率 / 无线频宽 / 无线客户端数；
-///   - 「无线」卡：一个 AP 接口一行（2.4 GHz / 5 GHz），行尾是信道、频宽、台数；
-///   - 「有线」卡：一个物理网口一行，WAN 那行带连接方式与公网地址，行尾是握手速率。
+/// 版式的取舍：
+///   - 顶部不是卡片，是一个**三段弧的状态环**。三段分别对应 WAN、无线、有线，
+///     哪一路不通哪一段就淡下去——不合成总分，因为合成分数一旦算错，
+///     用户第一反应就是「数据有问题」，而三段各自都能在下面找到对应的一行去核对。
+///   - 环心是**当前下行速率**（每秒更新，是本页唯一持续变化的值）；
+///   - 下面三张细线卡片：无线（2.4G / 5G 各一行）、有线（WAN / LAN 各一行）、地址。
 ///
-/// **没有一行说明性小字**（用户 2026-10-31 定的规矩）：卡片里只有「名字 → 值」，
-/// 拓扑图本身负责解释关系，不加脚注、不加副标题。
+/// **没有一行说明性小字**（用户 2026-10-31 定的规矩）：卡片里只有「名字 → 值」。
 struct NetworkView: View {
     @Environment(AppModel.self) private var model: AppModel
     @State private var refreshing = false
@@ -23,23 +22,24 @@ struct NetworkView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 14) {
-                    hero
+                VStack(spacing: 20) {
+                    statusBlock
                     wifiCard
                     portCard
+                    addressCard
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, 14)
-                .padding(.bottom, 28)
-                // 滚动手感跟另外两个根页完全一致（见 ScrollTuning.swift 与 7.1）：
+                .padding(.horizontal, 18)
+                .padding(.top, 6)
+                .padding(.bottom, 30)
+                // 滚动手感与另外三个根页一致（见 ScrollTuning.swift 与 7.1）：
                 // 长页正常回弹、短页拉不动，都不碰下拉刷新。
                 .background(ScrollBounceTuning())
             }
             .scrollBounceBehavior(.basedOnSize)
-            // 顶部滚动边缘效果：标题滑到状态栏下面时由系统糊一层，否则硬叠在时间上。
+            // 标题滑到状态栏下面时由系统糊一层，否则硬叠在时间上。
             .scrollEdgeEffectStyle(.soft, for: .top)
-            // 本页控件（进度圈、按钮）保持蓝：底栏在 `MainTabs` 上挂了 `.tint(.primary)`，
-            // 那是往下传的环境值，不补这一句整页控件会跟着变黑（v2.1.17 的教训）。
+            // 底栏在 `MainTabs` 上挂了 `.tint(.primary)`，那是往下传的环境值，
+            // 不补这一句整页控件会跟着变黑（v2.1.17 的教训）。
             .tint(.blue)
             .background { AppBackground() }
             .pageChrome("网络") {
@@ -63,47 +63,52 @@ struct NetworkView: View {
         refreshing = false
     }
 
-    // MARK: - 头图
+    // MARK: - 状态环
 
-    /// 深色渐变卡。渐变和拓扑是这张卡的「壳」，`drawingGroup()` 把它压成一个离屏图层：
-    /// 滚动时只做图层位移，不再每帧重画一圈圈的弧（跟 `SpeedSparkline` 同一招，见 v2.2.0）。
-    private var hero: some View {
-        ZStack(alignment: .top) {
-            LinearGradient(
-                stops: [
-                    .init(color: Color(red: 0.039, green: 0.145, blue: 0.251), location: 0),
-                    .init(color: Color(red: 0.071, green: 0.243, blue: 0.388), location: 0.55),
-                    .init(color: Color(red: 0.106, green: 0.400, blue: 0.565), location: 1)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-
-            HeroTopology()
-                .frame(height: 168)
-                .drawingGroup()
-
-            VStack(spacing: 10) {
-                Text(info.loaded ? deviceName : " ")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Color(red: 0.56, green: 0.78, blue: 0.92))
-                    .lineLimit(1)
-
-                HStack(spacing: 8) {
-                    heroPill("\(info.bestPortLabel) 有线")
-                    heroPill("\(info.widestBandLabel) 频宽")
-                    heroPill("\(info.wifiClients) 台无线")
+    private var statusBlock: some View {
+        let speed = speedParts
+        return VStack(spacing: 14) {
+            ZStack {
+                StatusArcs(wan: info.wanOK, wifi: info.wifiOK, wired: info.wiredOK)
+                VStack(spacing: 1) {
+                    Text(speed.value)
+                        .font(.system(size: 46, weight: .thin, design: .rounded))
+                        .monospacedDigit()
+                        .contentTransition(.numericText())
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
+                    Text(speed.unit)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
                 }
+                .padding(.horizontal, 34)
             }
-            .padding(.bottom, 16)
-            .frame(maxHeight: .infinity, alignment: .bottom)
+            .frame(height: 198)
+            .padding(.top, 8)
+
+            Text(deviceName)
+                .font(.system(size: 15, weight: .semibold))
+                .lineLimit(1)
+
+            HStack(spacing: 18) {
+                legendDot("WAN", on: info.wanOK, color: StatusArcs.wanColor)
+                legendDot("无线", on: info.wifiOK, color: StatusArcs.wifiColor)
+                legendDot("有线", on: info.wiredOK, color: StatusArcs.wiredColor)
+            }
         }
-        .frame(height: 250)
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .frame(maxWidth: .infinity)
     }
 
-    /// 头图中间那行型号。`routerInfo.model` 要等 `refreshInfo` 回来才有，
-    /// 拿不到就退到界面上的连接名（`connectionName` 本身是「备注 → 设备名 → IP」三级回落，见 v2.5.5）。
+    /// 环心那两个值：把 `12.4 MB/s` 拆成数字和单位，数字才能用大字号。
+    private var speedParts: (value: String, unit: String) {
+        let parts = formatBytes(model.stats.download).split(separator: " ")
+        let value = parts.first.map(String.init) ?? "0"
+        let unit = parts.count > 1 ? String(parts[1]) : "B"
+        return (value, unit + "/s")
+    }
+
+    /// 型号：路由器自己报的拿不到时，退到界面上的连接名
+    /// （`connectionName` 本身是「备注 → 设备名 → IP」三级回落，见 v2.5.5）。
     private var deviceName: String {
         let reported = model.routerInfo.model.trimmingCharacters(in: .whitespaces)
         if !reported.isEmpty { return reported }
@@ -111,32 +116,23 @@ struct NetworkView: View {
         return model.connectionName(for: profile)
     }
 
-    private func heroPill(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 12, weight: .medium))
-            .foregroundStyle(Color(red: 0.92, green: 0.96, blue: 1.0))
-            .lineLimit(1)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-            .background(Color.white.opacity(0.13), in: Capsule())
+    private func legendDot(_ title: String, on: Bool, color: Color) -> some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(on ? color : Color(.systemGray4))
+                .frame(width: 6, height: 6)
+            Text(title)
+                .font(.system(size: 12))
+                .foregroundStyle(on ? Color.primary : Color.secondary)
+        }
     }
 
     // MARK: - 无线
 
     private var wifiCard: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("无线")
-                    .font(.system(size: 16, weight: .semibold))
-                Spacer(minLength: 8)
-                Text("\(info.wifiClients) 台")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.bottom, 6)
-
+        card("无线") {
             if info.bands.isEmpty {
-                placeholderRow
+                emptyLine
             } else {
                 ForEach(info.bands) { band in
                     if band.id != info.bands.first?.id { hairline }
@@ -144,50 +140,48 @@ struct NetworkView: View {
                 }
             }
         }
-        .glassCard(padding: 16, cornerRadius: 20)
     }
 
     private func bandRow(_ band: WifiBandInfo) -> some View {
-        HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(band.bandName)
                     .font(.system(size: 15))
+                    .foregroundStyle(band.up ? Color.primary : Color.secondary)
+                Spacer(minLength: 8)
+                Text(bandMeta(band))
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            HStack(spacing: 10) {
                 Text(band.ssid.isEmpty ? "—" : band.ssid)
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                Spacer(minLength: 8)
+                Text(band.up ? "\(band.clients) 台" : "已关闭")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
             }
-            Spacer(minLength: 6)
-            if band.channel > 0 {
-                chip("CH \(band.channel)")
-            }
-            if !band.width.isEmpty {
-                chip("\(band.width)M")
-            }
-            Text("\(band.clients) 台")
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
-                .frame(minWidth: 30, alignment: .trailing)
         }
         .padding(.vertical, 10)
+    }
+
+    private func bandMeta(_ band: WifiBandInfo) -> String {
+        var parts: [String] = []
+        if band.channel > 0 { parts.append("CH \(band.channel)") }
+        if !band.width.isEmpty { parts.append("\(band.width)M") }
+        return parts.isEmpty ? "—" : parts.joined(separator: " · ")
     }
 
     // MARK: - 有线
 
     private var portCard: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("有线")
-                    .font(.system(size: 16, weight: .semibold))
-                Spacer(minLength: 8)
-                Text(info.ports.count > 0 ? "\(info.ports.count) 口" : "—")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.bottom, 6)
-
+        card("有线") {
             if info.ports.isEmpty {
-                placeholderRow
+                emptyLine
             } else {
                 ForEach(info.ports) { port in
                     if port.id != info.ports.first?.id { hairline }
@@ -195,64 +189,110 @@ struct NetworkView: View {
                 }
             }
         }
-        .glassCard(padding: 16, cornerRadius: 20)
     }
 
     private func portRow(_ port: NetPortInfo) -> some View {
-        HStack(spacing: 10) {
-            Circle()
-                .fill(port.up ? Color.green : Color(.systemGray3))
-                .frame(width: 7, height: 7)
-            Text(port.role)
-                .font(.system(size: 14))
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(port.up ? Color(red: 0.13, green: 0.66, blue: 0.38) : Color(.systemGray4))
+                    .frame(width: 6, height: 6)
+                Text(port.role)
+                    .font(.system(size: 15))
+                Spacer(minLength: 8)
+                Text(port.speedLabel)
+                    .font(.system(size: 13))
+                    .foregroundStyle(port.up ? Color.primary : Color.secondary)
+                    .monospacedDigit()
+            }
             Text(portDetail(port))
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-            Spacer(minLength: 6)
-            Text(port.speedLabel)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(port.up ? Color.green : Color.secondary)
-                .lineLimit(1)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 4)
-                .background(
-                    (port.up ? Color.green.opacity(0.12) : Color(.tertiarySystemFill)),
-                    in: Capsule()
-                )
         }
         .padding(.vertical, 10)
     }
 
     /// WAN 那行后面跟「连接方式 · 公网地址」，LAN 那行跟路由器地址。
-    /// 端口本身的名字（`eth0`）不显示：这一行要回答的是「这条线通不通、有多快」。
+    /// 网口本身的名字（`eth0`）不显示：这一行要回答的是「这条线通不通、有多快」。
     private func portDetail(_ port: NetPortInfo) -> String {
-        if port.role == "WAN" {
-            let address = info.wanIP.isEmpty ? info.wanProtoLabel : "\(info.wanProtoLabel) · \(info.wanIP)"
-            return port.up ? address : (info.wanProtoLabel.isEmpty ? "—" : info.wanProtoLabel)
-        }
+        if port.role == "WAN" { return info.wanLabel }
         return info.lanIP.isEmpty ? "—" : info.lanIP
+    }
+
+    // MARK: - 地址
+
+    private var addressCard: some View {
+        card("地址") {
+            infoRow("公网", info.wanOK ? (info.wanIP.isEmpty ? "—" : info.wanIP) : "未连接")
+            if !info.wanGateway.isEmpty {
+                hairline
+                infoRow("网关", info.wanGateway)
+            }
+            if !info.dns.isEmpty {
+                hairline
+                infoRow("DNS", info.dns.prefix(2).joined(separator: "  "))
+            }
+            if !info.lanIP.isEmpty {
+                hairline
+                infoRow("局域网", info.lanIP)
+            }
+            if !info.dhcpStart.isEmpty {
+                hairline
+                infoRow("DHCP 池", info.dhcpLimit.isEmpty
+                        ? info.dhcpStart
+                        : "\(info.dhcpStart) · \(info.dhcpLimit)")
+            }
+        }
+    }
+
+    private func infoRow(_ title: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(title)
+                .font(.system(size: 14))
+            Spacer(minLength: 8)
+            Text(value)
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .padding(.vertical, 10)
     }
 
     // MARK: - 小组件
 
+    /// C 版的卡片：白底 + 一条 0.6pt 细边，没有阴影。靠留白分层，不靠色块。
+    private func card<Content: View>(_ title: String,
+                                     @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(title)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.bottom, 2)
+            content()
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 14)
+        .padding(.bottom, 6)
+        .background {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color(.secondarySystemGroupedBackground))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(Color(.separator).opacity(0.45), lineWidth: 0.6)
+        }
+    }
+
     private var hairline: some View {
         Rectangle()
-            .fill(Color(.separator).opacity(0.55))
+            .fill(Color(.separator).opacity(0.45))
             .frame(height: 0.5)
     }
 
-    private func chip(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 11))
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 4)
-            .background(Color(.secondarySystemFill), in: Capsule())
-    }
-
-    private var placeholderRow: some View {
+    private var emptyLine: some View {
         Text("—")
             .font(.system(size: 15))
             .foregroundStyle(.secondary)
@@ -261,110 +301,72 @@ struct NetworkView: View {
     }
 }
 
-/// 头图里那张拓扑：云 → 路由器 → 三台设备，背后三圈同心弧。
+/// 状态环：三段弧，每段 108°、间隙 4°，从正上方顺时针排。
 ///
-/// 用 `Canvas` 画而不是拼 `Path` 视图：这里全是装饰性线条，一次画完最省事；
-/// 外层套了 `.drawingGroup()`，滚动时只做图层位移，不会每帧重跑这段 draw。
-private struct HeroTopology: View {
+/// 用 `Canvas` 一次画完（纯装饰线条 + 渐变），外层 `.drawingGroup()` 压成离屏图层——
+/// 滚动时只做位移合成，不会每帧重跑这段绘制（同 `SpeedSparkline`，见 v2.2.0）。
+private struct StatusArcs: View {
+    let wan: Bool
+    let wifi: Bool
+    let wired: Bool
+
+    static let wanColor = Color(red: 0.16, green: 0.45, blue: 0.95)
+    static let wifiColor = Color(red: 0.09, green: 0.60, blue: 0.72)
+    static let wiredColor = Color(red: 0.45, green: 0.35, blue: 0.88)
+
     var body: some View {
         Canvas { context, size in
-            let w = size.width
-            let h = size.height
-            let router = CGPoint(x: w * 0.50, y: h * 0.46)
+            let center = CGPoint(x: size.width / 2, y: size.height / 2)
+            let radius = min(size.width, size.height) / 2 - 13
+            guard radius > 20 else { return }
 
-            // 同心弧：越外越淡，给中心一点「信号扩散」的纵深。
-            let arcScales: [CGFloat] = [0.22, 0.34, 0.46]
-            for (index, factor) in arcScales.enumerated() {
-                let radius = w * factor
-                let rect = CGRect(x: router.x - radius,
-                                  y: router.y - radius,
-                                  width: radius * 2,
-                                  height: radius * 2)
-                context.stroke(
-                    Path(ellipseIn: rect),
-                    with: .color(.white.opacity(0.10 - Double(index) * 0.028)),
-                    lineWidth: 1
-                )
-            }
+            let lineWidth: CGFloat = 12
+            let gap = CGFloat.pi * 2 / 90
+            let span = (CGFloat.pi * 2 - gap * 3) / 3
 
-            // 云（三团重叠的圆 + 一块底座，纯色低透明度，远看是朵云的剪影）
-            let cloud = CGPoint(x: w * 0.13, y: h * 0.42)
-            let puffs: [(dx: CGFloat, dy: CGFloat, r: CGFloat)] = [
-                (-9, 2, 8), (0, -3, 10), (9, 2, 8)
-            ]
-            for puff in puffs {
-                let rect = CGRect(x: cloud.x + puff.dx - puff.r,
-                                  y: cloud.y + puff.dy - puff.r,
-                                  width: puff.r * 2,
-                                  height: puff.r * 2)
-                context.fill(Path(ellipseIn: rect), with: .color(.white.opacity(0.16)))
-            }
-            context.fill(
-                Path(roundedRect: CGRect(x: cloud.x - 11, y: cloud.y + 2, width: 22, height: 8),
-                     cornerRadius: 4),
-                with: .color(.white.opacity(0.16))
-            )
-
-            // 云 → 路由器：虚线，中途断开的画法正好表示「这一跳是无线/外网」
-            var wan = Path()
-            wan.move(to: CGPoint(x: cloud.x + 18, y: cloud.y))
-            wan.addLine(to: CGPoint(x: router.x - w * 0.16, y: router.y))
+            // 底环：三段全断的时候页面不至于只剩中间一串数字。
             context.stroke(
-                wan,
-                with: .color(.white.opacity(0.35)),
-                style: StrokeStyle(lineWidth: 1.4, dash: [4, 4])
+                Path(ellipseIn: CGRect(x: center.x - radius, y: center.y - radius,
+                                       width: radius * 2, height: radius * 2)),
+                with: .color(Color.primary.opacity(0.045)),
+                style: StrokeStyle(lineWidth: lineWidth)
             )
 
-            // 路由器机身
-            let bodyWidth = w * 0.24
-            let bodyHeight: CGFloat = 34
-            let bodyRect = CGRect(x: router.x - bodyWidth / 2,
-                                  y: router.y - bodyHeight / 2,
-                                  width: bodyWidth,
-                                  height: bodyHeight)
-            let body = Path(roundedRect: bodyRect, cornerRadius: 11)
-            context.fill(body, with: .color(.white.opacity(0.13)))
-            context.stroke(body, with: .color(.white.opacity(0.50)), lineWidth: 1.2)
-
-            // 两根天线
-            for offset in [-bodyWidth * 0.28, bodyWidth * 0.28] {
-                var antenna = Path()
-                antenna.move(to: CGPoint(x: router.x + offset, y: bodyRect.minY))
-                antenna.addLine(to: CGPoint(x: router.x + offset, y: bodyRect.minY - 8))
-                context.stroke(
-                    antenna,
-                    with: .color(.white.opacity(0.55)),
-                    style: StrokeStyle(lineWidth: 1.8, lineCap: .round)
-                )
-            }
-
-            // 机身里那一格（不是指示灯，是「面板」的意思）
-            context.fill(
-                Path(roundedRect: CGRect(x: bodyRect.minX + 10,
-                                         y: router.y - 3,
-                                         width: bodyWidth * 0.46,
-                                         height: 6),
-                     cornerRadius: 3),
-                with: .color(.white.opacity(0.30))
-            )
-
-            // 路由器 → 三台设备
-            let devices = [
-                CGPoint(x: w * 0.86, y: h * 0.26),
-                CGPoint(x: w * 0.89, y: h * 0.46),
-                CGPoint(x: w * 0.86, y: h * 0.66)
+            let segments: [(on: Bool, color: Color)] = [
+                (wan, Self.wanColor),
+                (wifi, Self.wifiColor),
+                (wired, Self.wiredColor)
             ]
-            for point in devices {
-                var link = Path()
-                link.move(to: CGPoint(x: bodyRect.maxX, y: router.y))
-                link.addLine(to: point)
-                context.stroke(link, with: .color(.white.opacity(0.22)), lineWidth: 1.2)
 
-                let rect = CGRect(x: point.x - 7, y: point.y - 7, width: 14, height: 14)
-                context.fill(Path(ellipseIn: rect), with: .color(.white.opacity(0.15)))
-                context.stroke(Path(ellipseIn: rect), with: .color(.white.opacity(0.38)), lineWidth: 1)
+            for (index, segment) in segments.enumerated() {
+                let start = -CGFloat.pi / 2 + CGFloat(index) * (span + gap)
+                var arc = Path()
+                arc.addArc(center: center,
+                           radius: radius,
+                           startAngle: .radians(Double(start)),
+                           endAngle: .radians(Double(start + span)),
+                           clockwise: false)
+
+                guard segment.on else {
+                    context.stroke(arc,
+                                   with: .color(segment.color.opacity(0.16)),
+                                   style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                    continue
+                }
+
+                // 先画一圈同色更宽更淡的，远看像弧在发光；再用渐变把弧本身提亮。
+                context.stroke(arc,
+                               with: .color(segment.color.opacity(0.12)),
+                               style: StrokeStyle(lineWidth: lineWidth + 10, lineCap: .round))
+                context.stroke(arc,
+                               with: .linearGradient(
+                                   Gradient(colors: [segment.color.opacity(0.70), segment.color]),
+                                   startPoint: CGPoint(x: center.x - radius, y: center.y - radius),
+                                   endPoint: CGPoint(x: center.x + radius, y: center.y + radius)),
+                               style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
             }
         }
+        .drawingGroup()
         .accessibilityHidden(true)
     }
 }

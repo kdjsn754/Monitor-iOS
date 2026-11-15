@@ -1153,58 +1153,193 @@ final class AppModel {
             let tokens = body.split(whereSeparator: { $0 == " " || $0 == "\n" })
             let carrier = tokens.first.flatMap { Int($0) } ?? 0
             let speed = tokens.count > 1 ? (Int(tokens[1]) ?? 0) : 0
-            ports.append(NetPortInfo(name: name,
-                                     role: name == info.wanDevice ? "WAN" : "LAN",
-                                     up: carrier == 1,
-                                     speed: speed))
+            ports.append(NetPortInfo(name: name, role: "LAN", up: carrier == 1, speed: speed))
         }
-        ports.sort { $0.name < $1.name }
+        // WAN 是哪一块网口，三个来源按可信度排队：
+        //   ubus 的 `l3_device` → UCI 的 `network.wan.device` → `stats.wanDevice`。
+        // 最后那个是「默认路由的 dev」，概览页的上下行速率一直用它，从来没错过，
+        // 所以宁可退到它，也不要让 WAN 认不出来。
+        let wanName = [info.wanDevice, net["network.wan.device"] ?? "", stats.wanDevice]
+            .first { !$0.isEmpty } ?? ""
+        for index in ports.indices where ports[index].name == wanName {
+            ports[index].role = "WAN"
+        }
+        ports.sort { left, right in
+            if (left.role == "WAN") != (right.role == "WAN") { return left.role == "WAN" }
+            return left.name < right.name
+        }
         info.ports = ports
 
-        // ---- 无线：一个 AP 接口一个频段 ----
-        var bands: [WifiBandInfo] = []
-        for (key, body) in sections where key.hasPrefix("WIFI ") {
-            var band = WifiBandInfo()
-            band.ifname = String(key.dropFirst("WIFI ".count))
-            let lines = body.split(separator: "\n", omittingEmptySubsequences: false)
-            let counter = lines.first.map { String($0) } ?? ""
-            band.clients = Int(counter.trimmingCharacters(in: .whitespaces)) ?? 0
-            var type = ""
-            for line in lines.dropFirst() {
-                let text = String(line).trimmingCharacters(in: .whitespaces)
-                if text.hasPrefix("ssid ") {
-                    band.ssid = String(text.dropFirst("ssid ".count))
-                } else if text.hasPrefix("type ") {
-                    type = String(text.dropFirst("type ".count))
-                } else if text.hasPrefix("channel ") {
-                    parseChannelLine(text, into: &band)
-                }
+        // ---- 无线 ----
+        //
+        // 两路数据合起来才有完整一行：
+        //   UCI（配置面）—— 有哪些 radio、什么频段、开没开、频宽、SSID 名字；
+        //   iwinfo（实测面）—— 现在实际的 SSID / 信道 / 频宽 / 关联台数。
+        // 只用 iwinfo：读不到就整张卡空白（v2.6.5 的毛病）；只用 UCI：
+        // 「auto」信道和台数永远是错的。两边都拿不到才认输。
+        let wifi = uciValues(sections["WLCFG"])
+
+        // 每个 radio 的主 SSID 接口。访客 / IoT / Mesh / 中继上游都挂在同一个 radio 上，
+        // 全列出来就是同一频段重复几行，所以按标志位排掉。
+        var mainSSID: [String: String] = [:]
+        var mainIfname: [String: String] = [:]
+        for (key, value) in wifi where key.hasPrefix("wireless.") && key.hasSuffix(".device") {
+            let section = String(key.dropFirst("wireless.".count).dropLast(".device".count))
+            guard !section.isEmpty else { continue }
+            let flag: (String) -> String? = { wifi["wireless.\(section).\($0)"] }
+            if flag("guest") == "1" || flag("iot") == "1" || flag("multi_ap") == "1" { continue }
+            if flag("mode") == "sta" { continue }
+            if mainSSID[value] == nil {
+                mainSSID[value] = flag("ssid") ?? ""
+                mainIfname[value] = flag("ifname") ?? ""
             }
-            // 只留 AP 口：client（中继/上游）和 monitor 都不是「我们的热点」。
-            guard type.hasPrefix("AP") else { continue }
+        }
+
+        var radios: [String] = []
+        for key in wifi.keys where key.hasPrefix("wireless.") && key.hasSuffix(".band") {
+            radios.append(String(key.dropFirst("wireless.".count).dropLast(".band".count)))
+        }
+        radios.sort()
+
+        // iwinfo 的产出先收一遍，作为「这个频段此刻真在广播」的证据。
+        var measured: [WifiBandInfo] = []
+        for (key, body) in sections where key.hasPrefix("AP ") {
+            let ifname = String(key.dropFirst("AP ".count))
+            var band = WifiBandInfo()
+            band.ifname = ifname
+            band.band = bandFromIfname(ifname)
+            band.up = true
+            let counter = firstLine(sections["STA \(ifname)"])
+            band.clients = Int(counter.trimmingCharacters(in: .whitespaces)) ?? 0
+            parseIwinfo(body, into: &band)
+            guard !band.ssid.isEmpty else { continue }
+            measured.append(band)
+        }
+
+        var bands: [WifiBandInfo] = []
+        for radio in radios {
+            var band = WifiBandInfo()
+            band.band = bandLabel(wifi["wireless.\(radio).band"] ?? "")
+            band.up = (wifi["wireless.\(radio).disabled"] ?? "0") != "1"
+            band.ssid = mainSSID[radio] ?? ""
+            band.channel = Int(wifi["wireless.\(radio).channel"] ?? "") ?? 0
+            band.width = widthDigits(wifi["wireless.\(radio).htmode"] ?? "")
+            var ifname = mainIfname[radio] ?? ""
+            if ifname.isEmpty { ifname = defaultIfname(for: band.band) }
+            band.ifname = ifname
+
+            if let text = sections["AP \(ifname)"], !text.isEmpty {
+                parseIwinfo(text, into: &band)
+                let counter = firstLine(sections["STA \(ifname)"])
+                if let clients = Int(counter.trimmingCharacters(in: .whitespaces)) {
+                    band.clients = clients
+                }
+                band.up = true
+            } else if let match = measured.first(where: { $0.band == band.band }) {
+                // UCI 里的 ifname 跟实际对不上（改了机型 / 固件换了命名），
+                // 但 iwinfo 那个频段确实有数据，按频段认领。
+                band.ifname = match.ifname
+                band.ssid = match.ssid
+                band.channel = match.channel
+                band.width = match.width
+                band.clients = match.clients
+                band.up = true
+            }
             bands.append(band)
         }
-        bands.sort { $0.freq < $1.freq }
+        if bands.isEmpty { bands = measured }
+        bands.sort { $0.band < $1.band }
         info.bands = bands
 
         network = info
     }
 
-    /// `iw dev X info` 里的那一行：
-    /// `channel 149 (5745 MHz), width: 160 MHz, center1: 5570 MHz`
-    /// 只取三样：信道号、中心频率（用来判频段）、频宽。
-    private func parseChannelLine(_ text: String, into band: inout WifiBandInfo) {
-        let tokens = text.split(separator: " ")
-        if tokens.count > 1, let channel = Int(tokens[1]) { band.channel = channel }
-        for (index, token) in tokens.enumerated() {
-            if token.hasPrefix("(") {
-                let digits = token.dropFirst().prefix(while: { $0.isNumber })
-                if let freq = Int(digits) { band.freq = freq }
+    /// 解析 `iwinfo <if> info`。MTK 平台（ra0 / rai0）走 wext 后端，输出长这样：
+    ///
+    ///     ra0       ESSID: "GL-MT3600BE-xxx"
+    ///               Mode: Master  Channel: 6 (2.437 GHz)  HT Mode: EHT40
+    ///               Type: wext  HW Mode(s): 802.11be/ax/ac/n/g/b
+    ///
+    /// 一行里同时给了信道、频率和频宽，比「`iw dev info` + UCI 拼」靠谱得多。
+    /// 解析出来的值直接覆盖 UCI 那一份：配置里写的是 `auto`，实际落在哪个信道只有这里知道。
+    private func parseIwinfo(_ text: String, into band: inout WifiBandInfo) {
+        for rawLine in text.split(separator: "\n") {
+            let line = String(rawLine)
+
+            if let range = line.range(of: "ESSID: ") {
+                let quoted = String(line[range.upperBound...]).trimmingCharacters(in: .whitespaces)
+                band.ssid = quoted.replacingOccurrences(of: "\"", with: "")
             }
-            if token == "width:", index + 1 < tokens.count {
-                band.width = String(tokens[index + 1].prefix(while: { $0.isNumber }))
+
+            guard let channelRange = line.range(of: "Channel: ") else { continue }
+            let rest = String(line[channelRange.upperBound...])
+            let head = rest.split(separator: " ").first.map(String.init) ?? ""
+            if let channel = Int(head) { band.channel = channel }
+
+            // 括号里是频率：`2.437 GHz` 或 `2437 MHz`。只有 UCI 的 band 缺了才拿它判频段。
+            if band.band.isEmpty,
+               let open = rest.firstIndex(of: "("),
+               let close = rest.firstIndex(of: ")") {
+                let inside = String(rest[rest.index(after: open)..<close])
+                if let mhz = frequencyMHz(inside) {
+                    band.band = mhz >= 5925 ? "6" : (mhz >= 2500 ? "5" : "2.4")
+                }
+            }
+
+            if let htRange = line.range(of: "HT Mode: ") {
+                band.width = widthDigits(String(line[htRange.upperBound...]))
             }
         }
+    }
+
+    /// UCI 的 `band`：`2g` / `5g` / `6g`（个别固件写 `2.4g`）。
+    private func bandLabel(_ code: String) -> String {
+        let value = code.trimmingCharacters(in: .whitespaces).lowercased()
+        if value.hasPrefix("6") { return "6" }
+        if value.hasPrefix("5") { return "5" }
+        if value.hasPrefix("2") { return "2.4" }
+        return ""
+    }
+
+    /// MTK 的接口名前缀是死规矩：ra = 2.4G、rai = 5G、rax = 6G。
+    /// UCI 里没写 `ifname` 时（开机第一轮、或老固件），靠它推一个去问 iwinfo。
+    private func bandFromIfname(_ name: String) -> String {
+        let value = name.lowercased()
+        if value.hasPrefix("rax") { return "6" }
+        if value.hasPrefix("rai") { return "5" }
+        if value.hasPrefix("ra") { return "2.4" }
+        return ""
+    }
+
+    private func defaultIfname(for band: String) -> String {
+        switch band {
+        case "6": return "rax0"
+        case "5": return "rai0"
+        case "2.4": return "ra0"
+        default: return ""
+        }
+    }
+
+    /// `EHT160` → `160`，`HT40` → `40`。只取尾部数字，前缀是什么制式不影响显示。
+    private func widthDigits(_ text: String) -> String {
+        let token = text.trimmingCharacters(in: .whitespaces)
+            .split(separator: " ").first.map(String.init) ?? ""
+        var digits = ""
+        for character in token.reversed() {
+            guard character.isNumber else { break }
+            digits = String(character) + digits
+        }
+        return digits
+    }
+
+    /// `2.437 GHz` / `2437 MHz` / `2437` → 2437。
+    private func frequencyMHz(_ text: String) -> Int? {
+        let cleaned = text
+            .replacingOccurrences(of: "GHz", with: "")
+            .replacingOccurrences(of: "MHz", with: "")
+            .trimmingCharacters(in: .whitespaces)
+        guard let value = Double(cleaned), value > 0 else { return nil }
+        return value < 100 ? Int(value * 1000) : Int(value)
     }
 
     /// `uci show` 的输出 → 字典。值是单引号包起来的，去掉两端引号。
@@ -3171,15 +3306,20 @@ private extension AppModel {
 
             """
         case .network:
-            // 网络页（v2.6.5）：只读，一条写操作都没有。
-            //   WANST / LANST —— ubus 报的是**当前真正生效**的那份（DHCP 拿到的地址
-            //                    UCI 里根本没有），地址、网关、DNS 都以它为准；
-            //   NETCFG / DHCPCFG / WLCFG —— 配置面，补 ubus 不给的字段
-            //                    （局域网掩码、DHCP 池、SSID 名称）；
-            //   PORT <网口>   —— carrier / speed，给「有线」卡；
-            //   WIFI <网口>   —— 每个 phy80211 口的客户端数 + `iw dev info`，
-            //                    频段（2.4 / 5 / 6 GHz）靠中心频率反推，不写死网口名。
-            // 每段都 `2>/dev/null`、结尾 `true`：缺哪个工具，其余段落照样出结果。
+            // 网络页（v2.6.6）：只读，一条写操作都没有。
+            //
+            // **为什么不用 `iw`**（v2.6.5 就栽在这）：MT3600BE 是 MT7993 + MTK 私有驱动，
+            // 没有 `phy80211` 链接，`iw dev` 什么也读不到，整张无线卡是空的。
+            // 固件里装的是 `iwinfo`（GL 自己的 LuCI 也用它，走 wext 后端），输出形如：
+            //     ra0       ESSID: "GL-MT3600BE-xxx"
+            //               Mode: Master  Channel: 6 (2.437 GHz)  HT Mode: EHT40
+            //               Type: wext  HW Mode(s): 802.11be/ax/ac/n/g/b
+            // 一次给全 SSID / 信道 / 频率 / 频宽，不用再拼 `iw dev info`。
+            //
+            // 网口名同样是实机实证：固件 `/etc/board.d/02_network` 里 `*mt3600be*`
+            // 走 `ucidef_set_interfaces_lan_wan eth1 eth0`，即 **WAN = eth0、LAN = eth1**，
+            // 两个都是 2.5G。所以这里不再用 `eth*` 通配，改成按「有 /device 链接」筛物理口
+            // （跳过 br- / ppp / wlan / apcli 这些虚拟口），换机型也照样列。
             return """
             echo @@WANST
             ubus call network.interface.wan status 2>/dev/null
@@ -3191,20 +3331,22 @@ private extension AppModel {
             uci show dhcp 2>/dev/null
             echo @@WLCFG
             uci show wireless 2>/dev/null
-            for d in /sys/class/net/eth*; do
+            for d in /sys/class/net/*; do
               n=${d##*/}
-              case "$n" in *.*) continue;; esac
+              case "$n" in lo|br-*|*.*|ppp*|apcli*|ra*|rai*|rax*|wlan*|sit*|gre*|tun*|tap*|bond*|veth*|docker*|ifb*) continue;; esac
+              [ -e "$d/device" ] || continue
               c=$(cat "$d/carrier" 2>/dev/null); [ -n "$c" ] || c=0
-              s=$(cat "$d/speed" 2>/dev/null); [ -n "$s" ] || s=0; [ "$s" = "-1" ] && s=0
+              s=$(cat "$d/speed" 2>/dev/null); [ "$s" = "-1" ] && s=0; [ -n "$s" ] || s=0
               echo "@@PORT $n"
               echo "$c $s"
             done
             for d in /sys/class/net/*; do
               n=${d##*/}
-              [ -e "$d/phy80211" ] || continue
-              echo "@@WIFI $n"
-              iw dev "$n" station dump 2>/dev/null | grep -c '^Station'
-              iw dev "$n" info 2>/dev/null
+              case "$n" in ra*|rai*|rax*) ;; *) continue;; esac
+              echo "@@AP $n"
+              iwinfo "$n" info 2>/dev/null
+              echo "@@STA $n"
+              iwinfo "$n" assoclist 2>/dev/null | grep -c ':'
             done
             true
 

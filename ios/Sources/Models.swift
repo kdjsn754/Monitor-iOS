@@ -130,6 +130,19 @@ struct NetworkInfo {
 
     var wifiClients: Int { bands.reduce(0) { $0 + $1.clients } }
 
+    /// 状态环的三段，按「WAN → 无线 → 有线」顺序。
+    ///
+    /// **不做加权总分**：合成分数看着漂亮，但只要有一项判错，用户就会觉得「数据有问题」——
+    /// 这三项各自都能在页面上找到对应的那一行去核对，错了也一眼能指出来。
+    var wanOK: Bool { wanUp && !wanIP.isEmpty }
+    var wifiOK: Bool { bands.contains { $0.up } }
+    var wiredOK: Bool { ports.contains { $0.up } }
+
+    var wanLabel: String {
+        guard wanUp else { return "未连接" }
+        return wanIP.isEmpty ? wanProtoLabel : "\(wanProtoLabel) · \(wanIP)"
+    }
+
     /// 头图胶囊：最快那个网口的握手速率。
     var bestPortLabel: String {
         let speed = ports.map(\.speed).max() ?? 0
@@ -161,26 +174,27 @@ struct NetworkInfo {
     }
 }
 
-/// 一个 Wi-Fi 频段（一个 AP 接口一行）。
+/// 一个 Wi-Fi 频段（一个 radio 一行）。
+///
+/// **v2.6.6 把「靠频率反推频段」删掉了**：MT3600BE 是 MT7993 + MTK 私有驱动，
+/// 没有 `phy80211` 链接，`iw dev` 读不到任何东西（v2.6.5 整张无线卡是空的就栽在这）。
+/// 现在频段直接取 UCI 的 `wireless.radioX.band`（`2g` / `5g`），这是配置面的事实，
+/// 不依赖驱动实现；取不到时再按接口名前缀判（MTK 固定 ra=2.4G、rai=5G、rax=6G）。
 struct WifiBandInfo: Identifiable, Equatable {
     var ifname = ""
+    /// `2.4` / `5` / `6`，不带单位，显示时拼 "GHz"。
+    var band = ""
     var ssid = ""
     var channel = 0
-    /// 中心频率（MHz），用来判断这个接口属于哪个频段：
-    /// `iw` 只给频率不给「2.4G / 5G」，而频段名是这一页唯一的分类依据。
-    var freq = 0
     /// 频宽，只存数字（`40` / `160`），显示时加 M。
     var width = ""
     var clients = 0
+    /// 这个 radio 是否开着（UCI `disabled=1` 为关）。
+    var up = false
 
-    var id: String { ifname }
+    var id: String { ifname.isEmpty ? band : ifname }
 
-    var bandName: String {
-        if freq >= 5925 { return "6 GHz" }
-        if freq >= 2500 { return "5 GHz" }
-        if freq > 0 { return "2.4 GHz" }
-        return "无线"
-    }
+    var bandName: String { band.isEmpty ? "无线" : "\(band) GHz" }
 }
 
 /// 一个物理网口。
