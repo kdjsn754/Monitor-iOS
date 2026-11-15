@@ -1,20 +1,19 @@
 import SwiftUI
 
-/// 设备图标：一个圆角方块，底色是类型色的 12%，符号统一一个字重。
+/// 设备图标：一个圆角方块，底色是类型色的 12%，里面是自绘的线条图标。
 ///
 /// **为什么要有这一个组件**：以前每行各写各的 `Image(systemName:)`，
-/// 符号大小 13 / 12.5 混着来，`video`（摄像头）和 `wifi` 是实心笔画，
-/// 设备类全是线框，有线还是个尖角连接头——一列看下去像东拼西凑
-/// （用户 2026-11-16：「各种设备类型的图标风格都不统一」）。
-/// 现在所有类型共用同一个容器、同一个字重、同一个光学尺寸，唯一的变量是符号本身。
+/// 符号大小 13 / 12.5 混着来，而且 SF Symbols 里这几个设备图标一半实心一半线框
+/// （`hifispeaker` / `applewatch` / `gamecontroller` 是实心的），一列看下去像拼的
+/// （用户 2026-11-16：「图标风格不一样，有的实心有的线条」）。
+/// 现在统一走 `DeviceGlyph`：同一个容器、同一支笔、同一个光学尺寸，只有图形不同。
 struct ClientBadgeIcon: View {
-    let symbol: String
+    let client: NetClient
     var tint: Color
     var size: CGFloat = 30
 
     var body: some View {
-        Image(systemName: symbol)
-            .font(.system(size: size * 0.47, weight: .regular))
+        DeviceGlyph(kind: ClientClass(rawValue: client.deviceClass), size: size * 0.58)
             .foregroundStyle(tint)
             .frame(width: size, height: size)
             .background {
@@ -89,30 +88,33 @@ struct ClientDetailLine: View {
     let client: NetClient
     var size: CGFloat = 11.5
 
-    private var text: String {
-        var bits: [String] = []
-        if !client.ip.isEmpty { bits.append(client.ip) }
-        if !client.iface.isEmpty { bits.append(client.iface) }
-        return bits.isEmpty ? client.mac : bits.joined(separator: " · ")
+    /// 地址列定宽 92pt：`192.168.8.11` 比 `192.168.8.139` 少一个字符，
+    /// 不定宽的话后面那个「·」和接入方式每行都落在不同的横坐标上
+    /// （用户 2026-11-16：「这两个模块 IP 后面的点和连接类型还是没对齐」）。
+    private var address: String {
+        client.ip.isEmpty ? client.mac : client.ip
     }
 
     var body: some View {
-        HStack(spacing: 5) {
-            Text(text)
-                .font(.system(size: size))
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                .lineLimit(1)
-                .truncationMode(.tail)
+        HStack(spacing: 0) {
+            Text(address)
+                .frame(minWidth: 92, alignment: .leading)
+            if !client.iface.isEmpty {
+                Text("· " + client.iface)
+            }
             if !client.reservedIP.isEmpty {
                 Text("固定")
                     .font(.system(size: size - 2.5, weight: .medium))
-                    .foregroundStyle(.secondary)
                     .padding(.horizontal, 4)
                     .padding(.vertical, 0.5)
                     .background { Capsule().fill(Color(.quaternarySystemFill)) }
+                    .padding(.leading, 5)
             }
             Spacer(minLength: 0)
         }
+        .font(.system(size: size))
+        .foregroundStyle(.secondary)
+        .monospacedDigit()
+        .lineLimit(1)
     }
 }

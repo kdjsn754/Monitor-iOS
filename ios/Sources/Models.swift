@@ -493,11 +493,8 @@ struct NetClient: Identifiable, Equatable {
         return deviceClass
     }
 
-    /// 设备行左边那个图标：优先用官方给的类型，认不出来再按有线 / 无线分。
-    var icon: String {
-        if let known = ClientClass(rawValue: deviceClass) { return known.icon }
-        return wired ? "cable.connector" : "wifi"
-    }
+    /// 图标不在这里给：那一列统一走 `DeviceGlyph`（自绘线条），
+    /// 免得 SF Symbols 里实心 / 线框混在一列里（见 `DeviceGlyph` 文件头）。
 }
 
 /// 官方固件支持的设备类型。
@@ -539,26 +536,8 @@ enum ClientClass: String, CaseIterable {
         }
     }
 
-    /// 每一类配一个**同一套线框风格**的符号：设备类的都是轮廓图，
-    /// 不用 `video`（实心摄像头）、`questionmark.circle`（细圈）这类跟别人
-    /// 笔画重量不一样的，否则并排一列看下去是拼的（2026-11-16）。
-    var icon: String {
-        switch self {
-        case .phone: return "iphone"
-        case .pad: return "ipad"
-        case .laptop: return "laptopcomputer"
-        case .computer: return "desktopcomputer"
-        case .television: return "tv"
-        case .camera: return "camera"
-        case .sound: return "hifispeaker"
-        case .printer: return "printer"
-        case .watch: return "applewatch"
-        case .games: return "gamecontroller"
-        case .smartAppliances: return "lightbulb"
-        case .gateway: return "wifi.router"
-        case .unknown: return "questionmark"
-        }
-    }
+    /// 中文名之外的图形不在这里给：图标走 `DeviceGlyph`（自绘线条），
+    /// 免得 SF Symbols 里实心/线框混在一起。
 }
 
 /// 一个 Wi-Fi 频段（一个 radio 一行）。

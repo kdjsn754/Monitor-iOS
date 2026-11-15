@@ -4040,8 +4040,20 @@ private struct NetVap {
             separator: "\n", omittingEmptySubsequences: false
         ) {
             if line.hasPrefix("@@") {
-                key = String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces)
-                result[key!] = ""
+                // 标记行可能是 `@@KEY`，也可能是 `@@KEY 值` 或 `@@AP ra0`（键里带空格）。
+                // 整行原样当键**必须保留**（`sections["AP ra0"]` 就是这么查的），
+                // 但 `echo @@DONE ok` 这种「键 + 值」的写法还要能用 `sections["DONE"]`
+                // 查到——以前整行都当键，于是所有 `sections["DONE"]` 检查永远失败，
+                // 改名 / 阻止入网 / 固定地址 / 设备类型全误报「路由器没有回应」：
+                // 明明写进去了，却弹错并把值回退（2026-11-16 实机）。
+                let body = String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+                key = body
+                result[body] = ""
+                if let space = body.firstIndex(of: " ") {
+                    let head = String(body[body.startIndex..<space])
+                    let rest = String(body[body.index(after: space)...])
+                    result[head, default: ""] += rest + "\n"
+                }
             } else if let key {
                 result[key, default: ""] += String(line) + "\n"
             }

@@ -730,11 +730,11 @@ struct NetworkView: View {
 
     private func clientRow(_ client: NetClient) -> some View {
         // 名字下面只留「地址 · 接入」两段，设备类型交给左边那个图标
-        // （`client.icon` 就是按 `gl-client.class` 给的，再写一遍纯占长度）。
+        // （`ClientBadgeIcon` 按 `gl-client.class` 画图标，再写一遍纯占长度）。
         // 右侧两行数字走 `ClientMetricColumn`，和概览的「连接设备」是同一个视图；
         // 它 `.fixedSize()`，宁可让名字截断也不让数字折行。
         return HStack(spacing: 10) {
-            ClientBadgeIcon(symbol: client.icon, tint: rowColor(client))
+            ClientBadgeIcon(client: client, tint: rowColor(client))
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 5) {
                     Text(client.displayName)
@@ -1358,8 +1358,7 @@ private struct ClientEditorSheet: View {
                             if savingClass {
                                 ProgressView().controlSize(.small)
                             } else {
-                                Image(systemName: currentSymbol)
-                                    .font(.system(size: 13))
+                                DeviceGlyph(kind: ClientClass(rawValue: classValue), size: 16)
                                     .foregroundStyle(.secondary)
                                 Text(shownClass)
                                     .foregroundStyle(.secondary)
@@ -1464,10 +1463,6 @@ private struct ClientEditorSheet: View {
         return client.classLabel
     }
 
-    private var currentSymbol: String {
-        ClientClass(rawValue: classValue)?.icon ?? client.icon
-    }
-
     /// 选完立刻写，不走「保存」——类型是独立的配置，跟名称/地址那几项没有先后关系。
     ///
     /// **先改本地值再去写**：以前是等写成功再赋 `classValue`，于是点了类型之后
@@ -1547,8 +1542,7 @@ private struct ClientClassSheet: View {
                             pick(item.rawValue)
                         } label: {
                             HStack(spacing: 12) {
-                                Image(systemName: item.icon)
-                                    .font(.system(size: 15, weight: .regular))
+                                DeviceGlyph(kind: item, size: 18)
                                     .foregroundStyle(.secondary)
                                     .frame(width: 26, alignment: .center)
                                 Text(item.title)

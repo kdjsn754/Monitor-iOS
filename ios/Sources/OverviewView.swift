@@ -567,7 +567,7 @@ struct OverviewView: View {
             ? Color(red: 0.85, green: 0.25, blue: 0.22)
             : (client.wired ? NetPalette.wired : NetPalette.wifi)
         return HStack(spacing: 10) {
-            ClientBadgeIcon(symbol: client.icon, tint: tint)
+            ClientBadgeIcon(client: client, tint: tint)
             VStack(alignment: .leading, spacing: 3) {
                 Text(client.displayName)
                     .font(.system(size: 15, weight: .semibold))
