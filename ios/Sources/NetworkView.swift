@@ -29,7 +29,6 @@ import SwiftUI
 struct NetworkView: View {
     @Environment(AppModel.self) private var model: AppModel
     @State private var refreshing = false
-    @State private var reconnecting = false
     @State private var clearingOffline = false
     @State private var editingBand: WifiBandInfo?
     @State private var editingClient: NetClient?
@@ -114,15 +113,16 @@ struct NetworkView: View {
     /// 叶子节点上，点进去就是那个频段的编辑页（启用开关也在那一页）。
     ///
     /// 结构：出口胶囊 → 竖线 → 路由器圆环 → 分叉 → 2.4G / 5G / 有线三片叶子。
-    /// 每个节点都能点：出口 → 上网二级页（v2.9.1 起，不再是滚到「上网」卡），
-    /// 频段 → 编辑页，路由器 / 有线 → 局域网与端口二级页（v2.9.0 起）。
+    /// 能点的只有两处：出口 → 上网二级页（v2.9.1 起），
+    /// 频段 → 编辑页、有线 → 局域网与端口二级页。
+    /// 中间那圈路由器是**纯展示**（v2.9.5 起去掉跳转，理由见 `routerHub`）。
     private func topology(openLan: @escaping () -> Void,
                           openUplink: @escaping () -> Void) -> some View {
         let leaves = leafNodes
         return VStack(spacing: 0) {
             internetNode(openUplink: openUplink)
             connector(ok: info.uplinkOK)
-            routerHub(openLan: openLan)
+            routerHub
             if !leaves.isEmpty {
                 TopoFork(leaves: leaves, spacing: Self.leafSpacing)
                 HStack(alignment: .top, spacing: Self.leafSpacing) {
@@ -220,64 +220,50 @@ struct NetworkView: View {
 
     /// 中心：路由器画成同心圆环（两道淡环 + 白底内圆），下面是名字、局域网地址、
     /// 实时上下行两个胶囊。整张图的视觉重心。
-    /// 点进去是局域网与端口二级页（地址池、端口状态、租期都在那儿改）。
-    private func routerHub(openLan: @escaping () -> Void) -> some View {
-        Button {
-            openLan()
-        } label: {
-            VStack(spacing: 5) {
-                ZStack {
-                    Circle()
-                        .fill(NetPalette.wan.opacity(0.09))
-                        .frame(width: 78, height: 78)
-                    Circle()
-                        .strokeBorder(NetPalette.wan.opacity(0.22), lineWidth: 1)
-                        .frame(width: 78, height: 78)
-                    Circle()
-                        .strokeBorder(NetPalette.wan.opacity(0.12), lineWidth: 0.8)
-                        .frame(width: 63, height: 63)
-                    Circle()
-                        .fill(Color(.systemBackground))
-                        .frame(width: 49, height: 49)
-                        .shadow(color: Color.black.opacity(0.08), radius: 7, y: 2)
-                    Image(systemName: "wifi.router")
-                        .font(.system(size: 21, weight: .medium))
-                        .foregroundStyle(NetPalette.wan)
-                    // 右下角一枚小箭头：这一圈能点进去（不然看不出是个入口）。
-                    Circle()
-                        .fill(Color(.systemBackground))
-                        .frame(width: 19, height: 19)
-                        .overlay {
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 8.5, weight: .bold))
-                                .foregroundStyle(NetPalette.wan)
-                        }
-                        .overlay {
-                            Circle().strokeBorder(NetPalette.wan.opacity(0.25), lineWidth: 0.8)
-                        }
-                        .offset(x: 27, y: 27)
-                }
-                .padding(.bottom, 3)
-                Text(deviceName)
-                    .font(.system(size: 15.5, weight: .semibold))
-                    .foregroundStyle(Color.primary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-                Text(info.lanIP.isEmpty ? "—" : info.lanIP)
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                HStack(spacing: 8) {
-                    speedChip("arrow.down", info.rxSpeed, NetPalette.wan)
-                    speedChip("arrow.up", info.txSpeed, NetPalette.wifi)
-                }
-                .padding(.top, 3)
+    ///
+    /// **v2.9.5 起这一圈不再能点**（用户 2026-11-15：「拓扑图中间的路由器图标去掉
+    /// 点击跳转到局域网页面，只保留有线的」）。原来它右下角挂着一枚小箭头，
+    /// 点它和点最下面那片「有线」都进同一个「局域网与端口」页——同一个入口画两遍，
+    /// 反而让人以为中间那圈是另一件事。现在入口只有「有线」那一片：
+    /// 那片叶子本来就是「局域网」这一侧，点它进局域网页最自然。
+    private var routerHub: some View {
+        VStack(spacing: 5) {
+            ZStack {
+                Circle()
+                    .fill(NetPalette.wan.opacity(0.09))
+                    .frame(width: 78, height: 78)
+                Circle()
+                    .strokeBorder(NetPalette.wan.opacity(0.22), lineWidth: 1)
+                    .frame(width: 78, height: 78)
+                Circle()
+                    .strokeBorder(NetPalette.wan.opacity(0.12), lineWidth: 0.8)
+                    .frame(width: 63, height: 63)
+                Circle()
+                    .fill(Color(.systemBackground))
+                    .frame(width: 49, height: 49)
+                    .shadow(color: Color.black.opacity(0.08), radius: 7, y: 2)
+                Image(systemName: "wifi.router")
+                    .font(.system(size: 21, weight: .medium))
+                    .foregroundStyle(NetPalette.wan)
             }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 10)
-            .contentShape(Rectangle())
+            .padding(.bottom, 3)
+            Text(deviceName)
+                .font(.system(size: 15.5, weight: .semibold))
+                .foregroundStyle(Color.primary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+            Text(info.lanIP.isEmpty ? "—" : info.lanIP)
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            HStack(spacing: 8) {
+                speedChip("arrow.down", info.rxSpeed, NetPalette.wan)
+                speedChip("arrow.up", info.txSpeed, NetPalette.wifi)
+            }
+            .padding(.top, 3)
         }
-        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 10)
     }
 
     /// 一个方向的实时速率：小箭头 + 数字 + 单位，套一层同色淡底。
@@ -325,11 +311,17 @@ struct NetworkView: View {
         // v2.9.2 用 `wiredOK`（只看 WAN 口）画它，结果 WAN 口空着、LAN 口明明接著
         // 一台千兆设备，这片叶子却写「未连接」，底下一行又写「1 个端口」——
         // 自相矛盾，用户 2026-11-15 说的「有线显示逻辑还是有问题」。
+        //
+        // **v2.9.5 换掉这两行字**：用户又提「拓扑有线展示的信息看着很懵」。
+        // 原来大字是 `1G`、小字是「1 个端口」，两个数字挨着放，谁大谁小、
+        // 哪个是速率哪个是数量全靠猜；`1G` 还容易被读成「1 代 / 1 个 G」。
+        // 现在大字说**几根线在用**（「1 个口在用」），小字说**这条线多快**
+        // （「1Gbps」），数字后面都带单位，不用再猜。
         let lanUp = info.lanUpPorts
         out.append(TopoLeaf(id: "wired",
                             title: "有线",
-                            value: lanUp.isEmpty ? "未插网线" : info.lanSpeedLabel,
-                            caption: lanUp.isEmpty ? "—" : "\(lanUp.count) 个端口",
+                            value: lanUp.isEmpty ? "未接网线" : "\(lanUp.count) 个口在用",
+                            caption: lanUp.isEmpty ? "点开看端口" : "\(info.lanSpeedLabel)bps",
                             icon: "cable.connector",
                             color: NetPalette.wired,
                             on: info.lanOK,
@@ -443,25 +435,9 @@ struct NetworkView: View {
                 [("↓ 下载", info.wanRxTotal > 0 ? formatBytes(info.wanRxTotal) : "—", nil),
                  ("↑ 上传", info.wanTxTotal > 0 ? formatBytes(info.wanTxTotal) : "—", nil)]
             ])
-            divider
-            actionRow(reconnecting ? "正在重连…" : "重新连接",
-                      symbol: "arrow.triangle.2.circlepath",
-                      busy: reconnecting) {
-                Task { await reconnect() }
-            }
-        }
-    }
-
-    private func reconnect() async {
-        guard !reconnecting else { return }
-        reconnecting = true
-        let problem = await model.reconnectUplink()
-        await model.manualRefresh()
-        reconnecting = false
-        if let problem {
-            model.presentError(problem)
-        } else {
-            model.notice = Notice(kind: .ok, title: "已重新连接", detail: info.uplinkLabel)
+            // **v2.9.5 去掉「重新连接」**（用户 2026-11-15：「去掉上网瓦片的重新连接按钮」）。
+            // 它一直是这一卡里唯一的动作，和下面「设备」区的操作挤在一起看着像两套东西；
+            // 真要重连，断开再把中继切一下也能做到，不值得在这一卡里留一颗按钮。
         }
     }
 
