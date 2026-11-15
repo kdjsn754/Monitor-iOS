@@ -15,6 +15,7 @@ import UIKit
 enum TabGlyphKind {
     case overview
     case proxy
+    case network
     case settings
 }
 
@@ -26,16 +27,20 @@ enum TabGlyphImage {
         case (.overview, true): return overviewFilled
         case (.proxy, false): return proxyIdle
         case (.proxy, true): return proxyFilled
+        case (.network, false): return networkIdle
+        case (.network, true): return networkFilled
         case (.settings, false): return settingsIdle
         case (.settings, true): return settingsFilled
         }
     }
 
-    // 六张图全部预生成（每次都是同一像素，没必要重复画）。
+    // 八张图全部预生成（每次都是同一像素，没必要重复画）。
     private static let overviewIdle = render(.overview, filled: false)
     private static let overviewFilled = render(.overview, filled: true)
     private static let proxyIdle = render(.proxy, filled: false)
     private static let proxyFilled = render(.proxy, filled: true)
+    private static let networkIdle = render(.network, filled: false)
+    private static let networkFilled = render(.network, filled: true)
     private static let settingsIdle = render(.settings, filled: false)
     private static let settingsFilled = render(.settings, filled: true)
 
@@ -90,6 +95,7 @@ enum TabGlyphImage {
         switch kind {
         case .overview: return (overviewPath(), nil)
         case .proxy: return (proxyPath(), filled ? proxyCheckStroke() : nil)
+        case .network: return (networkPath(), nil)
         case .settings: return (settingsPath(), nil)
         }
     }
@@ -189,6 +195,33 @@ enum TabGlyphImage {
 
         // 中心孔：单独一条子路径，实心时靠 even-odd 挖空，空心时被描成一圈
         p.addEllipse(in: CGRect(x: 12 - hole, y: 12 - hole, width: hole * 2, height: hole * 2))
+        return p
+    }
+
+    /// 网络（v2.6.5）：一台带两根天线的路由器，机身左上角一枚指示灯。
+    ///
+    /// 为什么不用「地球 + 连线」那类拓扑图：24pt 下三个圆加三条线会糊成一团，
+    /// 而且 `代理` 已经是地球了，两个圆球放一起分不清。路由器的轮廓在这个尺寸
+    /// 反而最干净——一条宽横杠 + 两根短天线，正负空间都留得出来。
+    /// 指示灯单独一条子路径：实心时靠 even-odd 挖空（和齿轮的中心孔同一招）。
+    private static func networkPath() -> Path {
+        var p = Path()
+        p.addRoundedRect(
+            in: CGRect(x: 2.6, y: 12.0, width: 18.8, height: 8.4),
+            cornerSize: CGSize(width: 2.6, height: 2.6),
+            style: .continuous
+        )
+        p.addRoundedRect(
+            in: CGRect(x: 6.3, y: 5.6, width: 1.6, height: 6.4),
+            cornerSize: CGSize(width: 0.8, height: 0.8),
+            style: .continuous
+        )
+        p.addRoundedRect(
+            in: CGRect(x: 16.1, y: 5.6, width: 1.6, height: 6.4),
+            cornerSize: CGSize(width: 0.8, height: 0.8),
+            style: .continuous
+        )
+        p.addEllipse(in: CGRect(x: 5.4, y: 14.8, width: 2.2, height: 2.2))
         return p
     }
 

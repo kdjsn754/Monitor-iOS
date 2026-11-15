@@ -31,6 +31,9 @@ final class AppModel {
     var flashInfo = FlashInfo()
     var routerInfo = RouterInfo()
     var devices: [DeviceInfo] = []
+    /// 网络页的数据（v2.6.5）。只读，采集项是 `PollItem.network`，
+    /// 切到别的页就停——它跟 `stats` 一样是「这一页要看的东西」。
+    var network = NetworkInfo()
     /// 每台路由器上一次握手读到的设备名（`/proc/sys/kernel/hostname`），键是连接 id。
     ///
     /// 连接名称留空时拿它当显示名：`Redmi-AX6000` 比 `192.168.8.1` 好认。
@@ -1029,6 +1032,7 @@ final class AppModel {
         }
         if items.contains(.flash) { updateFlash(sections["FLASH"] ?? "") }
         if items.contains(.devices) { updateDevices(sections) }
+        if items.contains(.network) { applyNetwork(sections) }
         if items.contains(.clashState) {
             openClash = parseOpenClashInfo(sections, current: openClash)
         }
@@ -1081,6 +1085,145 @@ final class AppModel {
         if loadValues.count >= 2 { stats.load5 = loadValues[1] }
         if loadValues.count >= 3 { stats.load15 = loadValues[2] }
         appendHistory()
+    }
+
+    /// 网络页：把一轮采集拆成 `NetworkInfo`。
+    ///
+    /// 从上一份开始改、而不是每次都新建：局部失败时（比如某一拍 `ubus` 没回话）
+    /// 已经画出来的 IP、频段不会被清成空字符串——那种「数字闪一下没了」比不刷新更难受。
+    /// 频段和端口是这一轮的实测结果，每拍整体替换（接口真的消失了就该消失）。
+    private func applyNetwork(_ sections: [String: String]) {
+        guard !sections.isEmpty else { return }
+        var info = network
+        info.loaded = true
+
+        // ---- WAN：ubus 报的是当前真正生效的那一份 ----
+        if let wan = json(sections["WANST"]) {
+            info.wanUp = (wan["up"] as? Bool) ?? false
+            info.wanProto = (wan["proto"] as? String) ?? info.wanProto
+            let device = (wan["l3_device"] as? String) ?? ""
+            if !device.isEmpty { info.wanDevice = device }
+            if let uptime = number(wan["uptime"]) { info.wanUptime = uptime }
+            if let list = wan["ipv4-address"] as? [[String: Any]],
+               let first = list.first,
+               let address = first["address"] as? String,
+               !address.isEmpty {
+                info.wanIP = address
+            }
+            if let servers = wan["dns-server"] as? [String], !servers.isEmpty {
+                info.dns = servers
+            }
+            // 默认路由那一行的 next hop 就是网关（`target` 为 0.0.0.0）。
+            if let routes = wan["route"] as? [[String: Any]] {
+                for route in routes where (route["target"] as? String) == "0.0.0.0" {
+                    if let hop = route["nexthop"] as? String, !hop.isEmpty {
+                        info.wanGateway = hop
+                        break
+                    }
+                }
+            }
+        }
+
+        // ---- 局域网：ubus 优先，UCI 兜底 ----
+        if let lan = json(sections["LANST"]),
+           let list = lan["ipv4-address"] as? [[String: Any]],
+           let first = list.first,
+           let address = first["address"] as? String,
+           !address.isEmpty {
+            info.lanIP = address
+        }
+
+        let net = uciValues(sections["NETCFG"])
+        if info.lanIP.isEmpty, let value = net["network.lan.ipaddr"] { info.lanIP = value }
+        if let value = net["network.lan.netmask"] { info.lanMask = value }
+        if info.wanProto.isEmpty, let value = net["network.wan.proto"] { info.wanProto = value }
+        if info.wanIP.isEmpty, let value = net["network.wan.ipaddr"] { info.wanIP = value }
+        if info.wanGateway.isEmpty, let value = net["network.wan.gateway"] { info.wanGateway = value }
+        if info.wanDevice.isEmpty, let value = net["network.wan.device"] { info.wanDevice = value }
+
+        let dhcp = uciValues(sections["DHCPCFG"])
+        info.dhcpStart = dhcp["dhcp.lan.start"] ?? info.dhcpStart
+        info.dhcpLimit = dhcp["dhcp.lan.limit"] ?? info.dhcpLimit
+        info.dhcpLease = dhcp["dhcp.lan.leasetime"] ?? info.dhcpLease
+
+        // ---- 物理网口 ----
+        var ports: [NetPortInfo] = []
+        for (key, body) in sections where key.hasPrefix("PORT ") {
+            let name = String(key.dropFirst("PORT ".count))
+            let tokens = body.split(whereSeparator: { $0 == " " || $0 == "\n" })
+            let carrier = tokens.first.flatMap { Int($0) } ?? 0
+            let speed = tokens.count > 1 ? (Int(tokens[1]) ?? 0) : 0
+            ports.append(NetPortInfo(name: name,
+                                     role: name == info.wanDevice ? "WAN" : "LAN",
+                                     up: carrier == 1,
+                                     speed: speed))
+        }
+        ports.sort { $0.name < $1.name }
+        info.ports = ports
+
+        // ---- 无线：一个 AP 接口一个频段 ----
+        var bands: [WifiBandInfo] = []
+        for (key, body) in sections where key.hasPrefix("WIFI ") {
+            var band = WifiBandInfo()
+            band.ifname = String(key.dropFirst("WIFI ".count))
+            let lines = body.split(separator: "\n", omittingEmptySubsequences: false)
+            let counter = lines.first.map { String($0) } ?? ""
+            band.clients = Int(counter.trimmingCharacters(in: .whitespaces)) ?? 0
+            var type = ""
+            for line in lines.dropFirst() {
+                let text = String(line).trimmingCharacters(in: .whitespaces)
+                if text.hasPrefix("ssid ") {
+                    band.ssid = String(text.dropFirst("ssid ".count))
+                } else if text.hasPrefix("type ") {
+                    type = String(text.dropFirst("type ".count))
+                } else if text.hasPrefix("channel ") {
+                    parseChannelLine(text, into: &band)
+                }
+            }
+            // 只留 AP 口：client（中继/上游）和 monitor 都不是「我们的热点」。
+            guard type.hasPrefix("AP") else { continue }
+            bands.append(band)
+        }
+        bands.sort { $0.freq < $1.freq }
+        info.bands = bands
+
+        network = info
+    }
+
+    /// `iw dev X info` 里的那一行：
+    /// `channel 149 (5745 MHz), width: 160 MHz, center1: 5570 MHz`
+    /// 只取三样：信道号、中心频率（用来判频段）、频宽。
+    private func parseChannelLine(_ text: String, into band: inout WifiBandInfo) {
+        let tokens = text.split(separator: " ")
+        if tokens.count > 1, let channel = Int(tokens[1]) { band.channel = channel }
+        for (index, token) in tokens.enumerated() {
+            if token.hasPrefix("(") {
+                let digits = token.dropFirst().prefix(while: { $0.isNumber })
+                if let freq = Int(digits) { band.freq = freq }
+            }
+            if token == "width:", index + 1 < tokens.count {
+                band.width = String(tokens[index + 1].prefix(while: { $0.isNumber }))
+            }
+        }
+    }
+
+    /// `uci show` 的输出 → 字典。值是单引号包起来的，去掉两端引号。
+    ///
+    /// 只按 `=` 切一刀、只认单行：这一页要的字段（ipaddr / netmask / start / limit /
+    /// ssid / channel）都是短值，不会出现 OpenClash 那种多行 value。
+    private func uciValues(_ text: String?) -> [String: String] {
+        guard let text else { return [:] }
+        var result: [String: String] = [:]
+        for line in text.split(separator: "\n") {
+            guard let separator = line.firstIndex(of: "=") else { continue }
+            let key = String(line[..<separator]).trimmingCharacters(in: .whitespaces)
+            var value = String(line[line.index(after: separator)...]).trimmingCharacters(in: .whitespaces)
+            if value.count >= 2, value.hasPrefix("'"), value.hasSuffix("'") {
+                value = String(value.dropFirst().dropLast())
+            }
+            result[key] = value
+        }
+        return result
     }
 
     /// OpenClash 指标：/traffic 和 /connections 可能只成功一个，哪段有就更新哪段，
@@ -3023,6 +3166,45 @@ private extension AppModel {
               n=${d##*/}
               [ -e "$d/phy80211" ] || continue
               iw dev "$n" station dump 2>/dev/null | awk '/^Station/{print $2}'
+            done
+            true
+
+            """
+        case .network:
+            // 网络页（v2.6.5）：只读，一条写操作都没有。
+            //   WANST / LANST —— ubus 报的是**当前真正生效**的那份（DHCP 拿到的地址
+            //                    UCI 里根本没有），地址、网关、DNS 都以它为准；
+            //   NETCFG / DHCPCFG / WLCFG —— 配置面，补 ubus 不给的字段
+            //                    （局域网掩码、DHCP 池、SSID 名称）；
+            //   PORT <网口>   —— carrier / speed，给「有线」卡；
+            //   WIFI <网口>   —— 每个 phy80211 口的客户端数 + `iw dev info`，
+            //                    频段（2.4 / 5 / 6 GHz）靠中心频率反推，不写死网口名。
+            // 每段都 `2>/dev/null`、结尾 `true`：缺哪个工具，其余段落照样出结果。
+            return """
+            echo @@WANST
+            ubus call network.interface.wan status 2>/dev/null
+            echo @@LANST
+            ubus call network.interface.lan status 2>/dev/null
+            echo @@NETCFG
+            uci show network 2>/dev/null
+            echo @@DHCPCFG
+            uci show dhcp 2>/dev/null
+            echo @@WLCFG
+            uci show wireless 2>/dev/null
+            for d in /sys/class/net/eth*; do
+              n=${d##*/}
+              case "$n" in *.*) continue;; esac
+              c=$(cat "$d/carrier" 2>/dev/null); [ -n "$c" ] || c=0
+              s=$(cat "$d/speed" 2>/dev/null); [ -n "$s" ] || s=0; [ "$s" = "-1" ] && s=0
+              echo "@@PORT $n"
+              echo "$c $s"
+            done
+            for d in /sys/class/net/*; do
+              n=${d##*/}
+              [ -e "$d/phy80211" ] || continue
+              echo "@@WIFI $n"
+              iw dev "$n" station dump 2>/dev/null | grep -c '^Station'
+              iw dev "$n" info 2>/dev/null
             done
             true
 

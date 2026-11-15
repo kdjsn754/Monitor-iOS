@@ -102,6 +102,105 @@ struct RouterInfo {
     var cpuCores = 0
 }
 
+/// 网络页的一整块数据（v2.6.5 起）。
+///
+/// 只读：全部来自 `uci show` / `ubus call network.interface…` / `iw dev …`，
+/// 一条写操作都没有。用户 2026-11-15 明确「先只看」。
+struct NetworkInfo {
+    /// 第一次采集回来之前为 false，界面据此把数值位置先占住（避免卡片长高再缩回）。
+    var loaded = false
+
+    var wanUp = false
+    var wanProto = ""
+    var wanIP = ""
+    var wanGateway = ""
+    /// 真正承载流量的网口名（`ubus` 的 `l3_device`），用来给端口标 WAN。
+    var wanDevice = ""
+    var wanUptime: Double = 0
+    var dns: [String] = []
+
+    var lanIP = ""
+    var lanMask = ""
+    var dhcpStart = ""
+    var dhcpLimit = ""
+    var dhcpLease = ""
+
+    var bands: [WifiBandInfo] = []
+    var ports: [NetPortInfo] = []
+
+    var wifiClients: Int { bands.reduce(0) { $0 + $1.clients } }
+
+    /// 头图胶囊：最快那个网口的握手速率。
+    var bestPortLabel: String {
+        let speed = ports.map(\.speed).max() ?? 0
+        guard speed > 0 else { return "—" }
+        if speed >= 2500 { return "2.5G" }
+        if speed >= 1000 { return "1G" }
+        return "\(speed)M"
+    }
+
+    /// 头图胶囊：频段里最宽的那个频宽。
+    var widestBandLabel: String {
+        let widths = bands.compactMap { band -> Int? in
+            let digits = band.width.filter(\.isNumber)
+            guard !digits.isEmpty else { return nil }
+            return Int(digits)
+        }
+        guard let widest = widths.max() else { return "—" }
+        return "\(widest)M"
+    }
+
+    var wanProtoLabel: String {
+        switch wanProto {
+        case "dhcp": return "DHCP"
+        case "pppoe": return "PPPoE"
+        case "static": return "静态"
+        case "": return wanUp ? "已连接" : "未连接"
+        default: return wanProto.uppercased()
+        }
+    }
+}
+
+/// 一个 Wi-Fi 频段（一个 AP 接口一行）。
+struct WifiBandInfo: Identifiable, Equatable {
+    var ifname = ""
+    var ssid = ""
+    var channel = 0
+    /// 中心频率（MHz），用来判断这个接口属于哪个频段：
+    /// `iw` 只给频率不给「2.4G / 5G」，而频段名是这一页唯一的分类依据。
+    var freq = 0
+    /// 频宽，只存数字（`40` / `160`），显示时加 M。
+    var width = ""
+    var clients = 0
+
+    var id: String { ifname }
+
+    var bandName: String {
+        if freq >= 5925 { return "6 GHz" }
+        if freq >= 2500 { return "5 GHz" }
+        if freq > 0 { return "2.4 GHz" }
+        return "无线"
+    }
+}
+
+/// 一个物理网口。
+struct NetPortInfo: Identifiable, Equatable {
+    var name = ""
+    /// `WAN` / `LAN`，按 `ubus` 报的 `l3_device` 判定，判不出时一律 LAN。
+    var role = "LAN"
+    var up = false
+    /// 握手速率（Mbps），断开或读不到时为 0。
+    var speed = 0
+
+    var id: String { name }
+
+    var speedLabel: String {
+        guard speed > 0 else { return up ? "—" : "未连接" }
+        if speed >= 1000 { return String(format: "%.0f Gbps", Double(speed) / 1000) }
+        return "\(speed) Mbps"
+    }
+}
+
 struct OpenClashInfo {
     var installed = false
     var running = false
@@ -452,6 +551,7 @@ struct FanControlState: Equatable {
 enum AppPage: String, CaseIterable, Identifiable {
     case overview
     case proxy
+    case network
     case settings
 
     var id: String { rawValue }
@@ -460,6 +560,7 @@ enum AppPage: String, CaseIterable, Identifiable {
         switch self {
         case .overview: return "概览"
         case .proxy: return "代理"
+        case .network: return "网络"
         case .settings: return "设置"
         }
     }
@@ -468,15 +569,20 @@ enum AppPage: String, CaseIterable, Identifiable {
         switch self {
         case .overview: return "square.grid.2x2"
         case .proxy: return "globe"
+        case .network: return "wifi.router"
         case .settings: return "slider.horizontal.3"
         }
     }
 
     /// TabView 的下标 ↔ 页面。
+    ///
+    /// v2.6.5 起底栏四项，网络页插在代理与设置之间（用户 2026-11-15 指定位置）。
+    /// 改这里的顺序必须同时改 `MainTabs` 里的 `tag`，两处是同一个约定的两半。
     init(tab: Int) {
         switch tab {
         case 1: self = .proxy
-        case 2: self = .settings
+        case 2: self = .network
+        case 3: self = .settings
         default: self = .overview
         }
     }
@@ -488,6 +594,7 @@ enum PollItem: String, CaseIterable, Identifiable, Codable {
     case sensors
     case flash
     case devices
+    case network
     case clashState
     case clashTraffic
     case clashConnections
@@ -497,6 +604,7 @@ enum PollItem: String, CaseIterable, Identifiable, Codable {
     var page: AppPage {
         switch self {
         case .core, .sensors, .flash, .devices: return .overview
+        case .network: return .network
         case .clashState, .clashTraffic, .clashConnections: return .proxy
         }
     }

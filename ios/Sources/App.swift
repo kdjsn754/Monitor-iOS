@@ -224,13 +224,24 @@ struct MainTabs: View {
                         Image(uiImage: TabGlyphImage.image(.proxy, selected: selection == 1))
                     }
                 }
-            SettingsView()
+            // v2.6.5：网络页插在代理与设置之间（用户 2026-11-15 指定）。
+            // 加一项之后 `tag` 与 `AppPage(tab:)` 必须同时改，否则切页采到的还是上一页的数据。
+            NetworkView()
                 .tag(2)
+                .tabItem {
+                    Label {
+                        Text("网络")
+                    } icon: {
+                        Image(uiImage: TabGlyphImage.image(.network, selected: selection == 2))
+                    }
+                }
+            SettingsView()
+                .tag(3)
                 .tabItem {
                     Label {
                         Text("设置")
                     } icon: {
-                        Image(uiImage: TabGlyphImage.image(.settings, selected: selection == 2))
+                        Image(uiImage: TabGlyphImage.image(.settings, selected: selection == 3))
                     }
                 }
         }
