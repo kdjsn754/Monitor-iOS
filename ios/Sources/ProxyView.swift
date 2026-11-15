@@ -1520,6 +1520,9 @@ private struct SubscriptionEditView: View {
                                 ProgressView().controlSize(.mini)
                             }
                         }
+                        // 行内文字按钮＝主色（`ButtonStyles.swift` 第③类）。
+                        // 不写这句的话，它跟着环境 tint 是蓝的，和网络页那一批不一致。
+                        .foregroundStyle(.primary)
                     }
                     .disabled(model.subsBusy != nil || saving || !canSave)
                     .adaptiveRowBackground()
