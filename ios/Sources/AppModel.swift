@@ -4334,8 +4334,13 @@ private extension AppModel {
     /// /traffic 必须只留**一行**：它是流式的，每秒吐一个 JSON 对象且不断开连接，
     /// 不截断的话一次会抓到好几行拼在一起（`{"up":1}{"up":2}`），解析必然失败。
     /// 用 `head -n 1` 拿到第一行就关管道，顺带把耗时从 3 秒压到 1 秒左右。
+    ///
+    /// ⚠️ 这里**返回裸脚本、不套 `lowPriority`**（v2.9.3）：它只被 `script(for:)` 用，
+    /// 外层 `command(for:)` 会统一包一次 `nice -n 19 sh -c '…'`。以前在这层又包了一次，
+    /// 等于把单引号转义做了两遍（`'` → `'\''` 再翻一次），代理页那条命令被撑到 9237 B，
+    /// 越过 dropbear 的 9000 字节上限——这一页也是一条数据都回不来的。
     var metricsScript: String {
-        lowPriority("""
+        """
         CURL=$(command -v curl 2>/dev/null)
         WGET=$(command -v wget 2>/dev/null)
         PORT=$(uci -q get openclash.config.cn_port 2>/dev/null)
@@ -4379,7 +4384,7 @@ private extension AppModel {
         read -r LD < /proc/loadavg 2>/dev/null; echo "$LD"
         true
 
-        """)
+        """
     }
     /// 把同一页的项拼成一条命令：同一个 shell 里按顺序跑完，只有一次进程创建。
     /// 有几项共用一个脚本（比如流量和连接数合成的一条），这里按内容去重，避免重复执行。
