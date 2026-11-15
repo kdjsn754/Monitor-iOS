@@ -470,7 +470,7 @@ struct NetworkView: View {
 
     private func clientsSummary(online: Int, offline: Int) -> String {
         if online == 0 && offline == 0 { return "" }
-        let parts = ["\(online) 在线"]
+        var parts = ["\(online) 在线"]
         if offline > 0 { parts.append("\(offline) 离线") }
         return parts.joined(separator: " · ")
     }
