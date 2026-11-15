@@ -177,6 +177,9 @@ struct NetworkInfo {
     var ports: [NetPortInfo] = []
     var clients: [NetClient] = []
 
+    /// 中继的配置与状态（v2.9.1 起）。二级页「上网」用的就是它。
+    var repeater = RepeaterInfo()
+
     /// 黑名单里的 MAC（大写）。用来把「阻止入网」的状态画到设备行上；
     /// 数据来自 `uci show gl-black_white_list`，与内核那层走的是同一份配置。
     var blockedMACs: [String] = []
@@ -240,6 +243,143 @@ struct NetworkInfo {
         case "static": return "静态"
         case "": return uplink == .none ? "—" : "已连接"
         default: return uplinkProto.uppercased()
+        }
+    }
+}
+
+/// 上网方式。官方 App 的 Internet 页顶部就是这三个页签：
+/// `internet_repeater` 中继 / `internet_ethernet` 以太网 / `internet_cellular` 蜂窝网络。
+/// 官方网页端也是同样的三块（`www/i18n/gl-sdk4-ui-internet.zh-cn.json` 的
+/// `repeater` / `cable` / `modem` 三组）。
+enum UplinkMode: String, CaseIterable, Identifiable {
+    case repeater
+    case wired
+    case cellular
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .repeater: return "中继"
+        case .wired: return "以太网"
+        case .cellular: return "蜂窝网络"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .repeater: return "wifi"
+        case .wired: return "cable.connector"
+        case .cellular: return "antenna.radiowaves.left.and.right"
+        }
+    }
+}
+
+/// 一个选项（标签 + 存进 uci 的值）。
+struct RepeaterChoice: Identifiable {
+    var label: String
+    var value: String
+    var id: String { value }
+}
+
+/// 中继（无线中继）的配置与状态。
+///
+/// **数据只走官方通道**（见 `开发交接.md` 3.0）：配置读 `uci show repeater`，
+/// 状态读 `ubus call repeater status`，周边 Wi-Fi 读 `ubus call repeater surveys`。
+/// 字段名照官方来：
+/// - `allow_change`（允许切换至其它已保存网络）→ `repeater.@main[0].auto`，
+///   官方是三态：**0 不切换 / 1 自动切换 / 2 仅没网自动切换**；
+/// - `lock_band`（频段选择）→ `repeater.@main[0].lock_band`，空 = 自动；
+/// - `enable_disguise`（启用伪装）→ `repeater.@network[*].disguise`；
+/// - `allow_auto_portal`（自动启用公共热点认证模式）→ `repeater.@network[*].auto_portal`；
+/// - MAC 模式 → `repeater.@network[*].macaddr`，前缀 `r,` 随机 / `c,` 克隆。
+struct RepeaterInfo {
+    /// 中继整体开关（`repeater.@main[0].disabled` 取反）。
+    var enabled = false
+    /// 正在连的上级网络名。
+    var ssid = ""
+    /// 上级网络密码。只在编辑页回填，界面上不显示。
+    var key = ""
+    /// 锁定的 BSSID（`repeater.@network[*].bssid`）。
+    var bssid = ""
+    /// MAC 模式：`random` 随机 / `clone` 克隆 / `default` 出厂。
+    var macMode = "default"
+    var macAddress = ""
+    /// 启用伪装：路由器伪装成客户端设备的同款设备。
+    var disguise = false
+    /// 自动启用公共热点认证模式。
+    var autoPortal = false
+    /// 切换模式：0 不切换 / 1 自动切换 / 2 仅没网自动切换。
+    var switchMode = 1
+    /// 智能重连（`repeater.@main[0].smart_reconnect`）。
+    var smartReconnect = false
+    /// 频段选择：`2g` / `5g` / `6g`，空字符串 = 自动。
+    var lockBand = ""
+    /// 连接状态（`connected` / `connecting` …）。
+    var state = ""
+    /// 上游信号（dBm）。
+    var signal = 0
+    var channel = 0
+    var band = ""
+    /// 正在连的那个 AP 的 BSSID。
+    var currentBSSID = ""
+    /// 来自中继的 DNS（官方 App 的 `dns_dnsFromRepeater`）。
+    var dns: [String] = []
+    /// 已保存的网络（`repeater.@network[*]`）。
+    var saved: [RepeaterSavedNetwork] = []
+    /// 有没有插 USB Modem（蜂窝模式能不能用）。
+    var modemPresent = false
+
+    var connected: Bool { state == "connected" }
+
+    /// 频段选择的几个档：自动 / 2.4G / 5G / 6G。
+    var bandChoices: [RepeaterChoice] {
+        [RepeaterChoice(label: "自动", value: ""),
+         RepeaterChoice(label: "2.4G", value: "2g"),
+         RepeaterChoice(label: "5G", value: "5g"),
+         RepeaterChoice(label: "6G", value: "6g")]
+    }
+
+    /// MAC 模式的几档（官方 App：`internet_MACModeRandom` / `Clone` / `Real`）。
+    var macModeChoices: [RepeaterChoice] {
+        [RepeaterChoice(label: "随机", value: "random"),
+         RepeaterChoice(label: "克隆", value: "clone"),
+         RepeaterChoice(label: "出厂", value: "default")]
+    }
+}
+
+/// 一条已保存的中继网络（`repeater.@network[*]`）。
+struct RepeaterSavedNetwork: Identifiable, Equatable {
+    var ssid = ""
+    var bssid = ""
+    var key = ""
+    /// 是不是当前正在用的那一条（`selected='1'`）。
+    var selected = false
+
+    /// 同名的网络可能存了好几条（不同 BSSID），所以 id 要带上 BSSID 才不会撞。
+    var id: String { "\(ssid)|\(bssid)" }
+}
+
+/// 扫描到的一个周边 Wi-Fi（`ubus call repeater surveys` 的一条）。
+struct RepeaterSurvey: Identifiable, Equatable {
+    var ssid = ""
+    var bssid = ""
+    /// dBm
+    var signal = 0
+    /// `2g` / `5g` / `6g`
+    var band = ""
+    var channel = 0
+    /// 是否加密（官方叫「安全性」）。
+    var secured = false
+
+    var id: String { "\(ssid)|\(bssid)|\(band)\(channel)" }
+
+    var bandLabel: String {
+        switch band {
+        case "2g": return "2.4G"
+        case "5g": return "5G"
+        case "6g": return "6G"
+        default: return ""
         }
     }
 }

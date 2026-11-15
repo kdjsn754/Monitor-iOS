@@ -35,6 +35,8 @@ struct NetworkView: View {
     @State private var editingClient: NetClient?
     /// 局域网二级页（点拓扑中间那个路由器、或有线那片叶子进来）。
     @State private var showLan = false
+    /// 上网二级页（点拓扑最上面那个出口进来）。
+    @State private var showUplink = false
 
     private var info: NetworkInfo { model.network }
 
@@ -42,64 +44,61 @@ struct NetworkView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(spacing: 16) {
-                        // 拓扑里的节点：出口滚到「上网」卡，频段进编辑页，
-                        // 路由器与有线进局域网二级页。
-                        topology(scroll: { target in
-                            withAnimation(.easeInOut(duration: 0.35)) {
-                                proxy.scrollTo(target, anchor: .center)
-                            }
-                        }, openLan: { showLan = true })
-                        uplinkCard.id(Self.uplinkAnchor)
-                        clientsCard
-                    }
-                    .padding(.horizontal, 18)
-                    .padding(.top, 6)
-                    .padding(.bottom, 30)
-                    // 滚动手感与另外三个根页一致（见 ScrollTuning.swift 与 7.1）：
-                    // 长页正常回弹、短页拉不动，都不碰下拉刷新。
-                    .background(ScrollBounceTuning())
+            ScrollView {
+                VStack(spacing: 16) {
+                    // 拓扑里的节点：出口进「上网」二级页，频段进编辑页，
+                    // 路由器与有线进局域网二级页。
+                    topology(openLan: { showLan = true },
+                             openUplink: { showUplink = true })
+                    uplinkCard
+                    clientsCard
                 }
-                .scrollBounceBehavior(.basedOnSize)
-                // 标题滑到状态栏下面时由系统糊一层，否则硬叠在时间上。
-                .scrollEdgeEffectStyle(.soft, for: .top)
-                .background { AppBackground() }
-                .pageChrome("网络") {
-                    if refreshing {
-                        ProgressView()
-                            .controlSize(.small)
-                            .frame(width: 38, height: 38)
-                    } else {
-                        HeaderButton("arrow.clockwise", tint: Color.blue) {
-                            Task { await refresh() }
-                        }
-                    }
-                }
-                .sheet(item: $editingBand) { band in
-                    BandEditorSheet(band: band)
-                        .presentationBackground(Color.clear)
-                }
-                .sheet(item: $editingClient) { client in
-                    ClientEditorSheet(client: client)
-                        .presentationBackground(Color.clear)
-                }
-                .navigationDestination(isPresented: $showLan) {
-                    LanSettingsView()
-                }
-                // 底栏在 `MainTabs` 上挂了 `.tint(.primary)`，那是往下传的环境值，
-                // 不补这一句整页控件会跟着变黑（v2.1.17 的教训）。
-                //
-                // ⚠️ 必须放在 `sheet` / `navigationDestination` **之后**：环境值只往下传，
-                // 挂在滚动视图上时弹出的编辑页拿不到，里面的开关、选择器、保存按钮全是黑的
-                // ——这正是用户 2026-11-15 说的「网络里面所有按钮都是黑色的」。
-                .tint(.blue)
+                .padding(.horizontal, 18)
+                .padding(.top, 6)
+                .padding(.bottom, 30)
+                // 滚动手感与另外三个根页一致（见 ScrollTuning.swift 与 7.1）：
+                // 长页正常回弹、短页拉不动，都不碰下拉刷新。
+                .background(ScrollBounceTuning())
             }
+            .scrollBounceBehavior(.basedOnSize)
+            // 标题滑到状态栏下面时由系统糊一层，否则硬叠在时间上。
+            .scrollEdgeEffectStyle(.soft, for: .top)
+            .background { AppBackground() }
+            .pageChrome("网络") {
+                if refreshing {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(width: 38, height: 38)
+                } else {
+                    HeaderButton("arrow.clockwise", tint: Color.blue) {
+                        Task { await refresh() }
+                    }
+                }
+            }
+            .sheet(item: $editingBand) { band in
+                BandEditorSheet(band: band)
+                    .presentationBackground(Color.clear)
+            }
+            .sheet(item: $editingClient) { client in
+                ClientEditorSheet(client: client)
+                    .presentationBackground(Color.clear)
+            }
+            .navigationDestination(isPresented: $showLan) {
+                LanSettingsView()
+            }
+            // 上网二级页（点拓扑图最上面那个出口进来）。
+            .navigationDestination(isPresented: $showUplink) {
+                UplinkSettingsView()
+            }
+            // 底栏在 `MainTabs` 上挂了 `.tint(.primary)`，那是往下传的环境值，
+            // 不补这一句整页控件会跟着变黑（v2.1.17 的教训）。
+            //
+            // ⚠️ 必须放在 `sheet` / `navigationDestination` **之后**：环境值只往下传，
+            // 挂在滚动视图上时弹出的编辑页拿不到，里面的开关、选择器、保存按钮全是黑的
+            // ——这正是用户 2026-11-15 说的「网络里面所有按钮都是黑色的」。
+            .tint(.blue)
         }
     }
-
-    private static let uplinkAnchor = "net-uplink"
 
     private func refresh() async {
         guard !refreshing else { return }
@@ -117,13 +116,13 @@ struct NetworkView: View {
     /// 叶子节点上，点进去就是那个频段的编辑页（启用开关也在那一页）。
     ///
     /// 结构：出口胶囊 → 竖线 → 路由器圆环 → 分叉 → 2.4G / 5G / 有线三片叶子。
-    /// 每个节点都能点：出口 → 上网卡，频段 → 编辑页，
-    /// 路由器 / 有线 → 局域网与端口二级页（v2.9.0 起）。
-    private func topology(scroll: @escaping (String) -> Void,
-                          openLan: @escaping () -> Void) -> some View {
+    /// 每个节点都能点：出口 → 上网二级页（v2.9.1 起，不再是滚到「上网」卡），
+    /// 频段 → 编辑页，路由器 / 有线 → 局域网与端口二级页（v2.9.0 起）。
+    private func topology(openLan: @escaping () -> Void,
+                          openUplink: @escaping () -> Void) -> some View {
         let leaves = leafNodes
         return VStack(spacing: 0) {
-            internetNode(scroll: scroll)
+            internetNode(openUplink: openUplink)
             connector(ok: info.uplinkOK)
             routerHub(openLan: openLan)
             if !leaves.isEmpty {
@@ -165,11 +164,15 @@ struct NetworkView: View {
             }
     }
 
-    /// 出口：一个胶囊，点了滚到「上网」卡（重新连接在那儿）。
-    private func internetNode(scroll: @escaping (String) -> Void) -> some View {
+    /// 出口：一个胶囊，点了进「上网」二级页（v2.9.1）。
+    ///
+    /// 官方 App 的 Internet 页就在这一层：中继 / 以太网 / 蜂窝三个页签，
+    /// 上级网络、MAC 模式、伪装、切换策略都在那儿改。入口放在拓扑图最上面
+    /// 那个节点最顺——**它本来就是「出口」这一层**。
+    private func internetNode(openUplink: @escaping () -> Void) -> some View {
         let on = info.uplinkOK
         return Button {
-            scroll(Self.uplinkAnchor)
+            openUplink()
         } label: {
             HStack(spacing: 7) {
                 Image(systemName: info.uplink == .repeater ? "wifi" : "globe")
@@ -185,6 +188,10 @@ struct NetworkView: View {
                     .background {
                         Capsule().fill((on ? NetPalette.wan : Color.secondary).opacity(0.14))
                     }
+                // 右上角一枚小箭头：和路由器那颗一样，告诉人这里能点进去。
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .bold))
+                    .opacity(0.55)
             }
             .foregroundStyle(on ? NetPalette.wan : Color.secondary)
             .padding(.horizontal, 13)
@@ -402,26 +409,38 @@ struct NetworkView: View {
 
     // MARK: - 上网
 
+    /// 上网卡：这一页的「现在是怎么上网的」。
+    ///
+    /// **版式 v2.9.1 重做**。原来这里是三列网格，值一长就被截：
+    /// 「144.1 MBit/s」挤进三分之一宽要缩到 0.7 倍才放得下，
+    /// 「↓ 366.0 GB ↑ 62.9 GB」更是被截成「↓ 366.0…↑ 62.9 GB」——
+    /// 同一张卡里字号忽大忽小，就是这么来的（用户 2026-11-15：「有点字体大有点小，
+    /// 有的又显示不全」）。
+    ///
+    /// 现在：**两列网格 + 整行项**。两列各占一半宽，标签 12pt、值 15pt，
+    /// 一个字号到底；放不下的（DNS、累计流量）单独占一整行。
     private var uplinkCard: some View {
         card("上网", trailing: info.uplink == .none ? "未联网" : info.protoLabel) {
-            // 每行都必须是 3 格：`metricGrid` 按 HStack 等分，行内格数不同就会
-            // 和上下行错开半个身位（两格各占一半、三格各占三分之一）。
             metricGrid([
                 [("方式", info.uplink.title, nil),
-                 ("上级网络", info.upstreamSSID.isEmpty ? "—" : info.upstreamSSID, nil),
-                 ("信号", info.upstreamSignal != 0 ? "\(info.upstreamSignal) dBm" : "—",
-                  info.upstreamSignal != 0 ? signalColor(info.upstreamSignal) : nil)],
-                [("地址", info.uplinkIP.isEmpty ? "—" : info.uplinkIP, nil),
-                 ("网关", info.uplinkGateway.isEmpty ? "—" : info.uplinkGateway, nil),
-                 ("在线时长", info.uplinkUptime > 0 ? durationLabel(info.uplinkUptime) : "—", nil)],
-                [("协商速率", info.upstreamRate.isEmpty ? "—" : info.upstreamRate, nil),
-                 ("会话", info.connections > 0 ? "\(info.connections)" : "—", nil),
-                 ("累计", trafficLabel, nil)]
+                 ("上级网络", info.upstreamSSID.isEmpty ? "—" : info.upstreamSSID, nil)],
+                [("IP 地址", info.uplinkIP.isEmpty ? "—" : info.uplinkIP, nil),
+                 ("网关", info.uplinkGateway.isEmpty ? "—" : info.uplinkGateway, nil)],
+                [("信号", info.upstreamSignal != 0 ? "\(info.upstreamSignal) dBm" : "—",
+                  info.upstreamSignal != 0 ? signalColor(info.upstreamSignal) : nil),
+                 ("协商速率", info.upstreamRate.isEmpty ? "—" : info.upstreamRate, nil)],
+                [("在线时长", info.uplinkUptime > 0 ? durationLabel(info.uplinkUptime) : "—", nil),
+                 ("会话", info.connections > 0 ? "\(info.connections)" : "—", nil)]
             ])
             divider
-            // DNS 常常两条、一条十几个字符，塞进三分之一宽只会被截成「192.16…」，
-            // 所以单独占一整行。
+            // DNS 常常两条、一条十几个字符，两列各占一半还是紧，所以单独占一整行。
             metricGrid([[("DNS", info.uplinkDNS.isEmpty ? "—" : info.uplinkDNS.prefix(2).joined(separator: "  "), nil)]])
+            divider
+            // 累计流量两个方向分开摆：挤在一格里必然被截。
+            metricGrid([
+                [("↓ 下载", info.wanRxTotal > 0 ? formatBytes(info.wanRxTotal) : "—", nil),
+                 ("↑ 上传", info.wanTxTotal > 0 ? formatBytes(info.wanTxTotal) : "—", nil)]
+            ])
             divider
             actionRow(reconnecting ? "正在重连…" : "重新连接",
                       symbol: "arrow.triangle.2.circlepath",
@@ -429,12 +448,6 @@ struct NetworkView: View {
                 Task { await reconnect() }
             }
         }
-    }
-
-    /// 出口网口自开机以来的累计流量，两个方向挤在一格里（`↓ 392 GB ↑ 67 GB`）。
-    private var trafficLabel: String {
-        guard info.wanRxTotal + info.wanTxTotal > 0 else { return "—" }
-        return "↓ \(formatBytes(info.wanRxTotal))  ↑ \(formatBytes(info.wanTxTotal))"
     }
 
     private func reconnect() async {
@@ -620,6 +633,10 @@ struct NetworkView: View {
 
     /// 多列数据网格：标签小字在上、值在下。比「标题 …… 值」省一半高度，
     /// 而且同一列的值左边缘齐平，扫起来不跳。列数由每行的元素个数决定。
+    ///
+    /// **字号统一**（v2.9.1）：标签 12pt、值 15pt，一个尺寸到底。
+    /// 值放不下时最多缩到 0.85 倍，并且从**尾部**截断——原来从中间截，
+    /// 「↓ 366.0…↑ 62.9 GB」那种半截数字最让人看不懂。
     private func metricGrid(_ rows: [[(String, String, Color?)]]) -> some View {
         VStack(spacing: 0) {
             ForEach(rows.indices, id: \.self) { index in
@@ -638,7 +655,7 @@ struct NetworkView: View {
     private func metricCell(_ label: String, _ value: String, _ color: Color?) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(label)
-                .font(.system(size: 11))
+                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             Text(value)
@@ -646,8 +663,8 @@ struct NetworkView: View {
                 .foregroundStyle(color ?? Color.primary)
                 .monospacedDigit()
                 .lineLimit(1)
-                .truncationMode(.middle)
-                .minimumScaleFactor(0.7)
+                .truncationMode(.tail)
+                .minimumScaleFactor(0.85)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

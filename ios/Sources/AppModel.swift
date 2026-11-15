@@ -1115,6 +1115,121 @@ private struct NetVap {
     /// 从上一份开始改、而不是每次都新建：某一拍 `ubus` 没回话时，已经画出来的 IP
     /// 不会被清成空——数字闪一下没了比不刷新更难受。频段、端口、客户端是实测结果，
     /// 每拍整体替换（接口真的消失了就该消失）。
+    /// 解析中继：配置面 `uci show repeater` + 状态面 `ubus call repeater status`。
+    ///
+    /// `uci show repeater` 的形状：
+    /// ```
+    /// repeater.@main[0].auto='1'          ← 0 不切换 / 1 自动切换 / 2 仅没网自动切换
+    /// repeater.@main[0].lock_band=''      ← 频段选择，空 = 自动
+    /// repeater.@network[0].ssid='@xxx'    ← 一条条已保存的上级网络
+    /// repeater.@network[0].selected='1'   ← 标了这条是当前在用的
+    /// ```
+    private func parseRepeater(config: String?, status: String?, modem: String?) -> RepeaterInfo {
+        var info = RepeaterInfo()
+
+        // ---- 配置面 ----
+        var main: [String: String] = [:]
+        var nets: [Int: [String: String]] = [:]
+        var order: [Int] = []
+        for line in (config ?? "").split(separator: "\n") {
+            let text = String(line).trimmingCharacters(in: .whitespaces)
+            guard let equal = text.firstIndex(of: "=") else { continue }
+            let key = String(text[..<equal])
+            var value = String(text[text.index(after: equal)...])
+            if value.count >= 2, value.hasPrefix("'"), value.hasSuffix("'") {
+                value = String(value.dropFirst().dropLast())
+            }
+            if key.hasPrefix("repeater.@main[0].") {
+                main[String(key.dropFirst("repeater.@main[0].".count))] = value
+            } else if key.hasPrefix("repeater.@network[") {
+                let rest = key.dropFirst("repeater.@network[".count)
+                guard let close = rest.firstIndex(of: "]") else { continue }
+                let index = Int(rest[..<close]) ?? 0
+                let name = String(rest[rest.index(after: close)...]).dropFirst()
+                if nets[index] == nil {
+                    nets[index] = [:]
+                    order.append(index)
+                }
+                nets[index]?[name] = value
+            }
+        }
+
+        info.enabled = main["disabled"] != "1"
+        info.switchMode = Int(main["auto"] ?? "") ?? 1
+        info.smartReconnect = main["smart_reconnect"] == "1"
+        info.lockBand = main["lock_band"] ?? ""
+
+        for index in order {
+            let values = nets[index] ?? [:]
+            var saved = RepeaterSavedNetwork()
+            saved.ssid = values["ssid"] ?? ""
+            saved.bssid = values["bssid"] ?? ""
+            saved.key = values["key"] ?? ""
+            saved.selected = values["selected"] == "1"
+            info.saved.append(saved)
+        }
+
+        // 当前在用的那一条：标了 `selected` 的优先，都没有就取第一条。
+        let activeIndex = order.first(where: { (nets[$0]?["selected"] ?? "") == "1" }) ?? order.first
+        if let activeIndex, let values = nets[activeIndex] {
+            info.ssid = values["ssid"] ?? ""
+            info.key = values["key"] ?? ""
+            info.bssid = values["bssid"] ?? ""
+            info.disguise = values["disguise"] == "1"
+            info.autoPortal = values["auto_portal"] == "1"
+            let mac = parseRepeaterMAC(values["macaddr"] ?? "")
+            info.macMode = mac.mode
+            info.macAddress = mac.address
+        }
+
+        // ---- 状态面 ----
+        if let object = json(status) {
+            let liveSSID = (object["ssid"] as? String) ?? ""
+            if !liveSSID.isEmpty { info.ssid = liveSSID }
+            info.state = (object["state_s"] as? String) ?? ""
+            info.signal = Int((object["signal"] as? Double) ?? 0)
+            info.channel = Int((object["channel"] as? Double) ?? 0)
+            info.band = (object["band"] as? String) ?? ""
+            info.currentBSSID = (object["bssid"] as? String) ?? ""
+            if let ipv4 = object["ipv4"] as? [String: Any],
+               let dns = ipv4["dns"] as? [String] {
+                info.dns = dns
+            }
+            // 运行中的配置比 uci 更准（刚改过还没 commit 时也是这个值）。
+            if let live = object["config"] as? [String: Any] {
+                if let value = live["disguise"] as? Bool { info.disguise = value }
+                if let value = live["auto_portal"] as? Bool { info.autoPortal = value }
+                if let liveKey = live["key"] as? String, !liveKey.isEmpty { info.key = liveKey }
+                if let mac = live["macaddr"] as? [String: Any] {
+                    if let mode = mac["mode"] as? String { info.macMode = mode }
+                    if let address = mac["macaddr"] as? String { info.macAddress = address }
+                }
+            }
+        }
+
+        // ---- 蜂窝 ----
+        if let object = json(modem), let list = object["modems"] as? [Any] {
+            info.modemPresent = !list.isEmpty
+        }
+        return info
+    }
+
+    /// `r,FA:59:BE:E0:01:B1` → 模式 random、地址 FA:59:BE:E0:01:B1；
+    /// `c,…` 是克隆，空的是出厂。固件里那行正则就是 `^(%w+),(.+)`。
+    private func parseRepeaterMAC(_ raw: String) -> (mode: String, address: String) {
+        let text = raw.trimmingCharacters(in: .whitespaces)
+        guard let comma = text.firstIndex(of: ",") else {
+            return ("default", text)
+        }
+        let prefix = String(text[..<comma])
+        let address = String(text[text.index(after: comma)...])
+        switch prefix {
+        case "r": return ("random", address)
+        case "c": return ("clone", address)
+        default: return ("default", address)
+        }
+    }
+
     private func applyNetwork(_ sections: [String: String]) {
         guard !sections.isEmpty else { return }
         var info = network
@@ -1397,6 +1512,14 @@ private struct NetVap {
         }
         info.clients = clients
 
+        // ---- 中继（官方通道）----
+        //
+        // 配置面 `uci show repeater`，状态面 `ubus call repeater status`，
+        // 蜂窝面 `ubus call cellular.modem status`。**不碰 LuCI 那一套**。
+        info.repeater = parseRepeater(config: sections["REPEATER"],
+                                      status: sections["REPSTAT"],
+                                      modem: sections["MODEM"])
+
         // ---- 无线 ----
         //
         // UCI 是配置面（有哪些 radio / SSID / 加密 / 开关），iwinfo 是实测面
@@ -1665,6 +1788,201 @@ private struct NetVap {
     private func htmodePrefix(_ raw: String) -> String {
         let letters = raw.prefix { $0.isLetter }
         return letters.isEmpty ? "EHT" : String(letters).uppercased()
+    }
+
+    // MARK: - 中继（写）
+
+    /// 保存中继配置。返回 `nil` 表示成功，否则是要显示给用户的错误文案。
+    ///
+    /// **官方通道**：`uci set repeater.*` → `commit repeater` → `ubus call repeater reload`
+    /// → 回读。`reload` 之后中继会重连一次（上游会断一下），所以最后再读一次
+    /// `ubus call repeater status` 确认真的连上了，而不是只看 uci 回读。
+    ///
+    /// 写到的是**当前在用的那条**已保存网络（`@network[*]` 里 `selected='1'` 的那条）。
+    @discardableResult
+    func saveRepeater(ssid: String, key: String, bssid: String,
+                      disguise: Bool, autoPortal: Bool,
+                      switchMode: Int, lockBand: String,
+                      enabled: Bool) async -> String? {
+        guard connected else { return "还没连上路由器" }
+        let name = ssid.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return "上级网络名称不能为空" }
+        let secret = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !secret.isEmpty, secret.count < 8 || secret.count > 63 {
+            return "密码要 8–63 个字符"
+        }
+        let locked = bssid.trimmingCharacters(in: .whitespaces)
+
+        var lines: [String] = []
+        // 找到当前在用的那条已保存网络的序号；一台都没有就用 0 号新建。
+        // （提取方式用 grep 而不是 sed：`uci show` 的段名里带方括号，正则要转义，
+        //  实机测过 grep 这条更稳。）
+        lines.append("S=$(uci -q show repeater | grep -o 'repeater\\.@network\\[[0-9]*\\]\\.ssid' | grep -o '[0-9]\\+' | head -1)")
+        lines.append("[ -n \"$S\" ] || S=0")
+        lines.append("uci -q set repeater.@network[$S].ssid=\(shQuote(name))")
+        if !secret.isEmpty {
+            lines.append("uci -q set repeater.@network[$S].key=\(shQuote(secret))")
+        }
+        lines.append("uci -q set repeater.@network[$S].selected='1'")
+        if locked.isEmpty {
+            // 「锁定 BSSID」是可选的：不锁就把这一项删掉，路由器自己挑 AP。
+            lines.append("uci -q delete repeater.@network[$S].bssid")
+        } else {
+            lines.append("uci -q set repeater.@network[$S].bssid=\(shQuote(locked))")
+        }
+        lines.append("uci -q set repeater.@network[$S].disguise='\(disguise ? "1" : "0")'")
+        lines.append("uci -q set repeater.@network[$S].auto_portal='\(autoPortal ? "1" : "0")'")
+        // 0 不切换 / 1 自动切换 / 2 仅没网自动切换（官方三态）。
+        lines.append("uci -q set repeater.@main[0].auto='\(switchMode)'")
+        lines.append("uci -q set repeater.@main[0].lock_band=\(shQuote(lockBand))")
+        lines.append("uci -q set repeater.@main[0].disabled='\(enabled ? "0" : "1")'")
+        lines.append("uci -q commit repeater")
+        // 回读：每项一个标记。**不能用「按行取非空值」的办法**——频段选择
+        // 本来就可能是空串（= 自动），滤掉空行就错位了。
+        lines.append("echo @@SSID; uci -q get repeater.@network[$S].ssid")
+        lines.append("echo @@DIS; uci -q get repeater.@network[$S].disguise")
+        lines.append("echo @@PORTAL; uci -q get repeater.@network[$S].auto_portal")
+        lines.append("echo @@AUTO; uci -q get repeater.@main[0].auto")
+        lines.append("echo @@BAND; uci -q get repeater.@main[0].lock_band")
+        lines.append("echo @@OFF; uci -q get repeater.@main[0].disabled")
+        lines.append("echo @@STATE")
+        lines.append("ubus call repeater reload >/dev/null 2>&1; sleep 4; ubus call repeater status 2>/dev/null | jsonfilter -e '@.state_s' -e '@.ssid' 2>/dev/null")
+
+        do {
+            let sections = parseSections(try await execute(lines.joined(separator: "; "), timeout: 60))
+            func read(_ key: String) -> String {
+                (sections[key] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            guard read("SSID") == name else { return "上级网络名没写进去（读回来是「\(read("SSID"))」）" }
+            guard read("DIS") == (disguise ? "1" : "0") else { return "「启用伪装」没写进去" }
+            guard read("PORTAL") == (autoPortal ? "1" : "0") else { return "「公共热点认证模式」没写进去" }
+            guard read("AUTO") == String(switchMode) else { return "切换模式没写进去" }
+            guard read("BAND") == lockBand else { return "频段选择没写进去" }
+            guard read("OFF") == (enabled ? "0" : "1") else { return "中继开关没写进去" }
+
+            // 回读够了还不够：中继重连之后到底连上没有，要问状态本身。
+            let connectedState = read("STATE").split(separator: "\n")
+                .map { String($0).trimmingCharacters(in: .whitespaces) }
+                .first ?? ""
+            if enabled, connectedState != "connected" {
+                return "配置已保存，但中继还没连上（当前状态 \(connectedState.isEmpty ? "未知" : connectedState)）"
+            }
+            return nil
+        } catch {
+            return describe(error)
+        }
+    }
+
+    /// 切换上网方式：中继 / 以太网。
+    ///
+    /// **两条链路互斥**：官方固件给 `wan` 和 `wwan` 两条接口都留着默认路由，
+    /// 谁先起来用谁。真正「切模式」就是把另一条停掉：
+    /// 中继 = `wwan` 开、`wan` 关；以太网 = `wan` 开、`wwan` 关。
+    /// 改完 `ifdown` 一次让路由立刻重算，然后回读两个 `disabled` 核对。
+    @discardableResult
+    func applyUplinkMode(_ mode: UplinkMode) async -> String? {
+        guard connected else { return "还没连上路由器" }
+        switch mode {
+        case .cellular:
+            return "没有检测到 USB Modem，连不了蜂窝网络"
+        case .repeater:
+            let lines = [
+                "uci -q set network.wwan.disabled='0'",
+                "uci -q set network.wan.disabled='1'",
+                "uci -q commit network",
+                "ifdown wan >/dev/null 2>&1; ifup wwan >/dev/null 2>&1",
+                "echo @@WWAN; uci -q get network.wwan.disabled",
+                "echo @@WAN; uci -q get network.wan.disabled"
+            ]
+            return await applyModeLines(lines, wantRepeater: true)
+        case .wired:
+            let lines = [
+                "uci -q set network.wan.disabled='0'",
+                "uci -q set network.wwan.disabled='1'",
+                "uci -q commit network",
+                "ifdown wwan >/dev/null 2>&1; ifup wan >/dev/null 2>&1",
+                "echo @@WWAN; uci -q get network.wwan.disabled",
+                "echo @@WAN; uci -q get network.wan.disabled"
+            ]
+            return await applyModeLines(lines, wantRepeater: false)
+        }
+    }
+
+    private func applyModeLines(_ lines: [String], wantRepeater: Bool) async -> String? {
+        do {
+            let sections = parseSections(try await execute(lines.joined(separator: "; "), timeout: 40))
+            func read(_ key: String) -> String {
+                (sections[key] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            let wwan = read("WWAN") == "1"
+            let wan = read("WAN") == "1"
+            if wantRepeater {
+                guard !wwan, wan else { return "切换没生效（回读 wwan=\(wwan ? 1 : 0) wan=\(wan ? 1 : 0)）" }
+            } else {
+                guard wwan, !wan else { return "切换没生效（回读 wwan=\(wwan ? 1 : 0) wan=\(wan ? 1 : 0)）" }
+            }
+            return nil
+        } catch {
+            return describe(error)
+        }
+    }
+
+    /// 扫描周边 Wi-Fi（官方接口 `ubus call repeater surveys`）。
+    ///
+    /// **按需调用，不进轮询**：这台机器周边 51 个网络，原始输出 21 KB，
+    /// 每秒轮询一次纯属浪费。切到「可用网络」时才拉一次。
+    func loadRepeaterSurveys() async -> [RepeaterSurvey] {
+        guard connected else { return [] }
+        guard let raw = try? await execute(
+            "ubus call repeater surveys 2>/dev/null | jsonfilter -e '@.surveys.*.*' 2>/dev/null",
+            timeout: 30
+        ) else { return [] }
+        var out: [RepeaterSurvey] = []
+        for line in raw.split(separator: "\n") {
+            let text = String(line).trimmingCharacters(in: .whitespaces)
+            guard text.hasPrefix("{"),
+                  let data = text.data(using: .utf8),
+                  let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            else { continue }
+            var survey = RepeaterSurvey()
+            survey.ssid = (object["ssid"] as? String) ?? ""
+            survey.bssid = (object["bssid"] as? String) ?? ""
+            survey.signal = Int((object["signal"] as? Double) ?? 0)
+            survey.band = (object["band"] as? String) ?? ""
+            survey.channel = Int((object["channel"] as? Double) ?? 0)
+            survey.secured = ((object["caps"] as? [String: Any])?["PRIVACY"] as? Bool) ?? false
+            if survey.ssid.isEmpty { continue }
+            out.append(survey)
+        }
+        // 信号强的排前面，同信号按名字排。
+        out.sort { lhs, rhs in
+            if lhs.signal != rhs.signal { return lhs.signal > rhs.signal }
+            return lhs.ssid < rhs.ssid
+        }
+        return out
+    }
+
+    /// 切到另一条已保存的中继网络（官方 App 的「切换网络」）。
+    @discardableResult
+    func switchRepeaterNetwork(ssid: String, bssid: String) async -> String? {
+        guard connected else { return "还没连上路由器" }
+        var lines: [String] = []
+        // 按名字找出这条已保存网络的序号：逐段 `uci get` 比在整段文本里 grep 靠谱
+        // （SSID 里可能有特殊字符）。
+        lines.append("N=\"\"; for i in $(uci -q show repeater | grep -o 'repeater\\.@network\\[[0-9]*\\]\\.ssid' | grep -o '[0-9]\\+' | sort -u); do if [ \"$(uci -q get repeater.@network[$i].ssid)\" = \(shQuote(ssid)) ]; then N=$i; break; fi; done")
+        lines.append("if [ -n \"$N\" ]; then uci -q set repeater.@network[$N].selected='1'; \(bssid.isEmpty ? "" : "uci -q set repeater.@network[$N].bssid=\(shQuote(bssid));") uci -q commit repeater; else echo @@FAIL; fi")
+        lines.append("echo @@RB")
+        lines.append("uci -q get repeater.@network[$N].selected")
+        lines.append("ubus call repeater reload >/dev/null 2>&1; sleep 4; ubus call repeater status 2>/dev/null | jsonfilter -e '@.state_s' -e '@.ssid' 2>/dev/null")
+        do {
+            let sections = parseSections(try await execute(lines.joined(separator: "; "), timeout: 60))
+            if (sections["FAIL"] ?? "").contains("FAIL") { return "没找到这条已保存的网络" }
+            let selected = (sections["RB"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard selected == "1" else { return "没能切到这条网络" }
+            return nil
+        } catch {
+            return describe(error)
+        }
     }
 
     /// 只切某个频段的开关（列表里那个 Toggle 用）。其余字段原样传回去。
@@ -3913,6 +4231,17 @@ private extension AppModel {
             uci show wireless 2>/dev/null | grep -E '\\.(band|channel|htmode|txpower|disabled|ssid|ifname|mode|device|encryption|guest|iot|multi_ap|key|hidden)='
             echo @@BLACK
             uci show gl-black_white_list 2>/dev/null | grep -E '\\.(mac|mode|enable)='
+            # ---- 中继（官方通道，v2.9.1）----
+            # 配置面 `uci show repeater`：`@main[0]` 是开关与切换策略，
+            # `@network[*]` 是一条条已保存的上级网络（`selected='1'` 的那条在用）。
+            # 状态面 `ubus call repeater status`：信号、频段、信道、BSSID、来自中继的 DNS。
+            # 蜂窝：`cellular.modem status` 的 `modems` 为空 = 没插 Modem。
+            echo @@REPEATER
+            uci show repeater 2>/dev/null
+            echo @@REPSTAT
+            ubus call repeater status 2>/dev/null
+            echo @@MODEM
+            ubus call cellular.modem status 2>/dev/null
             for d in /sys/class/net/*; do
               n=${d##*/}
               case "$n" in lo|br-*|*.*|ppp*|apcli*|ra*|rai*|rax*|wlan*|sit*|gre*|tun*|tap*|bond*|veth*|docker*|ifb*) continue;; esac
