@@ -613,7 +613,7 @@ struct NetworkView: View {
         }
         .overlay {
             AdaptiveBorder(shape: RoundedRectangle(cornerRadius: 18, style: .continuous),
-                           strength: 0.45, width: 0.6)
+                           width: 0.6, strength: 0.45)
         }
     }
 

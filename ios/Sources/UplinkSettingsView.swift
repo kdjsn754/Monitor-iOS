@@ -297,7 +297,7 @@ struct UplinkSettingsView: View {
         }
         .overlay {
             AdaptiveBorder(shape: RoundedRectangle(cornerRadius: 13, style: .continuous),
-                           strength: 0.45, width: 0.6)
+                           width: 0.6, strength: 0.45)
         }
     }
 
@@ -607,7 +607,7 @@ struct UplinkSettingsView: View {
         }
         .overlay {
             AdaptiveBorder(shape: RoundedRectangle(cornerRadius: 18, style: .continuous),
-                           strength: 0.45, width: 0.6)
+                           width: 0.6, strength: 0.45)
         }
     }
 
@@ -920,7 +920,7 @@ private struct UplinkCardSurface: ViewModifier {
             }
             .overlay {
                 AdaptiveBorder(shape: RoundedRectangle(cornerRadius: 18, style: .continuous),
-                               strength: 0.45, width: 0.6)
+                               width: 0.6, strength: 0.45)
             }
     }
 }
