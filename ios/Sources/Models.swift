@@ -121,10 +121,10 @@ enum UplinkKind: String {
     }
 }
 
-/// 网络页的一整块数据（v2.6.5 起，v2.6.8 按官方 App 的字段补齐）。
+/// 网络页的一整块数据（v2.6.5 起，v2.6.8 按官方 App 的字段补齐，
+/// v2.8.0 补实时速率 / 累计流量 / 连接数 / 保留 IP）。
 ///
-/// 只读：全部来自 `ubus` / `uci` / `iwinfo` / `gl-clients`，一条写操作都没有。
-/// 用户 2026-11-15 明确「先只看」。
+/// 只读采集；写操作在 `AppModel` 里另起一组（v2.7.0 起）。
 struct NetworkInfo {
     /// 第一次采集回来之前为 false，界面据此把数值位置先占住（避免卡片长高再缩回）。
     var loaded = false
@@ -154,6 +154,14 @@ struct NetworkInfo {
     var rxSpeed: Double = 0
     var txSpeed: Double = 0
 
+    /// 出口网口自开机以来的累计流量（字节），读 `/sys/class/net/<dev>/statistics`。
+    /// 重启路由器会归零——这是网口计数器的性质，不是我把数算丢了。
+    var wanRxTotal: Double = 0
+    var wanTxTotal: Double = 0
+
+    /// 当前 NAT 会话数（`/proc/net/nf_conntrack` 行数）。官方 App 的网络页也报这个。
+    var connections = 0
+
     /// 物理 WAN 口插没插线（和「是否在用」无关：中继时它可能空着）。
     var wanCable = false
 
@@ -173,6 +181,10 @@ struct NetworkInfo {
     /// 数据来自 `uci show gl-black_white_list`，与内核那层走的是同一份配置。
     var blockedMACs: [String] = []
 
+    /// DHCP 保留地址：MAC（大写）→ IP。来自 `uci show dhcp` 的每个 `host` 段。
+    /// 设备的「保留 IP」开关读这里，写完也能立刻核对，不看缓存。
+    var reservedIPs: [String: String] = [:]
+
     /// 出口对应的 netifd 接口名：中继是 `wwan`，有线是 `wan`。断线重连要按名字调 `ifup`。
     var uplinkInterface: String {
         switch uplink {
@@ -185,6 +197,11 @@ struct NetworkInfo {
     var onlineClients: [NetClient] { clients.filter(\.online) }
     var offlineClients: [NetClient] { clients.filter { !$0.online } }
     var wifiClients: Int { bands.reduce(0) { $0 + $1.clients } }
+
+    /// 在线设备按接入方式拆开：无线几台、网线几台。
+    /// 官方 App 的客户端卡也是这么分的（`gl-clients status` 的 wireless_total / cable_total）。
+    var onlineWireless: Int { onlineClients.filter { $0.iface != "有线" }.count }
+    var onlineWired: Int { onlineClients.filter { $0.iface == "有线" }.count }
 
     /// 拓扑三片叶子各自的「通不通」。
     var uplinkOK: Bool { uplink != .none }
@@ -229,24 +246,35 @@ struct NetworkInfo {
 
 /// 一台客户端（`ubus call gl-clients list` 的一条）。
 ///
-/// 只用官方 App 客户端详情里也有的那几项：名称 / IP / 接入方式 / 上下行流量。
-/// 每台设备的「瞬时速率」不进列表——它两秒变一次，一屏数字乱跳，
-/// 实时速率放到顶部路由器节点去（那里只有一个数字）。
+/// **名字的三级回落是本类的重点**（v2.8.0 修）：`gl-clients` 自己返回的 `name`
+/// 在这台固件上是错的——4 个不同 MAC 会一起报成「Xiaomi-14」，因为它是从一份
+/// 共享缓存里取的，离线设备互相串。所以上屏顺序是：
+///   ① `gl-client` 的 `alias`（用户在官方 App 里改过的名字，按 MAC 存，可靠）；
+///   ② `/tmp/dhcp.leases` 里的主机名（设备自己上报的，按 MAC 存，可靠；`*` 表示没报）；
+///   ③ 官方接口的 `name`，**只有在全场唯一时才敢用**（两台以上同名就整批丢掉）；
+///   ④ 兜底 IP → MAC。
 struct NetClient: Identifiable, Equatable {
     var mac = ""
+    /// 最终上屏的名字（已经按上面三级回落算好，解析时就填进来）。
     var name = ""
+    /// 用户在官方 App 里设的别名；编辑页回填用，空字符串表示没设过。
+    var alias = ""
     var ip = ""
     /// `2.4G` / `5G` / `6G` / `有线`
     var iface = ""
     var online = false
     var totalRx: Double = 0
     var totalTx: Double = 0
-    var onlineTime: Double = 0
+    /// 实时速率（字节/秒），`gl-clients` 的 `rx` / `tx`。离线时为 0。
+    var rxSpeed: Double = 0
+    var txSpeed: Double = 0
     /// dBm，0 表示没读到（有线设备本来就没有）
     var signal = 0
     /// 已加入黑名单（`gl-black_white_list`），当前不允许访问网络。
     /// 由 `uci show gl-black_white_list` 的 MAC 列表判定，不看缓存，写完立刻能核对。
     var blocked = false
+    /// 当前绑定的保留地址（`dhcp` 的 host 段），空表示没绑。
+    var reservedIP = ""
 
     var id: String { mac.isEmpty ? name + ip : mac }
 
@@ -262,6 +290,21 @@ struct NetClient: Identifiable, Equatable {
         let total = totalRx + totalTx
         guard total > 0 else { return "—" }
         return formatBytes(total)
+    }
+
+    /// 实时速率那一栏：`↓ 12 KB/s`；两头都是 0（离线、或者这一拍没流量）就不显示。
+    var rateLabel: String {
+        guard online, rxSpeed + txSpeed >= 1 else { return "" }
+        return "↓ \(formatBytes(rxSpeed))/s"
+    }
+
+    var wired: Bool { iface == "有线" }
+
+    /// 设备行左边那个图标：网线一根、无线按信号强弱（弱信号时换成空心）。
+    var icon: String {
+        if wired { return "cable.connector" }
+        if signal != 0 && signal <= -75 { return "wifi.exclamationmark" }
+        return "wifi"
     }
 }
 
@@ -296,12 +339,18 @@ struct WifiBandInfo: Identifiable, Equatable {
 
     /// 主 SSID 的 UCI 段名（`ra0` / `rai0`）。改名称、密码、开关都写这一段。
     var section = ""
-    /// 所属 radio 的 UCI 段名（`MT7993_1_2`）。`wifi reload` 按 radio 生效。
+    /// 所属 radio 的 UCI 段名（`MT7993_1_2`）。信道 / 频宽 / 功率写这一段。
     var radio = ""
     /// 当前密码（UCI `key`）；编辑页要回填。读不到就是空，界面上留空表示「不改密码」。
     var key = ""
     /// SSID 是否隐藏（`hidden=1`）。
     var hidden = false
+    /// 原始 `htmode`（`EHT40`）。写频宽要保留前面的制式前缀，不能只存数字。
+    var htmode = ""
+    /// UCI 的发射功率百分比（`txpower=100`）。0 表示这一项没配。
+    var txPowerPercent = 0
+    /// `channel` 原值：`auto` 或数字。`auto` 时上面那个 `channel` 是实测值。
+    var channelMode = ""
 
     /// 能不能在这一页改：段名都拿不到就不放编辑入口，免得点进去写错段。
     var editable: Bool { !section.isEmpty && !radio.isEmpty }
@@ -315,6 +364,32 @@ struct WifiBandInfo: Identifiable, Equatable {
         if channel > 0 { parts.append("CH \(channel)") }
         if !width.isEmpty { parts.append("\(width) MHz") }
         return parts.isEmpty ? "—" : parts.joined(separator: " · ")
+    }
+
+    /// 信道这一项在界面上的说法：自动时要带出实际落点，否则「自动」等于没说。
+    var channelSettingLabel: String {
+        if channelMode == "auto" || channelMode.isEmpty {
+            return channel > 0 ? "自动 · CH \(channel)" : "自动"
+        }
+        return "CH \(channelMode)"
+    }
+
+    var powerLabel: String {
+        txPowerPercent > 0 ? "\(txPowerPercent)%" : (txPower > 0 ? "\(txPower) dBm" : "—")
+    }
+
+    /// 这一频段能选的频宽。MT7993 的 2.4G 最高 EHT40、5G 最高 EHT160（固件
+    /// `wifi-features-MT7993_1_1/_1_2` 里写死的），列超过上限的选项只会让路由器拒收。
+    var widthOptions: [String] {
+        band == "2.4" ? ["20", "40"] : ["20", "40", "80", "160"]
+    }
+
+    /// 可选信道。5G 只列非 DFS 的那几段——DFS 信道要等 60 秒雷达检测，
+    /// 官方 App 也得单独给个「允许 DFS」的开关，这里不摊开。
+    var channelOptions: [Int] {
+        if band == "2.4" { return Array(1...13) }
+        if band == "5" { return [36, 40, 44, 48, 149, 153, 157, 161, 165] }
+        return []
     }
 
     var securityLabel: String {

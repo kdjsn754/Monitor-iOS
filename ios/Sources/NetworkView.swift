@@ -1,27 +1,28 @@
 import SwiftUI
 
 /// 网络页（v2.6.5 新增；v2.6.7 顶部换拓扑树；v2.6.8 按官方 App 补字段；
-/// v2.7.0 这一页可写，并把版式压成四块）。
+/// v2.7.0 这一页可写；v2.8.0 补实时速率 / 累计流量 / 会话数，并把可改的项补全）。
 ///
 /// **数据来自 `PollItem.network` 那一条采集脚本**（`ubus` / `uci` / `iwinfo` /
 /// `gl-clients`），字段组织照 GL.iNet 官方 App 的 `internet_*` / `client_*` / `eth_*` /
 /// `lan_*` 四组来，不是自己编的。
 ///
-/// **v2.7.0 起能改**（用户 2026-11-15：「要能修改不能只看」）：
-///   - 无线：点一行改名称 / 密码 / 隐藏 / 开关，写 `uci wireless` 后 `wifi reload`；
-///   - 在线设备：点一行改名（`gl-client` 的 alias）或阻止入网（GL 黑名单）；
-///   - 上网：重连出口（中继先 `repeater reload`，再 `ifdown/ifup`）。
+/// **能改的六件事**（都写路由器自己的配置，和官方 App 同一套通道）：
+///   - 无线：名称 / 密码 / 隐藏 / 启用 / 信道 / 频宽 / 发射功率（`uci wireless` + `wifi reload`）；
+///   - 频段开关（列表里那个 Toggle，一步到位不弹窗）；
+///   - 设备：改名（`gl-client.alias`）、固定地址（`dhcp` 的 host 段）、阻止入网（GL 黑名单）；
+///   - 清掉离线记录（`gl-clients remove_offline`）；
+///   - 出口重连（中继先 `repeater reload`，再 `ifdown/ifup`）。
 ///
-/// **版式只有四块**：拓扑 → 上网 → 无线 → 设备 → 局域网与端口。
-/// 原来「上网 / 在线设备 / 无线 / 网络端口 / 局域网」五张卡、二十多行文字，
-/// 一屏塞不下也看不出重点。现在被动信息进两列网格（标签在上、值在下），
-/// 只有能点的地方才排成整行。
+/// **版式四块**：拓扑 → 上网 → 无线 → 设备 → 局域网与端口。
+/// 被动信息进多列网格（标签在上、值在下），只有能点的地方才排成整行。
 ///
 /// **没有一行说明性小字**（用户 2026-10-31 定的规矩）。
 struct NetworkView: View {
     @Environment(AppModel.self) private var model: AppModel
     @State private var refreshing = false
     @State private var reconnecting = false
+    @State private var clearingOffline = false
     @State private var editingBand: WifiBandInfo?
     @State private var editingClient: NetClient?
     @State private var togglingBand: String?
@@ -179,8 +180,7 @@ struct NetworkView: View {
         }
     }
 
-    /// 路由器节点右侧一行速率：小箭头 + 数字 + 单位。上下行各一行，
-    /// 比原来只显示下行多一行高，但省掉了「上网」卡里重复的那一行。
+    /// 路由器节点右侧一行速率：小箭头 + 数字 + 单位。上下行各一行。
     private func rateLine(_ symbol: String, _ bytes: Double) -> some View {
         let parts = speedParts(bytes)
         return HStack(spacing: 4) {
@@ -279,18 +279,24 @@ struct NetworkView: View {
 
     private var uplinkCard: some View {
         card("上网", trailing: info.uplink == .none ? "未联网" : info.protoLabel) {
+            // 每行都必须是 3 格：`metricGrid` 按 HStack 等分，行内格数不同就会
+            // 和上下行错开半个身位（两格各占一半、三格各占三分之一）。
             metricGrid([
                 [("方式", info.uplink.title, nil),
-                 ("信号", info.uplink == .repeater && info.upstreamSignal != 0
-                  ? "\(info.upstreamSignal) dBm" : "—",
+                 ("上级网络", info.upstreamSSID.isEmpty ? "—" : info.upstreamSSID, nil),
+                 ("信号", info.upstreamSignal != 0 ? "\(info.upstreamSignal) dBm" : "—",
                   info.upstreamSignal != 0 ? signalColor(info.upstreamSignal) : nil)],
-                [("上级网络", info.upstreamSSID.isEmpty ? "—" : info.upstreamSSID, nil),
-                 ("协商速率", info.upstreamRate.isEmpty ? "—" : info.upstreamRate, nil)],
                 [("地址", info.uplinkIP.isEmpty ? "—" : info.uplinkIP, nil),
-                 ("网关", info.uplinkGateway.isEmpty ? "—" : info.uplinkGateway, nil)],
-                [("DNS", info.uplinkDNS.isEmpty ? "—" : info.uplinkDNS.prefix(2).joined(separator: "  "), nil),
-                 ("在线时长", info.uplinkUptime > 0 ? durationLabel(info.uplinkUptime) : "—", nil)]
+                 ("网关", info.uplinkGateway.isEmpty ? "—" : info.uplinkGateway, nil),
+                 ("在线时长", info.uplinkUptime > 0 ? durationLabel(info.uplinkUptime) : "—", nil)],
+                [("协商速率", info.upstreamRate.isEmpty ? "—" : info.upstreamRate, nil),
+                 ("会话", info.connections > 0 ? "\(info.connections)" : "—", nil),
+                 ("累计", trafficLabel, nil)]
             ])
+            divider
+            // DNS 常常两条、一条十几个字符，塞进三分之一宽只会被截成「192.16…」，
+            // 所以单独占一整行。
+            metricGrid([[("DNS", info.uplinkDNS.isEmpty ? "—" : info.uplinkDNS.prefix(2).joined(separator: "  "), nil)]])
             divider
             actionRow(reconnecting ? "正在重连…" : "重新连接",
                       symbol: "arrow.triangle.2.circlepath",
@@ -298,6 +304,12 @@ struct NetworkView: View {
                 Task { await reconnect() }
             }
         }
+    }
+
+    /// 出口网口自开机以来的累计流量，两个方向挤在一格里（`↓ 392 GB ↑ 67 GB`）。
+    private var trafficLabel: String {
+        guard info.wanRxTotal + info.wanTxTotal > 0 else { return "—" }
+        return "↓ \(formatBytes(info.wanRxTotal))  ↑ \(formatBytes(info.wanTxTotal))"
     }
 
     private func reconnect() async {
@@ -361,27 +373,29 @@ struct NetworkView: View {
                             Circle().fill((live ? NetPalette.wifi : Color(.systemGray4)).opacity(0.12))
                         }
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(band.bandName)
-                            .font(.system(size: 15))
-                            .foregroundStyle(live ? Color.primary : Color.secondary)
-                        Text(band.ssid.isEmpty ? "—" : band.ssid)
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    Spacer(minLength: 8)
-                    VStack(alignment: .trailing, spacing: 2) {
-                        Text(band.channelLabel)
-                            .font(.system(size: 13))
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                        Text(bandStatus(band))
+                        HStack(spacing: 5) {
+                            Text(band.bandName)
+                                .font(.system(size: 15))
+                                .foregroundStyle(live ? Color.primary : Color.secondary)
+                            Text(band.ssid.isEmpty ? "—" : band.ssid)
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        // 第二行：信道 · 频宽 · 功率 · 加密 · 台数。挤在一行是为了
+                        // 让「无线」这一块只有两行高，但该看的数一个不少。
+                        Text(bandDetail(band))
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                             .lineLimit(1)
-                            .minimumScaleFactor(0.8)
+                            .minimumScaleFactor(0.75)
                     }
+                    Spacer(minLength: 6)
+                    Text(band.clients > 0 ? "\(band.clients) 台" : "")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
                 }
                 .contentShape(Rectangle())
             }
@@ -396,6 +410,17 @@ struct NetworkView: View {
             .disabled(!band.editable || togglingBand != nil)
         }
         .padding(.vertical, 9)
+    }
+
+    /// 频段第二行：`CH 56 · 80 MHz · 100% · WPA3 混合`。关闭时只写「已关闭」。
+    private func bandDetail(_ band: WifiBandInfo) -> String {
+        guard band.up, band.ssidOn else { return "已关闭" }
+        var parts: [String] = []
+        if band.channel > 0 { parts.append("CH \(band.channel)") }
+        if !band.width.isEmpty { parts.append("\(band.width) MHz") }
+        if band.txPowerPercent > 0 { parts.append("\(band.txPowerPercent)%") }
+        if !band.encryption.isEmpty { parts.append(band.securityLabel) }
+        return parts.isEmpty ? "—" : parts.joined(separator: " · ")
     }
 
     private func toggle(_ band: WifiBandInfo, _ on: Bool) async {
@@ -413,27 +438,17 @@ struct NetworkView: View {
         }
     }
 
-    /// 主 SSID 关掉但访客 / IoT / MLO 还在广播是常见操作（这台机器 2.4G 就是这样），
-    /// 所以状态按「这条路还通不通」说，而不是按 radio 的开关说。
-    private func bandStatus(_ band: WifiBandInfo) -> String {
-        guard band.up, band.ssidOn else { return "已关闭" }
-        var parts: [String] = []
-        if !band.encryption.isEmpty { parts.append(band.securityLabel) }
-        parts.append("\(band.clients) 台")
-        if band.extraNets > 0 { parts.append("另 \(band.extraNets) 个") }
-        return parts.joined(separator: " · ")
-    }
-
-    // MARK: - 在线设备
+    // MARK: - 设备
 
     private var clientsCard: some View {
-        card("在线设备", trailing: "\(info.onlineClients.count) 台") {
-            let clients = info.onlineClients
-            if clients.isEmpty {
+        let online = info.onlineClients
+        let offline = info.offlineClients
+        return card("设备", trailing: clientsSummary(online: online.count, offline: offline.count)) {
+            if info.clients.isEmpty {
                 emptyLine
             } else {
-                ForEach(clients) { client in
-                    if client.id != clients.first?.id { divider }
+                ForEach(info.clients) { client in
+                    if client.id != info.clients.first?.id { divider }
                     Button {
                         editingClient = client
                     } label: {
@@ -441,27 +456,59 @@ struct NetworkView: View {
                     }
                     .buttonStyle(.plain)
                 }
+                if !offline.isEmpty {
+                    divider
+                    actionRow(clearingOffline ? "正在清除…" : "清除离线记录",
+                              symbol: "trash",
+                              busy: clearingOffline) {
+                        Task { await clearOffline() }
+                    }
+                }
             }
         }
     }
 
+    private func clientsSummary(online: Int, offline: Int) -> String {
+        if online == 0 && offline == 0 { return "" }
+        let parts = ["\(online) 在线"]
+        if offline > 0 { parts.append("\(offline) 离线") }
+        return parts.joined(separator: " · ")
+    }
+
+    private func clearOffline() async {
+        guard !clearingOffline else { return }
+        clearingOffline = true
+        let problem = await model.clearOfflineClients()
+        await model.manualRefresh()
+        clearingOffline = false
+        if let problem {
+            model.presentError(problem)
+        } else {
+            model.notice = Notice(kind: .ok, title: "离线记录已清除", detail: "")
+        }
+    }
+
     private func clientRow(_ client: NetClient) -> some View {
-        let wired = client.iface == "有线"
-        // 第一行是名字，没名字时退到 IP；这时第二行改显示 MAC，否则两行会一模一样。
-        let named = !client.name.trimmingCharacters(in: .whitespaces).isEmpty && client.name != "*"
-        let second = named ? (client.ip.isEmpty ? client.mac : client.ip) : client.mac
+        // 第二行是「地址 · 接入 · 信号」，比单独一列「接入方式」信息量高，
+        // 而右侧留给速率与累计流量（在线时才变的那两个数）。
+        var bits: [String] = []
+        if !client.ip.isEmpty { bits.append(client.ip) }
+        if !client.iface.isEmpty { bits.append(client.iface) }
+        if client.signal != 0 { bits.append("\(client.signal) dBm") }
+        if !client.reservedIP.isEmpty { bits.append("固定") }
+        let detail = bits.isEmpty ? client.mac : bits.joined(separator: " · ")
+
         return HStack(spacing: 10) {
-            Image(systemName: wired ? "cable.connector" : "wifi")
+            Image(systemName: client.icon)
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(wired ? NetPalette.wired : NetPalette.wifi)
+                .foregroundStyle(rowColor(client))
                 .frame(width: 28, height: 28)
-                .background {
-                    Circle().fill((wired ? NetPalette.wired : NetPalette.wifi).opacity(0.12))
-                }
+                .background { Circle().fill(rowColor(client).opacity(0.12)) }
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
                     Text(client.displayName)
                         .font(.system(size: 15))
+                        .foregroundStyle(client.online ? Color.primary : Color.secondary)
                         .lineLimit(1)
                     if client.blocked {
                         Text("已拦截")
@@ -474,17 +521,19 @@ struct NetworkView: View {
                             }
                     }
                 }
-                Text(second)
+                Text(detail)
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
                     .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
-            Spacer(minLength: 8)
+            Spacer(minLength: 6)
             VStack(alignment: .trailing, spacing: 2) {
-                Text(client.iface.isEmpty ? "—" : client.iface)
+                Text(client.online ? client.rateLabel : "离线")
                     .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(client.online ? rowColor(client) : Color.secondary)
+                    .monospacedDigit()
                 Text(client.trafficLabel)
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
@@ -495,13 +544,22 @@ struct NetworkView: View {
                 .foregroundStyle(Color(.tertiaryLabel))
         }
         .padding(.vertical, 9)
+        .opacity(client.online ? 1 : 0.6)
         .contentShape(Rectangle())
+    }
+
+    /// 设备行的着色：拦截（红）> 网线（紫）> 无线（青）。
+    private func rowColor(_ client: NetClient) -> Color {
+        if client.blocked { return Color(red: 0.85, green: 0.25, blue: 0.22) }
+        return client.wired ? NetPalette.wired : NetPalette.wifi
     }
 
     // MARK: - 局域网与端口
 
     private var lanCard: some View {
         card("局域网与端口", trailing: info.ports.filter(\.up).isEmpty ? "" : "\(info.ports.filter(\.up).count) 个已连接") {
+            // 这一卡统一两列：网口名 + 协商速率那一格要放「1000 Mbps 全双工」，
+            // 挤成三分之一宽会被截断。
             metricGrid([
                 portCells,
                 [("路由器", info.lanMask.isEmpty ? info.lanIP : "\(info.lanIP) / \(info.lanMask)", nil),
@@ -573,8 +631,8 @@ struct NetworkView: View {
         }
     }
 
-    /// 两列的数据网格：标签小字在上、值在下。比「标题 …… 值」省一半高度，
-    /// 而且同一列的值左边缘齐平，扫起来不跳。
+    /// 多列数据网格：标签小字在上、值在下。比「标题 …… 值」省一半高度，
+    /// 而且同一列的值左边缘齐平，扫起来不跳。列数由每行的元素个数决定。
     private func metricGrid(_ rows: [[(String, String, Color?)]]) -> some View {
         VStack(spacing: 0) {
             ForEach(rows.indices, id: \.self) { index in
@@ -584,7 +642,6 @@ struct NetworkView: View {
                     ForEach(row.indices, id: \.self) { column in
                         metricCell(row[column].0, row[column].1, row[column].2)
                     }
-                    if row.count == 1 { Color.clear.frame(maxWidth: .infinity) }
                 }
                 .padding(.vertical, 9)
             }
@@ -603,7 +660,7 @@ struct NetworkView: View {
                 .monospacedDigit()
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .minimumScaleFactor(0.75)
+                .minimumScaleFactor(0.7)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -648,7 +705,7 @@ struct NetworkView: View {
 
 // MARK: - 编辑 Wi-Fi
 
-/// 一个频段的编辑页：名称 / 密码 / 隐藏 / 开关。
+/// 一个频段的编辑页：名称 / 密码 / 隐藏 / 启用 / 信道 / 频宽 / 发射功率。
 ///
 /// 版式跟「连接设备」「切换连接」那几个弹窗一致：`Form` + 右上角保存。
 /// 保存成功后自己关掉并让上一页刷新；失败就把原因留在表单里，不关窗——
@@ -663,6 +720,9 @@ private struct BandEditorSheet: View {
     @State private var key: String
     @State private var hidden: Bool
     @State private var enabled: Bool
+    @State private var channel: String
+    @State private var width: String
+    @State private var power: Int
     @State private var busy = false
     @State private var errorText: String?
 
@@ -672,6 +732,10 @@ private struct BandEditorSheet: View {
         _key = State(initialValue: band.key)
         _hidden = State(initialValue: band.hidden)
         _enabled = State(initialValue: band.ssidOn)
+        _channel = State(initialValue: band.channelMode.isEmpty ? "auto" : band.channelMode)
+        let current = band.width.isEmpty ? (band.band == "2.4" ? "40" : "80") : band.width
+        _width = State(initialValue: current)
+        _power = State(initialValue: band.txPowerPercent > 0 ? band.txPowerPercent : 100)
     }
 
     /// 有密码的加密方式才显示密码行（`none` 时写了也没意义）。
@@ -707,6 +771,34 @@ private struct BandEditorSheet: View {
                         .adaptiveRowBackground()
                     Toggle("启用", isOn: $enabled)
                         .adaptiveRowBackground()
+                }
+
+                Section {
+                    Picker("信道", selection: $channel) {
+                        Text("自动").tag("auto")
+                        ForEach(band.channelOptions, id: \.self) { value in
+                            Text("CH \(value)").tag(String(value))
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .adaptiveRowBackground()
+
+                    Picker("频宽", selection: $width) {
+                        ForEach(band.widthOptions, id: \.self) { value in
+                            Text("\(value) MHz").tag(value)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .adaptiveRowBackground()
+
+                    Picker("发射功率", selection: $power) {
+                        ForEach([100, 75, 50, 25], id: \.self) { value in
+                            Text("\(value)%").tag(value)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .adaptiveRowBackground()
+                    .disabled(!enabled)
                 }
 
                 if let errorText {
@@ -748,7 +840,10 @@ private struct BandEditorSheet: View {
                                            ssid: ssid,
                                            key: key,
                                            hidden: hidden,
-                                           enabled: enabled)
+                                           enabled: enabled,
+                                           channel: channel,
+                                           width: width,
+                                           power: power)
         busy = false
         guard let problem else {
             model.notice = Notice(kind: .ok,
@@ -764,8 +859,8 @@ private struct BandEditorSheet: View {
 
 // MARK: - 设备操作
 
-/// 一台设备的操作页：改名 / 阻止入网。
-/// 两件事分开写、一次提交：改名写 `gl-client.alias`，阻止写 GL 黑名单。
+/// 一台设备的操作页：改名 / 固定地址 / 阻止入网。
+/// 三件事分开写、按「便宜的在前」提交：改名 → 固定地址 → 网络权限。
 private struct ClientEditorSheet: View {
     @Environment(AppModel.self) private var model: AppModel
     @Environment(\.dismiss) private var dismiss
@@ -774,13 +869,21 @@ private struct ClientEditorSheet: View {
 
     @State private var name: String
     @State private var blocked: Bool
+    @State private var pinned: Bool
+    @State private var address: String
     @State private var busy = false
     @State private var errorText: String?
 
+    private let originalName: String
+
     init(client: NetClient) {
         self.client = client
-        _name = State(initialValue: client.name == "*" ? "" : client.name)
+        let shown = client.name == "*" ? "" : client.name
+        self.originalName = shown
+        _name = State(initialValue: shown)
         _blocked = State(initialValue: client.blocked)
+        _pinned = State(initialValue: !client.reservedIP.isEmpty)
+        _address = State(initialValue: client.reservedIP.isEmpty ? client.ip : client.reservedIP)
     }
 
     var body: some View {
@@ -795,6 +898,22 @@ private struct ClientEditorSheet: View {
                             .autocorrectionDisabled()
                     }
                     .adaptiveRowBackground()
+
+                    Toggle("固定地址", isOn: $pinned)
+                        .adaptiveRowBackground()
+
+                    if pinned {
+                        HStack {
+                            Text("地址")
+                            TextField("", text: $address)
+                                .multilineTextAlignment(.trailing)
+                                .keyboardType(.numbersAndPunctuation)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .monospacedDigit()
+                        }
+                        .adaptiveRowBackground()
+                    }
 
                     Toggle("阻止入网", isOn: $blocked)
                         .adaptiveRowBackground()
@@ -814,6 +933,14 @@ private struct ClientEditorSheet: View {
                         Spacer(minLength: 8)
                         Text(client.iface.isEmpty ? "—" : client.iface)
                             .foregroundStyle(.secondary)
+                    }
+                    .adaptiveRowBackground()
+                    HStack {
+                        Text("流量")
+                        Spacer(minLength: 8)
+                        Text(client.trafficLabel)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
                     }
                     .adaptiveRowBackground()
                     HStack {
@@ -863,12 +990,22 @@ private struct ClientEditorSheet: View {
         busy = true
         errorText = nil
 
-        // 先改名（不痛不痒），再动网络权限。任何一步失败都停在这儿，把原因写在表单里。
-        if let problem = await model.renameClient(mac: client.mac, name: name) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        if trimmed != originalName,
+           let problem = await model.renameClient(mac: client.mac, name: trimmed) {
             busy = false
             errorText = problem
             return
         }
+
+        let target = pinned ? address.trimmingCharacters(in: .whitespaces) : ""
+        if target != client.reservedIP,
+           let problem = await model.setReservedIP(mac: client.mac, ip: target) {
+            busy = false
+            errorText = problem
+            return
+        }
+
         if blocked != client.blocked,
            let problem = await model.setClientBlocked(mac: client.mac, blocked: blocked) {
             busy = false
@@ -878,10 +1015,10 @@ private struct ClientEditorSheet: View {
 
         busy = false
         model.notice = Notice(kind: .ok,
-                              title: blocked == client.blocked
-                              ? "名称已保存"
-                              : (blocked ? "已禁止上网" : "已允许上网"),
-                              detail: name.isEmpty ? client.displayName : name)
+                              title: blocked != client.blocked
+                              ? (blocked ? "已禁止上网" : "已允许上网")
+                              : "已保存",
+                              detail: trimmed.isEmpty ? client.displayName : trimmed)
         dismiss()
         await model.manualRefresh()
     }

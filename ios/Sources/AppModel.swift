@@ -1191,6 +1191,18 @@ private struct NetVap {
             info.txSpeed = number(speed["speed_tx"]) ?? 0
         }
 
+        // ---- 出口累计流量 + 连接数 ----
+        // 流量直接读网口计数器（自开机累计，重启归零）；连接数读 conntrack 行数。
+        // 这两个都是「官方 App 有、我们之前没有」的字段，用户 2026-11-15 说数据不够。
+        let traffic = (sections["TRAFFIC"] ?? "")
+            .split(whereSeparator: { $0 == "\n" || $0 == " " })
+            .compactMap { Double($0) }
+        if traffic.count >= 2 {
+            info.wanRxTotal = traffic[0]
+            info.wanTxTotal = traffic[1]
+        }
+        if let value = Int(firstLine(sections["CONN"])) { info.connections = value }
+
         // ---- 中继上游：SSID / 信号 / 协商速率 ----
         // 官方 App 的中继卡就是「已连接的网络 + 信号 + 频段」，这里照抄。
         if chosen == .repeater {
@@ -1324,23 +1336,85 @@ private struct NetVap {
         }
         info.blockedMACs = blocked
 
-        var clients: [NetClient] = []
+        // ---- 保留地址：`dhcp` 里每个 host 段是 mac + ip 一对 ----
+        let dhcpConf = uciValues(sections["DHCPCFG"])
+        var hostMAC: [String: String] = [:]
+        for (key, value) in dhcpConf where key.hasSuffix(".mac") && key.contains("@host") {
+            hostMAC[String(key.dropLast(".mac".count))] = value.uppercased()
+        }
+        var reserved: [String: String] = [:]
+        for (prefix, mac) in hostMAC {
+            if let ip = dhcpConf[prefix + ".ip"], !ip.isEmpty { reserved[mac] = ip }
+        }
+        info.reservedIPs = reserved
+
+        // ---- 名字的三个可靠来源（顺序就是可信度）----
+        //
+        // ① `gl-client.alias`：用户在官方 App 里改过的名字，按 MAC 存；
+        // ② `/tmp/dhcp.leases` 的主机名：设备自己上报的，按 MAC 存，`*` 表示没报；
+        // ③ `gl-clients` 的 `name`：这台固件上有 bug——同一份缓存被多台离线设备共用，
+        //    4 个不同 MAC 会一起报成「Xiaomi-14」。所以只在「全场唯一」时才敢用。
+        let glClient = uciValues(sections["GCONF"])
+        var aliasByMAC: [String: String] = [:]
+        for (key, value) in glClient where key.hasSuffix(".alias") && !value.isEmpty {
+            let prefix = String(key.dropLast(".alias".count))
+            guard let mac = glClient[prefix + ".mac"], !mac.isEmpty else { continue }
+            aliasByMAC[mac.uppercased()] = value
+        }
+
+        var leaseByMAC: [String: String] = [:]
+        for line in (sections["LEASES"] ?? "").split(separator: "\n") {
+            let parts = line.split(separator: " ")
+            guard parts.count >= 4 else { continue }
+            let mac = String(parts[1]).uppercased()
+            let host = String(parts[3])
+            if !host.isEmpty, host != "*" { leaseByMAC[mac] = host }
+        }
+
+        // 先按原始字段读一遍，再统一决定名字——「唯一性」要看到全场才能判。
+        var raw: [(object: [String: Any], mac: String)] = []
+        var nameCount: [String: Int] = [:]
         for rawLine in (sections["CLIENTS"] ?? "").split(separator: "\n") {
             let text = String(rawLine).trimmingCharacters(in: .whitespaces)
             guard text.hasPrefix("{"), let data = text.data(using: .utf8),
                   let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             else { continue }
+            let mac = ((object["mac"] as? String) ?? "").uppercased()
+            raw.append((object, mac))
+            let reported = ((object["name"] as? String) ?? "").trimmingCharacters(in: .whitespaces)
+            if !reported.isEmpty, reported != "*" {
+                nameCount[reported, default: 0] += 1
+            }
+        }
+
+        var clients: [NetClient] = []
+        for entry in raw {
+            let object = entry.object
             var client = NetClient()
-            client.mac = ((object["mac"] as? String) ?? "").uppercased()
-            client.name = (object["name"] as? String) ?? ""
+            client.mac = entry.mac
             client.ip = (object["ip"] as? String) ?? ""
             client.online = (object["online"] as? Bool) ?? false
             client.iface = clientIfaceName((object["iface"] as? String) ?? "")
             client.totalRx = looseNumber(object["total_rx"]) ?? 0
             client.totalTx = looseNumber(object["total_tx"]) ?? 0
-            client.onlineTime = looseNumber(object["online_time"]) ?? 0
+            client.rxSpeed = looseNumber(object["rx"]) ?? 0
+            client.txSpeed = looseNumber(object["tx"]) ?? 0
             client.signal = signalByMAC[client.mac] ?? 0
             client.blocked = blocked.contains(client.mac)
+            client.reservedIP = reserved[client.mac] ?? ""
+
+            // 名字：别名 → 租约 → 唯一才敢用的接口名 → IP（displayName 兜底）。
+            if let alias = aliasByMAC[client.mac] {
+                client.alias = alias
+                client.name = alias
+            } else if let lease = leaseByMAC[client.mac] {
+                client.name = lease
+            } else {
+                let reported = ((object["name"] as? String) ?? "").trimmingCharacters(in: .whitespaces)
+                if reported != "*", (nameCount[reported] ?? 0) <= 1 {
+                    client.name = reported
+                }
+            }
             clients.append(client)
         }
         clients.sort { left, right in
@@ -1408,6 +1482,10 @@ private struct NetVap {
             // 写回配置要用的三样：段名、当前密码、是否隐藏。
             band.radio = radio
             band.section = main?.section ?? ""
+            // 信道 / 频宽 / 功率都存在 radio 上（不是 VAP），写回时也写 radio。
+            band.channelMode = wifi["wireless.\(radio).channel"] ?? ""
+            band.htmode = wifi["wireless.\(radio).htmode"] ?? ""
+            band.txPowerPercent = Int(wifi["wireless.\(radio).txpower"] ?? "") ?? 0
             if let sec = main?.section, !sec.isEmpty {
                 band.key = wifi["wireless.\(sec).key"] ?? ""
                 band.hidden = (wifi["wireless.\(sec).hidden"] ?? "0") == "1"
@@ -1484,9 +1562,14 @@ private struct NetVap {
     // 之前吃过「界面报成功、路由器没动」的亏（段名写错时 uci 只打一行 warning）。
 
     /// 改一个频段的 Wi-Fi。返回 `nil` 表示成功，否则是要显示给用户的错误文案。
+    ///
+    /// `channel` / `width` / `power` 传 `nil` 表示「这一项不动」：
+    /// 列表里那个开关只想切开关时，不该顺手把信道从「自动」写死成当前实测值。
     @discardableResult
     func saveBand(_ band: WifiBandInfo, ssid: String, key: String,
-                  hidden: Bool, enabled: Bool) async -> String? {
+                  hidden: Bool, enabled: Bool,
+                  channel: String? = nil, width: String? = nil,
+                  power: Int? = nil) async -> String? {
         guard connected else { return "还没连上路由器" }
         guard band.editable else { return "读不到这个频段的配置段名，改不了" }
 
@@ -1512,11 +1595,30 @@ private struct NetVap {
         if enabled, !band.radio.isEmpty {
             lines.append("uci -q set wireless.\(band.radio).disabled='0'")
         }
+
+        // ---- 信道 / 频宽 / 发射功率：三项都在 radio 段上 ----
+        if let channel, !band.radio.isEmpty {
+            lines.append("uci -q set wireless.\(band.radio).channel=\(shQuote(channel))")
+        }
+        if let width, !band.radio.isEmpty {
+            // `htmode` 的前缀是制式（EHT / HE / VHT），不能只写数字——
+            // 这里沿用当前值的前缀，读不到就按这台机器的 EHT 写。
+            let prefix = htmodePrefix(band.htmode)
+            lines.append("uci -q set wireless.\(band.radio).htmode=\(shQuote(prefix + width))")
+        }
+        if let power, !band.radio.isEmpty {
+            lines.append("uci -q set wireless.\(band.radio).txpower=\(shQuote(String(power)))")
+        }
         lines.append("uci -q commit wireless")
-        // 回读三项：名称、隐藏、开关。密码不回读（不把明文再拉到手机上）。
+        // 回读：名称、隐藏、开关；改过的信道 / 频宽 / 功率也各读一遍。
         lines.append("echo @@SSID; uci -q get wireless.\(band.section).ssid")
         lines.append("echo @@HIDDEN; uci -q get wireless.\(band.section).hidden")
         lines.append("echo @@OFF; uci -q get wireless.\(band.section).disabled")
+        if !band.radio.isEmpty {
+            lines.append("echo @@CH; uci -q get wireless.\(band.radio).channel")
+            lines.append("echo @@HT; uci -q get wireless.\(band.radio).htmode")
+            lines.append("echo @@TP; uci -q get wireless.\(band.radio).txpower")
+        }
         // 生效：`wifi reload` 只按新配置重建无线，不动系统时钟、不断 SSH。
         lines.append("wifi reload >/dev/null 2>&1 && echo @@RELOAD ok || echo @@RELOAD fail")
         lines.append("echo @@DONE ok")
@@ -1530,6 +1632,20 @@ private struct NetVap {
             guard hiddenBack == (hidden ? "1" : "0") else { return "隐藏开关没写进去" }
             let offBack = (sections["OFF"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard offBack == (enabled ? "0" : "1") else { return "启用开关没写进去" }
+            if let channel {
+                let back = (sections["CH"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard back == channel else { return "信道没写进去（读回来是「\(back)」）" }
+            }
+            if let width {
+                let back = (sections["HT"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard back == htmodePrefix(band.htmode) + width else {
+                    return "频宽没写进去（读回来是「\(back)」）"
+                }
+            }
+            if let power {
+                let back = (sections["TP"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard back == String(power) else { return "发射功率没写进去（读回来是「\(back)」）" }
+            }
             if (sections["RELOAD"] ?? "").contains("fail") {
                 return "配置已保存，但无线没重新加载，重启路由器后才生效"
             }
@@ -1537,6 +1653,12 @@ private struct NetVap {
         } catch {
             return describe(error)
         }
+    }
+
+    /// `EHT40` → `EHT`。取不到就按这台机器的制式写 `EHT`。
+    private func htmodePrefix(_ raw: String) -> String {
+        let letters = raw.prefix { $0.isLetter }
+        return letters.isEmpty ? "EHT" : String(letters).uppercased()
     }
 
     /// 只切某个频段的开关（列表里那个 Toggle 用）。其余字段原样传回去。
@@ -1619,6 +1741,90 @@ private struct NetVap {
             if blocked, kernel == 0 {
                 return "已加入黑名单，但内核还没挂上，可能要再点一次或重启路由器"
             }
+            return nil
+        } catch {
+            return describe(error)
+        }
+    }
+
+    /// 给一台设备绑一个固定的局域网地址（DHCP 保留地址），传空字符串表示取消。
+    ///
+    /// 写的是 `dhcp` 里的 `host` 段——`config host` 的 `mac` + `ip` 就是 OpenWrt
+    /// 原生的静态绑定，也是 GL 官方 App 里「保留 IP 地址」那条。
+    /// **commit 之后必须重启 dnsmasq**：它按配置生成 `/tmp/hosts/` 里的静态租约，
+    /// 只提交不重启，下一次租约续期之前这台设备还是拿旧地址。
+    @discardableResult
+    func setReservedIP(mac: String, ip: String) async -> String? {
+        guard connected else { return "还没连上路由器" }
+        let target = mac.uppercased()
+        guard target.count == 17 else { return "这台设备没有可用的 MAC" }
+        let value = ip.trimmingCharacters(in: .whitespaces)
+        if !value.isEmpty, !isIPv4(value) { return "地址要写成 192.168.8.x 这样" }
+
+        var lines: [String] = []
+        // 先按 MAC 找已有的 host 段（`dhcp.@host[1].mac` → 段名 `@host[1]`）。
+        lines.append("S=$(uci -q show dhcp 2>/dev/null | grep -i \(shQuote(target)) | grep '@host' | head -1 | cut -d. -f2)")
+        if value.isEmpty {
+            // 取消绑定：只删 `ip` 这一项。**整段删掉会连带删掉 GL 存进去的
+            // `routelink_alias`**（官方的设备名就写在这个 host 段里），
+            // 所以只在「这段除了 mac 什么都没有」时才整段清掉。
+            lines.append("if [ -n \"$S\" ]; then uci -q delete dhcp.$S.ip; C=$(uci -q show dhcp.$S 2>/dev/null | grep -c '='); if [ \"$C\" -le 2 ]; then uci -q delete dhcp.$S; fi; fi")
+        } else {
+            lines.append("if [ -z \"$S\" ]; then uci -q add dhcp host >/dev/null; S=@host[-1]; uci -q set dhcp.$S.mac=\(shQuote(target)); fi")
+            lines.append("uci -q set dhcp.$S.ip=\(shQuote(value))")
+        }
+        lines.append("uci -q commit dhcp")
+        lines.append("/etc/init.d/dnsmasq restart >/dev/null 2>&1")
+        lines.append("sleep 1")
+        // 回读：先按 MAC 重新定位段名（提交后匿名段可能被改名成 `cfg0cfe63`），
+        // 再读这一段自己的 `ip`。**不能**用「grep MAC 再 grep ip」——ip 那一行
+        // 里没有 MAC，两条件永远不可能同时成立（v2.8.0 在这上面栽过一次）。
+        lines.append("S2=$(uci -q show dhcp 2>/dev/null | grep -i \(shQuote(target)) | grep '@host' | head -1 | cut -d. -f2)")
+        lines.append("echo @@RES; uci -q get dhcp.$S2.ip 2>/dev/null")
+        lines.append("echo @@DONE ok")
+
+        do {
+            let sections = parseSections(try await execute(lines.joined(separator: "; "), timeout: 45))
+            guard (sections["DONE"] ?? "").contains("ok") else { return "路由器没有回应，保留地址可能没写进去" }
+            let back = (sections["RES"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard back == value else {
+                return value.isEmpty ? "没有清掉，配置里还留着「\(back)」" : "地址没写进去（读回来是「\(back)」）"
+            }
+            return nil
+        } catch {
+            return describe(error)
+        }
+    }
+
+    /// 四段点分十进制，每段 0–255。
+    private func isIPv4(_ text: String) -> Bool {
+        let parts = text.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4 else { return false }
+        return parts.allSatisfy { part in
+            guard !part.isEmpty, part.count <= 3, let value = Int(part) else { return false }
+            return value >= 0 && value <= 255
+        }
+    }
+
+    /// 清掉离线的客户端记录（官方 App 客户端列表右上角那个「清除离线客户端」）。
+    /// 只删 `gl-clients` 的历史记录，不动任何配置、也不影响在线设备。
+    @discardableResult
+    func clearOfflineClients() async -> String? {
+        guard connected else { return "还没连上路由器" }
+        let before = network.offlineClients.count
+        let lines = [
+            "echo @@BEFORE; ubus call gl-clients list 2>/dev/null | jsonfilter -e '@.clients.*.online' 2>/dev/null | grep -c false",
+            "ubus -t 8 call gl-clients remove_offline >/dev/null 2>&1; echo @@RM $?",
+            "ubus -t 8 call gl-clients sync >/dev/null 2>&1",
+            "sleep 1",
+            "echo @@AFTER; ubus call gl-clients list 2>/dev/null | jsonfilter -e '@.clients.*.online' 2>/dev/null | grep -c false",
+            "echo @@DONE ok"
+        ]
+        do {
+            let sections = parseSections(try await execute(lines.joined(separator: "; "), timeout: 45))
+            guard (sections["DONE"] ?? "").contains("ok") else { return "路由器没有回应" }
+            let after = Int(firstLine(sections["AFTER"])) ?? 0
+            guard after < before else { return "离线记录没清掉（还剩 \(after) 条）" }
             return nil
         } catch {
             return describe(error)
@@ -3673,11 +3879,20 @@ private extension AppModel {
             ubus call network.interface.lan status 2>/dev/null
             echo @@WANSPD
             ubus call gl-clients get_wan_speed 2>/dev/null
+            echo @@TRAFFIC
+            D=$(ip route 2>/dev/null | awk '/^default/{print $5; exit}')
+            cat "/sys/class/net/$D/statistics/rx_bytes" "/sys/class/net/$D/statistics/tx_bytes" 2>/dev/null
+            echo @@CONN
+            wc -l < /proc/net/nf_conntrack 2>/dev/null
             echo @@CLIENTS
             if command -v jsonfilter >/dev/null 2>&1; then
               ubus call gl-clients list 2>/dev/null | jsonfilter -e '@.clients.*' 2>/dev/null \
                 | sed -e 's/"last_rx": *\\[[^]]*\\]/"last_rx":[]/g' -e 's/"last_tx": *\\[[^]]*\\]/"last_tx":[]/g' -e 's/"ipv6": *\\[[^]]*\\]/"ipv6":[]/g'
             fi
+            echo @@GCONF
+            uci show gl-client 2>/dev/null | grep -E '\\.(mac|alias|class)='
+            echo @@LEASES
+            cat /tmp/dhcp.leases 2>/dev/null
             echo @@UPWIFI
             iwinfo apclii0 info 2>/dev/null || iwinfo apcli0 info 2>/dev/null
             echo @@LEASEN
@@ -3687,7 +3902,7 @@ private extension AppModel {
             echo @@DHCPCFG
             uci show dhcp 2>/dev/null
             echo @@WLCFG
-            uci show wireless 2>/dev/null | grep -E '\\.(band|channel|htmode|disabled|ssid|ifname|mode|device|encryption|guest|iot|multi_ap|key|hidden)='
+            uci show wireless 2>/dev/null | grep -E '\\.(band|channel|htmode|txpower|disabled|ssid|ifname|mode|device|encryption|guest|iot|multi_ap|key|hidden)='
             echo @@BLACK
             uci show gl-black_white_list 2>/dev/null | grep -E '\\.(mac|mode|enable)='
             for d in /sys/class/net/*; do

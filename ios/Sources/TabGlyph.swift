@@ -6,7 +6,8 @@ import UIKit
 ///
 /// 图形沿用旧自绘底栏那一套：24×24 设计框、1.7 的线宽、圆头圆角，
 /// 未选中画空心、选中换实心（实心不是把空心加粗，而是另一套闭合路径）。
-/// 实心版都留了「洞」：齿轮的中心孔、盾牌里的对勾，避免选中后只剩一团纯色。
+/// 实心版都留了「洞」：齿轮的中心孔、盾牌里的对勾、球上的两条经纬圈，
+/// 避免选中后只剩一团纯色。
 ///
 /// 为什么画成 UIImage：原生 tabItem 的 icon 只认 Image，自绘 View 会被丢掉；
 /// 而 SF Symbol 的 fill 变体（b89 试过）是另一套形状，比例对不上旧图形，
@@ -95,7 +96,10 @@ enum TabGlyphImage {
         switch kind {
         case .overview: return (overviewPath(), nil)
         case .proxy: return (proxyPath(), filled ? proxyCheckStroke() : nil)
-        case .network: return (networkPath(), nil)
+        case .network:
+            // 球不能三条子路径一起填：even-odd 会把圈内的区域挖成条带。
+            // 实心版只填外圆，两条圈交给 `cut` 擦出来（和盾牌的对勾同一招）。
+            return filled ? (globeDisc(), globeWire(inset: 1.1)) : (networkPath(), nil)
         case .settings: return (settingsPath(), nil)
         }
     }
@@ -198,31 +202,46 @@ enum TabGlyphImage {
         return p
     }
 
-    /// 网络（v2.6.5）：一台带两根天线的路由器，机身左上角一枚指示灯。
+    /// 网络（v2.8.0）：球形网络——一个球，正面两条经纬圈。
     ///
-    /// 为什么不用「地球 + 连线」那类拓扑图：24pt 下三个圆加三条线会糊成一团，
-    /// 而且 `代理` 已经是地球了，两个圆球放一起分不清。路由器的轮廓在这个尺寸
-    /// 反而最干净——一条宽横杠 + 两根短天线，正负空间都留得出来。
-    /// 指示灯单独一条子路径：实心时靠 even-odd 挖空（和齿轮的中心孔同一招）。
+    /// 之前画的是「带两根天线的路由器」，24pt 下那两根天线只有 1.6 宽、6.4 长，
+    /// 用户看着就是一坨（2026-11-15：「太丑了换球形网络那个图标」）。
+    /// 现在改成球：外圆 + 一条经圈（竖椭圆）+ 一条纬圈（横椭圆），三笔就够，
+    /// 空心只剩线条、实心是一整片球上擦出两条圈，两种状态都认得出是球。
     private static func networkPath() -> Path {
         var p = Path()
-        p.addRoundedRect(
-            in: CGRect(x: 2.6, y: 12.0, width: 18.8, height: 8.4),
-            cornerSize: CGSize(width: 2.6, height: 2.6),
-            style: .continuous
-        )
-        p.addRoundedRect(
-            in: CGRect(x: 6.3, y: 5.6, width: 1.6, height: 6.4),
-            cornerSize: CGSize(width: 0.8, height: 0.8),
-            style: .continuous
-        )
-        p.addRoundedRect(
-            in: CGRect(x: 16.1, y: 5.6, width: 1.6, height: 6.4),
-            cornerSize: CGSize(width: 0.8, height: 0.8),
-            style: .continuous
-        )
-        p.addEllipse(in: CGRect(x: 5.4, y: 14.8, width: 2.2, height: 2.2))
+        p.addEllipse(in: CGRect(x: 2.4, y: 2.4, width: 19.2, height: 19.2))
+        p.addEllipse(in: meridianRect())
+        p.addEllipse(in: latitudeRect())
         return p
+    }
+
+    /// 实心球：只有外圆，靠 even-odd 填成一整片（三条子路径一起填会被挖成条带）。
+    private static func globeDisc() -> Path {
+        var p = Path()
+        p.addEllipse(in: CGRect(x: 2.4, y: 2.4, width: 19.2, height: 19.2))
+        return p
+    }
+
+    /// 实心球上要擦掉的两条圈（经圈 + 纬圈）。
+    ///
+    /// `inset` 是给实心态用的：擦除笔画有宽度，圈如果正好落在外圆上，
+    /// 擦出来的亮线会把球边缘啃掉四个口子。往里收半个笔画宽就干净了。
+    private static func globeWire(inset: CGFloat = 0) -> Path {
+        var p = Path()
+        p.addEllipse(in: meridianRect().insetBy(dx: inset, dy: inset))
+        p.addEllipse(in: latitudeRect().insetBy(dx: inset, dy: inset))
+        return p
+    }
+
+    /// 经圈：竖椭圆，宽 8.6、高 19.2，正好贴在外圆上。
+    private static func meridianRect() -> CGRect {
+        CGRect(x: 12 - 4.3, y: 2.4, width: 8.6, height: 19.2)
+    }
+
+    /// 纬圈：横椭圆，宽 19.2、高 8.2。比经圈扁一点，看着才像赤道而不是第二个经圈。
+    private static func latitudeRect() -> CGRect {
+        CGRect(x: 2.4, y: 12 - 4.1, width: 19.2, height: 8.2)
     }
 
     // MARK: - 小工具
