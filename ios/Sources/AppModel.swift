@@ -1014,16 +1014,28 @@ final class AppModel {
 
     /// 跑一组数据项。OpenClash 状态和它的指标必须分成两条命令：
     /// 指标里要用的端口和密钥，来自状态查询的结果。
+    /// 每条命令的字节数有硬上限（见 `commandBudget`），超了会自动再切一块。
     private func runItems(_ items: [PollItem]) async throws {
         guard !items.isEmpty else { return }
         let stateItems = items.filter { $0 == .clashState }
         let otherItems = items.filter { $0 != .clashState }
         if !stateItems.isEmpty {
-            apply(parseSections(try await execute(command(for: stateItems))), items: stateItems)
+            apply(try await sections(for: stateItems), items: stateItems)
         }
         if !otherItems.isEmpty {
-            apply(parseSections(try await execute(command(for: otherItems))), items: otherItems)
+            apply(try await sections(for: otherItems), items: otherItems)
         }
+    }
+
+    /// 跑一组项（自动按 `commandBudget` 切块），把各块的输出并回同一张 section 表。
+    private func sections(for items: [PollItem]) async throws -> [String: String] {
+        var merged: [String: String] = [:]
+        for cmd in commands(for: items) {
+            for (key, value) in parseSections(try await execute(cmd)) {
+                merged[key] = value
+            }
+        }
+        return merged
     }
 
     private func apply(_ sections: [String: String], items: [PollItem]) {
@@ -4194,9 +4206,29 @@ private extension AppModel {
             // 官方列表对不上（本机实测官方是 9C:…:0D、关联表是 9E:…:8D）。
             // `get_wan_speed` 是全局实时上下行，比 `/proc/net/dev` 差值稳。
             //
+            // 中继（v2.9.1）走官方两条通道：配置面 `uci show repeater`——`@main[0]` 是
+            // 开关与切换策略，`@network[*]` 是一条条已保存的上级网络（`selected='1'` 的在用）；
+            // 状态面 `ubus call repeater status` 给信号、频段、信道、BSSID、来自中继的 DNS。
+            // 蜂窝看 `cellular.modem status` 的 `modems`：为空就是没插 Modem。
+            //
             // 无线仍然是 UCI（配置面）+ iwinfo（实测面）两路：MTK 私有驱动下
             // iwinfo 读不到 SSID 的 VAP 很常见（主 SSID 被 `disabled=1` 关掉时就是这样），
             // 所以 SSID / 加密 / 开关一律以 UCI 为准，iwinfo 只补信道和频宽。
+            //
+            // **物理网口的 carrier / 速率走 ubus，不读 sysfs**（v2.9.2）：这台机器
+            // （MTK `15100000.ethernet`）的 `cat /sys/class/net/eth0/carrier` 直接报
+            // "Invalid argument"，以前被兜成 0，WAN 口插没插线永远读不出。
+            // `ubus call network.device status` 是 netifd 自己的数据，给 `carrier`
+            // （true/false）与 `speed`（"1000F" = 1000 兆全双工、"0H" = 断开）。
+            // ⚠️ 那段 JSON 必须用单引号拼变量（`'{"name":"'"$n"'"}'`）：写成
+            // `"{\"name\":\"$n\"}"` 的话 Swift 的 `\"` 先被吃成 `"`，shell 拿到的是
+            // `"{"name":"$n"}"`，引号在第二个 `"` 处就闭合了，拼出来少引号、ubus 直接报错。
+            //
+            // ⚠️⚠️ **这段脚本的注释绝不写进 shell**（v2.9.3 的血债）：SSH 的 exec 命令串
+            // 是**整条**送过去的，dropbear 的 `MAX_STRING_LEN` 正好 9000 字节，超了不发数据、
+            // 直接 `Exit: String too long` 断连。v2.9.2 把上面这段说明写成 shell 注释（中文
+            // 一个字 3 字节），光注释就 1126 B，概览页 core+sensors+flash+network 拼到 9389 B
+            // ——整个界面一条数据都没有。要写说明就写在这儿（Swift 注释不上线）。
             return """
             echo @@DEFDEV
             ip route 2>/dev/null | awk '/^default/{print $5; exit}'
@@ -4234,11 +4266,6 @@ private extension AppModel {
             uci show wireless 2>/dev/null | grep -E '\\.(band|channel|htmode|txpower|disabled|ssid|ifname|mode|device|encryption|guest|iot|multi_ap|key|hidden)='
             echo @@BLACK
             uci show gl-black_white_list 2>/dev/null | grep -E '\\.(mac|mode|enable)='
-            # ---- 中继（官方通道，v2.9.1）----
-            # 配置面 `uci show repeater`：`@main[0]` 是开关与切换策略，
-            # `@network[*]` 是一条条已保存的上级网络（`selected='1'` 的那条在用）。
-            # 状态面 `ubus call repeater status`：信号、频段、信道、BSSID、来自中继的 DNS。
-            # 蜂窝：`cellular.modem status` 的 `modems` 为空 = 没插 Modem。
             echo @@REPEATER
             uci show repeater 2>/dev/null
             echo @@REPSTAT
@@ -4249,15 +4276,6 @@ private extension AppModel {
               n=${d##*/}
               case "$n" in lo|br-*|*.*|ppp*|apcli*|ra*|rai*|rax*|wlan*|sit*|gre*|tun*|tap*|bond*|veth*|docker*|ifb*) continue;; esac
               [ -e "$d/device" ] || continue
-              # **carrier / 速率走 ubus，不读 sysfs**（v2.9.2）。
-              # 这台机器（MTK 15100000.ethernet）的 `cat /sys/class/net/eth0/carrier`
-              # 直接报 "Invalid argument"，以前被兜成 0，WAN 口插没插线永远读不出；
-              # `ubus call network.device status` 是 netifd 自己的数据，给
-              # `carrier`（true/false）与 `speed`（"1000F" = 1000 兆全双工、"0H" = 断开）。
-              #
-              # ⚠️ JSON 这一串必须用单引号拼变量：写成 "{\"name\":\"$n\"}"
-              # 的话，Swift 的 \" 会先被吃成 "，shell 拿到 "{"name":"$n"}"，
-              # 引号在第二个 " 处就闭合了，拼出来是 {name:eth0}（少引号，ubus 直接报错）。
               st=$(ubus call network.device status '{"name":"'"$n"'"}' 2>/dev/null)
               c=$(printf '%s' "$st" | jsonfilter -e '@.carrier' 2>/dev/null)
               if [ -n "$c" ]; then
@@ -4268,7 +4286,6 @@ private extension AppModel {
                 case "$s" in ''|*[!0-9]*) s=0;; esac
                 if [ "$c" != 1 ]; then s=0; x=; fi
               else
-                # 老固件没有这条 ubus：退回 sysfs，读不到就当没插线。
                 c=$(cat "$d/carrier" 2>/dev/null); [ -n "$c" ] || c=0
                 s=$(cat "$d/speed" 2>/dev/null); [ "$s" = "-1" ] && s=0; [ -n "$s" ] || s=0
                 x=$(cat "$d/duplex" 2>/dev/null)
@@ -4374,6 +4391,33 @@ private extension AppModel {
             if seen.insert(body).inserted { parts.append(body) }
         }
         return lowPriority(parts.joined(separator: "\n"))
+    }
+
+    /// SSH exec 命令串的硬上限：dropbear 的 `MAX_STRING_LEN` = **9000 字节**（实测
+    /// 9000 能过、9100 直接 EOF）。超了服务器一条输出都不回，客户端只能看到
+    /// `Exit (root): String too long`，界面表现就是「什么数据都不显示」——v2.9.2
+    /// 概览页拼到 9389 B 正是这个下场。这里留 1000 B 余量。
+    static let commandBudget = 8000
+
+    /// 按项切成若干条命令，保证每条都不超过 [`commandBudget`]。
+    ///
+    /// 原来一条命令装一整页的项，脚本一长就整页没数据、还看不出原因。切块后最多多花
+    /// 一次 exec（几十毫秒），换来的是「脚本再长也只会慢一点，不会全空」。
+    /// 正常情况下概览页 4 项拼起来 ~7 KB，仍然是一条命令，不增加开销。
+    func commands(for items: [PollItem]) -> [String] {
+        var result: [String] = []
+        var batch: [PollItem] = []
+        for item in items {
+            let candidate = batch + [item]
+            if !batch.isEmpty, command(for: candidate).utf8.count > Self.commandBudget {
+                result.append(command(for: batch))
+                batch = [item]
+            } else {
+                batch = candidate
+            }
+        }
+        if !batch.isEmpty { result.append(command(for: batch)) }
+        return result
     }
 
     /// 访问检测脚本。
