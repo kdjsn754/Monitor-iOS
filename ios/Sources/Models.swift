@@ -909,7 +909,15 @@ struct PollConfiguration: Codable, Equatable {
     }
 
     func items(on page: AppPage) -> [PollItem] {
-        PollItem.allCases.filter { $0.page == page }
+        // v2.8.2：概览页的「连接设备」卡改读官方客户端列表（`network`），所以概览也要
+        // 采这一项；反过来 `devices`（租约 + ARP 那套旧名单）已经没有界面在用，停采。
+        PollItem.allCases.filter { item in
+            switch item {
+            case .network: return page == .network || page == .overview
+            case .devices: return false
+            default: return item.page == page
+            }
+        }
     }
 
     mutating func setSeconds(_ value: Double) {
