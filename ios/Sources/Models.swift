@@ -539,6 +539,9 @@ enum ClientClass: String, CaseIterable {
         }
     }
 
+    /// 每一类配一个**同一套线框风格**的符号：设备类的都是轮廓图，
+    /// 不用 `video`（实心摄像头）、`questionmark.circle`（细圈）这类跟别人
+    /// 笔画重量不一样的，否则并排一列看下去是拼的（2026-11-16）。
     var icon: String {
         switch self {
         case .phone: return "iphone"
@@ -546,14 +549,14 @@ enum ClientClass: String, CaseIterable {
         case .laptop: return "laptopcomputer"
         case .computer: return "desktopcomputer"
         case .television: return "tv"
-        case .camera: return "video"
+        case .camera: return "camera"
         case .sound: return "hifispeaker"
         case .printer: return "printer"
         case .watch: return "applewatch"
         case .games: return "gamecontroller"
         case .smartAppliances: return "lightbulb"
         case .gateway: return "wifi.router"
-        case .unknown: return "questionmark.circle"
+        case .unknown: return "questionmark"
         }
     }
 }

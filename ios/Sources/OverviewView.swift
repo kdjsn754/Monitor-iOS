@@ -556,30 +556,28 @@ struct OverviewView: View {
         .background { Capsule().fill(color.opacity(0.10)) }
     }
 
-    /// 概览里的一台设备：圆底图标 + 名称 + 「地址 · 接入」，右边是速率与累计流量。
+    /// 概览里的一台设备：圆角方底图标 + 名称 + 「地址 · 接入」，右边速率与累计流量。
     ///
-    /// 行里不再放箭头——整段底部那一行才是入口，逐行加箭头会到处是尖角。
+    /// 行里不放箭头——整段底部那一行才是入口，逐行加箭头会到处是尖角。
     /// 右侧与网络页「设备」用同一个 `ClientMetricColumn`，两页数字才对得上，
     /// 副标题也换成了同一个 `ClientDetailLine`（去掉设备类型、长度规整）。
+    /// 图标容器同样是 `ClientBadgeIcon`，两页同一套尺寸。
     private func deviceRow(_ client: NetClient) -> some View {
-        let tint = client.wired ? NetPalette.wired : NetPalette.wifi
+        let tint = client.blocked
+            ? Color(red: 0.85, green: 0.25, blue: 0.22)
+            : (client.wired ? NetPalette.wired : NetPalette.wifi)
         return HStack(spacing: 10) {
-            Image(systemName: client.icon)
-                .font(.system(size: 12.5, weight: .medium))
-                .foregroundStyle(tint)
-                .frame(width: 28, height: 28)
-                .background { Circle().fill(tint.opacity(0.12)) }
-            VStack(alignment: .leading, spacing: 2) {
+            ClientBadgeIcon(symbol: client.icon, tint: tint)
+            VStack(alignment: .leading, spacing: 3) {
                 Text(client.displayName)
-                    .font(.system(size: 15))
+                    .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                 ClientDetailLine(client: client)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .layoutPriority(1)
 
-            ClientMetricColumn(client: client, rateColor: tint)
+            ClientMetricColumn(client: client)
         }
         .padding(.vertical, 9)
         .contentShape(Rectangle())

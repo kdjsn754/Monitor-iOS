@@ -731,17 +731,14 @@ struct NetworkView: View {
     private func clientRow(_ client: NetClient) -> some View {
         // 名字下面只留「地址 · 接入」两段，设备类型交给左边那个图标
         // （`client.icon` 就是按 `gl-client.class` 给的，再写一遍纯占长度）。
-        // 右侧两列数字走 `ClientMetricColumn`，和概览的「连接设备」是同一个视图。
+        // 右侧两行数字走 `ClientMetricColumn`，和概览的「连接设备」是同一个视图；
+        // 它 `.fixedSize()`，宁可让名字截断也不让数字折行。
         return HStack(spacing: 10) {
-            Image(systemName: client.icon)
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(rowColor(client))
-                .frame(width: 28, height: 28)
-                .background { Circle().fill(rowColor(client).opacity(0.12)) }
-            VStack(alignment: .leading, spacing: 2) {
+            ClientBadgeIcon(symbol: client.icon, tint: rowColor(client))
+            VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 5) {
                     Text(client.displayName)
-                        .font(.system(size: 15))
+                        .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(client.online ? Color.primary : Color.secondary)
                         .lineLimit(1)
                     if client.blocked {
@@ -758,9 +755,9 @@ struct NetworkView: View {
                 ClientDetailLine(client: client)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .layoutPriority(1)
 
-            ClientMetricColumn(client: client, rateColor: rowColor(client))
+            ClientMetricColumn(client: client)
+                .padding(.trailing, 6)
             Image(systemName: "chevron.right")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Color(.tertiaryLabel))
@@ -1361,6 +1358,9 @@ private struct ClientEditorSheet: View {
                             if savingClass {
                                 ProgressView().controlSize(.small)
                             } else {
+                                Image(systemName: currentSymbol)
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(.secondary)
                                 Text(shownClass)
                                     .foregroundStyle(.secondary)
                                     .lineLimit(1)
@@ -1464,17 +1464,28 @@ private struct ClientEditorSheet: View {
         return client.classLabel
     }
 
+    private var currentSymbol: String {
+        ClientClass(rawValue: classValue)?.icon ?? client.icon
+    }
+
     /// 选完立刻写，不走「保存」——类型是独立的配置，跟名称/地址那几项没有先后关系。
+    ///
+    /// **先改本地值再去写**：以前是等写成功再赋 `classValue`，于是点了类型之后
+    /// 这一行还是旧值，要退出重进才变（用户 2026-11-16 报的就是这个）。
+    /// 现在点击当场换掉，写失败再退回去并报错——反正整段写回只用几十毫秒，
+    /// 真失败了把值恢复原样也不会留下错的显示。
     private func applyClass(_ value: String) async {
-        guard !savingClass else { return }
+        guard !savingClass, value != classValue else { return }
+        let previous = classValue
+        classValue = value
         savingClass = true
         errorText = nil
         let problem = await model.setClientClass(mac: client.mac, value: value)
         savingClass = false
         if let problem {
+            classValue = previous
             errorText = problem
         } else {
-            classValue = value
             await model.manualRefresh()
         }
     }
@@ -1537,9 +1548,9 @@ private struct ClientClassSheet: View {
                         } label: {
                             HStack(spacing: 12) {
                                 Image(systemName: item.icon)
-                                    .font(.system(size: 14, weight: .medium))
+                                    .font(.system(size: 15, weight: .regular))
                                     .foregroundStyle(.secondary)
-                                    .frame(width: 24, alignment: .center)
+                                    .frame(width: 26, alignment: .center)
                                 Text(item.title)
                                     .foregroundStyle(Color.primary)
                                 Spacer(minLength: 8)
