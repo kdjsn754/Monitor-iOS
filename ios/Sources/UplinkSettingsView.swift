@@ -69,7 +69,9 @@ struct UplinkSettingsView: View {
             }
         }
         .themedFormBackground()
-        .tint(.blue)
+        // 按钮文字一律主色，只有开关是蓝的（`ButtonStyles.swift` 的四类）。
+        // v2.9.0 这里写的是 `.tint(.blue)`，整页按钮连「保存」都变蓝，用户当天退回。
+        .primaryButtons()
         .navigationTitle("上网")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -80,6 +82,7 @@ struct UplinkSettingsView: View {
                     Button("保存") { Task { await save() } }
                         .fontWeight(.semibold)
                         .disabled(mode != .repeater)
+                        .navBarTint()
                 }
             }
         }
@@ -143,10 +146,13 @@ struct UplinkSettingsView: View {
                 .adaptiveRowBackground()
             bssidRow
             Toggle("启用中继", isOn: $enabled)
+                .blueSwitch()
                 .adaptiveRowBackground()
             Toggle("启用伪装", isOn: $disguise)
+                .blueSwitch()
                 .adaptiveRowBackground()
             Toggle("公共热点认证模式", isOn: $autoPortal)
+                .blueSwitch()
                 .adaptiveRowBackground()
             Picker("切换模式", selection: $switchMode) {
                 Text("不切换").tag(0)
@@ -183,11 +189,16 @@ struct UplinkSettingsView: View {
                             if item.selected {
                                 Text("使用中")
                                     .font(.system(size: 13))
-                                    .foregroundStyle(Color(.systemBlue))
+                                    .foregroundStyle(.secondary)
                             } else {
-                                Text("切换")
-                                    .font(.system(size: 13))
-                                    .foregroundStyle(Color(.systemBlue))
+                                HStack(spacing: 3) {
+                                    Text("切换")
+                                        .font(.system(size: 13))
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundStyle(.tertiary)
+                                }
+                                .foregroundStyle(.primary)
                             }
                         }
                     }
@@ -287,7 +298,9 @@ struct UplinkSettingsView: View {
     @ViewBuilder
     private var wiredSection: some View {
         Section("以太网") {
-            valueRow("状态", info.wiredOK ? "已连接" : (info.wanCable ? "已插网线，未联网" : "未插网线"))
+            // 状态分三档，不能只用「WAN 口有没有链路」：链路通但没拿到地址/没走这路时
+            // 说「已连接」是骗人的。`info.uplink == .wired` 表示默认路由真落在这条线上。
+            valueRow("状态", wiredStateLabel)
             valueRow("协议", info.uplink == .wired ? info.protoLabel : "—")
             valueRow("IP 地址", info.uplink == .wired && !info.uplinkIP.isEmpty ? info.uplinkIP : "—")
             valueRow("网关", info.uplink == .wired && !info.uplinkGateway.isEmpty ? info.uplinkGateway : "—")
@@ -301,7 +314,7 @@ struct UplinkSettingsView: View {
                     if info.uplink == .wired {
                         Image(systemName: "checkmark")
                             .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(Color(.systemBlue))
+                            .foregroundStyle(.secondary)
                     }
                 }
             }
@@ -316,6 +329,15 @@ struct UplinkSettingsView: View {
         Section("蜂窝网络") {
             valueRow("Modem", rep.modemPresent ? "已插入" : "未检测到 Modem")
         }
+    }
+
+    /// 以太网出口的三档状态（用户 2026-11-15 的截图：WAN 口空着却写「已连接」）。
+    /// - 默认路由真走有线、且拿到了地址 → 已连接；
+    /// - WAN 口有链路、但没在用（走的还是中继）或没拨上 → 已插网线，未联网；
+    /// - WAN 口连链路都没有 → 未插网线。
+    private var wiredStateLabel: String {
+        if info.uplink == .wired, !info.uplinkIP.isEmpty { return "已连接" }
+        return info.wanCable ? "已插网线，未联网" : "未插网线"
     }
 
     // MARK: - 小工具

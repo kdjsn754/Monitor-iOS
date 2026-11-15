@@ -21,9 +21,9 @@ import SwiftUI
 /// 端口状态与 DHCP 地址池都在那儿改（v2.9.0，用户 2026-11-15）。
 /// 被动信息进多列网格（标签在上、值在下），只有能点的地方才排成整行。
 ///
-/// **按钮一律走蓝色**（本页 `.tint(.blue)` 收在最外层，工具栏与弹出的编辑页都盖到）。
-/// 别的页导航栏按钮是黑的（`navBarTint` 的用户要求），但这一页用户明确说「全是黑的」，
-/// 所以这里连「保存 / 取消」也不再用 `navBarTint()`。
+/// **按钮与开关**：开关蓝、其余按钮黑字，规则见 `ButtonStyles.swift`。
+/// v2.9.0 曾把整页 `.tint(.blue)`（连导航栏「保存 / 取消」都蓝），
+/// 用户 2026-11-15 退回：「我要的是开关那种蓝色，不是所有按钮都蓝」。
 ///
 /// **没有一行说明性小字**（用户 2026-10-31 定的规矩）。
 struct NetworkView: View {
@@ -70,7 +70,7 @@ struct NetworkView: View {
                         .controlSize(.small)
                         .frame(width: 38, height: 38)
                 } else {
-                    HeaderButton("arrow.clockwise", tint: Color.blue) {
+                    HeaderButton("arrow.clockwise") {
                         Task { await refresh() }
                     }
                 }
@@ -90,13 +90,11 @@ struct NetworkView: View {
             .navigationDestination(isPresented: $showUplink) {
                 UplinkSettingsView()
             }
-            // 底栏在 `MainTabs` 上挂了 `.tint(.primary)`，那是往下传的环境值，
-            // 不补这一句整页控件会跟着变黑（v2.1.17 的教训）。
-            //
-            // ⚠️ 必须放在 `sheet` / `navigationDestination` **之后**：环境值只往下传，
-            // 挂在滚动视图上时弹出的编辑页拿不到，里面的开关、选择器、保存按钮全是黑的
-            // ——这正是用户 2026-11-15 说的「网络里面所有按钮都是黑色的」。
-            .tint(.blue)
+            // 底栏在 `MainTabs` 上挂着 `.tint(.primary)`，那是往下传的环境值。
+            // 这一页不再整页染蓝（v2.9.2）：按钮文字一律主色，只有开关是蓝的，
+            // 见 `ButtonStyles.swift`。推上来的「上网 / 局域网」和两个编辑页
+            // 各自带 `primaryButtons()`，开关各自带 `blueSwitch()`。
+            .primaryButtons()
         }
     }
 
@@ -772,8 +770,10 @@ private struct BandEditorSheet: View {
                     }
 
                     Toggle("隐藏网络", isOn: $hidden)
+                        .blueSwitch()
                         .adaptiveRowBackground()
                     Toggle("启用", isOn: $enabled)
+                        .blueSwitch()
                         .adaptiveRowBackground()
                 }
 
@@ -815,14 +815,15 @@ private struct BandEditorSheet: View {
                 }
             }
             .themedFormBackground()
-            // 弹窗是独立的 NavigationStack，拿不到页面最外层那句 `.tint(.blue)`
-            // （环境值只往下传）。不补这一句：开关、选择器、"保存"全是黑的。
-            .tint(.blue)
+            // 弹窗是独立的 NavigationStack，环境值只往下传，这里要自己说一遍：
+            // 按钮文字主色、开关蓝（`ButtonStyles.swift` 的四类）。
+            .primaryButtons()
             .navigationTitle(band.bandName)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("取消") { dismiss() }
+                        .navBarTint()
                         .disabled(busy)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
@@ -831,6 +832,7 @@ private struct BandEditorSheet: View {
                     } else {
                         Button("保存") { Task { await save() } }
                             .fontWeight(.semibold)
+                            .navBarTint()
                     }
                 }
             }
@@ -905,6 +907,7 @@ private struct ClientEditorSheet: View {
                     .adaptiveRowBackground()
 
                     Toggle("固定地址", isOn: $pinned)
+                        .blueSwitch()
                         .adaptiveRowBackground()
 
                     if pinned {
@@ -921,6 +924,7 @@ private struct ClientEditorSheet: View {
                     }
 
                     Toggle("阻止入网", isOn: $blocked)
+                        .blueSwitch()
                         .adaptiveRowBackground()
                 }
 
@@ -1003,12 +1007,13 @@ private struct ClientEditorSheet: View {
                 }
             }
             .themedFormBackground()
-            .tint(.blue)
+            .primaryButtons()
             .navigationTitle(client.displayName)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("取消") { dismiss() }
+                        .navBarTint()
                         .disabled(busy)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
@@ -1017,6 +1022,7 @@ private struct ClientEditorSheet: View {
                     } else {
                         Button("保存") { Task { await save() } }
                             .fontWeight(.semibold)
+                            .navBarTint()
                     }
                 }
             }

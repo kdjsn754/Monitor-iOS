@@ -1052,7 +1052,7 @@ private struct ProxyConfigView: View {
                 if on { picked = name }
             })
             .labelsHidden()
-            .tint(.blue)
+            .blueSwitch()
             .accessibilityLabel("选择 \(name)")
         }
         .padding(.vertical, 6)
@@ -1256,7 +1256,7 @@ private struct SubscriptionListView: View {
                     Task { await model.setSubscriptionEnabled(sub, on) }
                 })
                 .labelsHidden()
-                .tint(.blue)
+                .blueSwitch()
                 .accessibilityLabel("启用 \(sub.name)")
             }
         }
@@ -1500,7 +1500,7 @@ private struct SubscriptionEditView: View {
 
             Section {
                 Toggle("启用", isOn: $enabled)
-                    .tint(.blue)
+                    .blueSwitch()
                     .adaptiveRowBackground()
             } footer: {
                 Text("关掉只是不参与「全部更新」，已下载的配置和当前运行状态都不受影响。"

@@ -1381,18 +1381,15 @@ private struct NetVap {
 
         // ---- 物理网口 ----
         var ports: [NetPortInfo] = []
-        var wanCable = false
         for (key, body) in sections where key.hasPrefix("PORT ") {
             let name = String(key.dropFirst("PORT ".count))
             let tokens = body.split(whereSeparator: { $0 == " " || $0 == "\n" })
             let carrier = tokens.first.flatMap { Int($0) } ?? 0
             let speed = tokens.count > 1 ? (Int(tokens[1]) ?? 0) : 0
             let duplex = tokens.count > 2 ? String(tokens[2]) : ""
-            if name == deviceOf(wanStatus), carrier == 1 { wanCable = true }
             ports.append(NetPortInfo(name: name, role: "LAN", up: carrier == 1,
                                      speed: speed, duplex: duplex))
         }
-        info.wanCable = wanCable
 
         // WAN 是哪一块网口：ubus 的 `device` → UCI 的 `network.wan.device` → 固件默认 eth0。
         // 只用来给端口贴角色标签，认不出来也只是标成 LAN，不影响任何数值。
@@ -1405,6 +1402,12 @@ private struct NetVap {
         for index in ports.indices where ports[index].name == wanName {
             ports[index].role = "WAN"
         }
+        // 「WAN 口插没插线」必须按**角色**算，不能按 `ubus` 报的 device 算：
+        // WAN 口空着时 netifd 那个接口压根没有 status（这台机器实测
+        // `ubus call network.interface.wan status` 返回空），`deviceOf` 便是 ""，
+        // 于是一条都匹配不上，wanCable 永远是 false——插了线也报「未插网线」。
+        // 角色的判定上面已经兜了三层（ubus device → uci device → eth0），更可靠。
+        info.wanCable = ports.first { $0.role == "WAN" }?.up ?? false
         ports.sort { left, right in
             if (left.role == "WAN") != (right.role == "WAN") { return left.role == "WAN" }
             return left.name < right.name
@@ -4246,9 +4249,30 @@ private extension AppModel {
               n=${d##*/}
               case "$n" in lo|br-*|*.*|ppp*|apcli*|ra*|rai*|rax*|wlan*|sit*|gre*|tun*|tap*|bond*|veth*|docker*|ifb*) continue;; esac
               [ -e "$d/device" ] || continue
-              c=$(cat "$d/carrier" 2>/dev/null); [ -n "$c" ] || c=0
-              s=$(cat "$d/speed" 2>/dev/null); [ "$s" = "-1" ] && s=0; [ -n "$s" ] || s=0
-              x=$(cat "$d/duplex" 2>/dev/null)
+              # **carrier / 速率走 ubus，不读 sysfs**（v2.9.2）。
+              # 这台机器（MTK 15100000.ethernet）的 `cat /sys/class/net/eth0/carrier`
+              # 直接报 "Invalid argument"，以前被兜成 0，WAN 口插没插线永远读不出；
+              # `ubus call network.device status` 是 netifd 自己的数据，给
+              # `carrier`（true/false）与 `speed`（"1000F" = 1000 兆全双工、"0H" = 断开）。
+              #
+              # ⚠️ JSON 这一串必须用单引号拼变量：写成 "{\"name\":\"$n\"}"
+              # 的话，Swift 的 \" 会先被吃成 "，shell 拿到 "{"name":"$n"}"，
+              # 引号在第二个 " 处就闭合了，拼出来是 {name:eth0}（少引号，ubus 直接报错）。
+              st=$(ubus call network.device status '{"name":"'"$n"'"}' 2>/dev/null)
+              c=$(printf '%s' "$st" | jsonfilter -e '@.carrier' 2>/dev/null)
+              if [ -n "$c" ]; then
+                case "$c" in true) c=1;; *) c=0;; esac
+                s=$(printf '%s' "$st" | jsonfilter -e '@.speed' 2>/dev/null)
+                case "$s" in *F) x=full;; *H) x=half;; *) x=;; esac
+                s=${s%[FH]}
+                case "$s" in ''|*[!0-9]*) s=0;; esac
+                if [ "$c" != 1 ]; then s=0; x=; fi
+              else
+                # 老固件没有这条 ubus：退回 sysfs，读不到就当没插线。
+                c=$(cat "$d/carrier" 2>/dev/null); [ -n "$c" ] || c=0
+                s=$(cat "$d/speed" 2>/dev/null); [ "$s" = "-1" ] && s=0; [ -n "$s" ] || s=0
+                x=$(cat "$d/duplex" 2>/dev/null)
+              fi
               echo "@@PORT $n"
               echo "$c $s $x"
             done

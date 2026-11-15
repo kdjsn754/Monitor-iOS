@@ -662,7 +662,7 @@ private struct RouterSwitcherSheet: View {
 
             Toggle("", isOn: switchBinding(for: profile))
                 .labelsHidden()
-                .tint(.blue)
+                .blueSwitch()
                 .accessibilityLabel("切换到 \(model.connectionName(for: profile))")
         }
         .padding(.vertical, 4)

@@ -211,7 +211,7 @@ struct FanControlView: View {
                         set: { value in Task { await model.setFanEnabled(value) } }
                     ))
                     .labelsHidden()
-                    .tint(.blue)
+                    .blueSwitch()
                     .disabled(model.fanBusy)
                 }
                 .padding(.vertical, 2)

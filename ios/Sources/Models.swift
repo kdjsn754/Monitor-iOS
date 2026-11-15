@@ -209,7 +209,17 @@ struct NetworkInfo {
     /// 拓扑三片叶子各自的「通不通」。
     var uplinkOK: Bool { uplink != .none }
     var wifiOK: Bool { bands.contains { $0.up && $0.ssidOn } }
-    var wiredOK: Bool { ports.contains { $0.up } }
+
+    /// WAN 那一个网口；认不出来时为 `nil`。
+    var wanPort: NetPortInfo? { ports.first { $0.role == "WAN" } }
+
+    /// **以太网出口通不通 = WAN 口自己有没有链路。**
+    ///
+    /// 以前写的是 `ports.contains { $0.up }`，即「随便哪个网口 up 就算通」。
+    /// 这台机器的 LAN 口插着设备（eth1，carrier=1 / 1000M），WAN 口（eth0）
+    /// 空着，于是网络页写着「已连接」「协商速率 1G」——用户 2026-11-15 的截图，
+    /// 原话「我 wan 口都没有接」。端口角色由 `role` 分辨，只认 WAN 那一个。
+    var wiredOK: Bool { wanPort?.up ?? false }
 
     /// 出口那一行最要紧的两个事实：走什么方式、上级地址。
     var uplinkLabel: String {
@@ -223,10 +233,13 @@ struct NetworkInfo {
         }
     }
 
-    /// 最快那个网口的协商速率（2.5G / 1G / 100M）。
+    /// **WAN 口**的协商速率（2.5G / 1G / 100M）。没插线、读不到时是「—」。
+    ///
+    /// 以前取「所有端口里最快的那个」：LAN 口接着千兆设备、WAN 空着，也算出 1G，
+    /// 和上面「已连接」一起把用户骗了一次（2026-11-15 截图）。速率是某一根线的
+    /// 属性，只能取那根线自己。
     var bestPortLabel: String {
-        let speed = ports.map(\.speed).max() ?? 0
-        return Self.speedLabel(speed)
+        Self.speedLabel(wanPort?.speed ?? 0)
     }
 
     static func speedLabel(_ speed: Int) -> String {

@@ -48,8 +48,9 @@ struct LanSettingsView: View {
             }
         }
         .themedFormBackground()
-        // 推上来的页面同样拿不到根页那句 `.tint(.blue)`（环境值只往下传）。
-        .tint(.blue)
+        // 推上来的页面拿不到根页的环境值，这里自己说一遍：
+        // 按钮文字主色、开关蓝（`ButtonStyles.swift`）；本页没有开关。
+        .primaryButtons()
         .navigationTitle("局域网与端口")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -59,6 +60,7 @@ struct LanSettingsView: View {
                 } else {
                     Button("保存") { Task { await save() } }
                         .fontWeight(.semibold)
+                        .navBarTint()
                 }
             }
         }
