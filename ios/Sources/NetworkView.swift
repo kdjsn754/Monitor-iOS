@@ -241,8 +241,11 @@ struct NetworkView: View {
             .frame(width: 2, height: 20)
     }
 
-    /// 中心：路由器画成同心圆环（两道淡环 + 白底内圆），下面是名字、局域网地址、
-    /// 实时上下行两个胶囊。整张图的视觉重心。
+    /// 中心：同心圆环（两道淡环 + 白底内圆），圈里是**这台机器的官方线稿**——固件
+    /// `/www/model.svg` 那张，官方 App 用的也是它（用户 2026-11-16：「官方软件有这样的
+    /// 实图用官方软件的」）。以前这里是 `wifi.router` 那个通用符号（塔架 + 信号弧），
+    /// 跟 GL-MT3600BE 完全不像。圆环从 78/63 放大到 88/74、内圆 49→66，才装得下那张图。
+    /// 下面是名字、局域网地址、实时上下行两个胶囊。整张图的视觉重心。
     ///
     /// **v2.9.5 起这一圈不再能点**（用户 2026-11-15：「拓扑图中间的路由器图标去掉
     /// 点击跳转到局域网页面，只保留有线的」）。原来它右下角挂着一枚小箭头，
@@ -254,19 +257,18 @@ struct NetworkView: View {
             ZStack {
                 Circle()
                     .fill(NetPalette.wan.opacity(0.09))
-                    .frame(width: 78, height: 78)
+                    .frame(width: 88, height: 88)
                 Circle()
                     .strokeBorder(NetPalette.wan.opacity(0.22), lineWidth: 1)
-                    .frame(width: 78, height: 78)
+                    .frame(width: 88, height: 88)
                 Circle()
                     .strokeBorder(NetPalette.wan.opacity(0.12), lineWidth: 0.8)
-                    .frame(width: 63, height: 63)
+                    .frame(width: 74, height: 74)
                 AdaptiveFill(shape: Circle(), color: Color(.systemBackground))
-                    .frame(width: 49, height: 49)
+                    .frame(width: 66, height: 66)
                     .shadow(color: Color.black.opacity(0.08), radius: 7, y: 2)
-                Image(systemName: "wifi.router")
-                    .font(.system(size: 21, weight: .medium))
-                    .foregroundStyle(NetPalette.wan)
+                // 这台机器的**真实形状**，不是通用路由器符号：官方线稿（见 RouterGlyph）。
+                RouterModelGlyph(width: 56, tint: NetPalette.wan)
             }
             .padding(.bottom, 3)
             Text(deviceName)
