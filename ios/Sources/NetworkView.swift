@@ -55,7 +55,7 @@ struct NetworkView: View {
                     // 路由器与有线进局域网二级页。
                     topology(openLan: { showLan = true },
                              openUplink: { showUplink = true })
-                    wifiCards
+                    wifiCard
                     uplinkCard
                     clientsCard
                 }
@@ -481,91 +481,98 @@ struct NetworkView: View {
 
     // MARK: - 无线（v3.0.0）
 
-    /// 无线四组：主网络 / 访客网络 / IoT 网络 / 多链路。
+    /// 无线四组：主网络 / 访客网络 / IoT 网络 / 多链路，**收在同一张卡里**。
     ///
-    /// 分组版式照 GL 官方 App（用户 2026-11-15「全量对齐」），但**不照搬它那些灰色
+    /// **v3.0.1 收紧版式**（用户 2026-11-16 00:02：「不要全散落在这个界面」）。
+    /// v3.0.0 是每组一张卡，四张白底各带一个标题一屏铺下来，东西全散在页面上。
+    /// 现在合成一张「无线」：组名缩成 60pt 宽的左列，SSID 跟在后面，开关统一贴
+    /// 右边，组与组之间只留一条 0.5pt 细线，行高压到 7~8pt。
+    ///
+    /// 分组本身照 GL 官方 App（用户 2026-11-15「全量对齐」），但**不搬它那些灰色
     /// 说明文字**——2026-10-31 定的规矩：页面上不放解释性小字。
     ///
     /// 主网络按频段各给一个开关：这台机器常见「5G 开、2.4G 关」，整组一个开关表达不了。
     /// 访客 / IoT / 多链路是整组一个开关，因为它们的 2.4G 与 5G 本来就是同一个名字。
-    @ViewBuilder
-    private var wifiCards: some View {
-        ForEach(info.wifiGroups) { group in
-            wifiGroupCard(group)
+    private var wifiCard: some View {
+        let total = info.wifiGroups.reduce(0) { $0 + $1.clients }
+        return card("无线", trailing: total > 0 ? "\(total) 台" : "") {
+            // 闭包参数不能写成 `{ index, group in }`——这里传进来的是一整个元组。
+            ForEach(Array(info.wifiGroups.enumerated()), id: \.element.id) { pair in
+                if pair.offset > 0 { divider }
+                wifiGroupRows(pair.element)
+            }
         }
     }
 
-    private func wifiGroupCard(_ group: WifiNetGroup) -> some View {
-        card(group.kind.title, trailing: group.clients > 0 ? "\(group.clients) 台" : "") {
-            if group.members.isEmpty {
-                // 空组只留一个入口：没有成员时编辑页没东西可写。
+    /// 一组占几行：主网络按频段铺开（每个频段一个开关），其余组一行。
+    @ViewBuilder
+    private func wifiGroupRows(_ group: WifiNetGroup) -> some View {
+        if group.members.isEmpty {
+            // 空组只留一个入口：没有成员时编辑页没东西可写。
+            HStack(spacing: 8) {
+                groupLabel(group.kind.title)
                 Button {
                     creatingKind = group.kind
                 } label: {
                     HStack(spacing: 6) {
                         Image(systemName: "plus.circle.fill")
+                            .font(.system(size: 14))
                         Text("添加网络")
+                            .font(.system(size: 15))
+                        Spacer(minLength: 4)
                     }
-                    .font(.system(size: 16, weight: .medium))
                     .foregroundStyle(Color.accentColor)
-                    .padding(.vertical, 12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-            } else if group.kind == .main {
-                ForEach(group.members) { member in
-                    if member.id != group.members.first?.id { divider }
-                    memberRow(member, group: group, withSwitch: true)
-                }
-            } else {
-                HStack(spacing: 10) {
-                    Button {
-                        editingGroup = group
-                    } label: {
-                        HStack(spacing: 8) {
-                            Text(group.ssid.isEmpty ? "—" : group.ssid)
-                                .font(.system(size: 15))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                            Spacer(minLength: 6)
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.tertiary)
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!group.editable)
-
-                    groupToggle(group)
-                }
-                .padding(.vertical, 10)
             }
+            .padding(.vertical, 9)
+        } else if group.kind == .main {
+            // 组名只写在第一行，第二行留同宽空位，频段名就能对齐成一列。
+            ForEach(Array(group.members.enumerated()), id: \.element.id) { pair in
+                memberLine(pair.element, group: group,
+                           label: pair.offset == 0 ? group.kind.title : "")
+            }
+        } else {
+            groupLine(group)
         }
     }
 
-    /// 一个频段一行：频段名在最左，SSID 跟着，整行点进去是编辑页。
-    /// `withSwitch` 只给主网络用（每个频段独立开关）。
-    private func memberRow(_ member: WifiBandInfo, group: WifiNetGroup,
-                           withSwitch: Bool) -> some View {
-        HStack(spacing: 10) {
+    /// 左列组名：60pt 宽，13pt 中灰。宽到「访客网络」四个字正好放得下，
+    /// 再宽就抢 SSID 的位置了。
+    private func groupLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(.secondary)
+            .frame(width: 60, alignment: .leading)
+    }
+
+    /// 主网络的一个频段：组名（或空位）+ 频段名 + SSID + 独立开关。
+    private func memberLine(_ member: WifiBandInfo, group: WifiNetGroup,
+                            label: String) -> some View {
+        HStack(spacing: 8) {
+            if label.isEmpty {
+                Color.clear.frame(width: 60, height: 1)
+            } else {
+                groupLabel(label)
+            }
+
             Button {
                 editingGroup = group
             } label: {
-                HStack(spacing: 8) {
+                HStack(spacing: 6) {
                     Text(member.bandName)
-                        .font(.system(size: 16))
-                        .foregroundStyle(.primary)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 46, alignment: .leading)
                     Text(member.ssid.isEmpty ? "—" : member.ssid)
                         .font(.system(size: 14))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.primary)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    Spacer(minLength: 6)
+                    Spacer(minLength: 4)
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.tertiary)
                 }
                 .contentShape(Rectangle())
@@ -573,12 +580,39 @@ struct NetworkView: View {
             .buttonStyle(.plain)
             .disabled(!group.editable)
 
-            if withSwitch {
-                Toggle("", isOn: memberBinding(member))
-                    .labelsHidden()
-                    .blueSwitch()
-                    .disabled(!member.editable)
+            Toggle("", isOn: memberBinding(member))
+                .labelsHidden()
+                .blueSwitch()
+                .disabled(!member.editable)
+        }
+        .padding(.vertical, 7)
+    }
+
+    /// 整组一行：组名 + SSID + 整组开关。
+    private func groupLine(_ group: WifiNetGroup) -> some View {
+        HStack(spacing: 8) {
+            groupLabel(group.kind.title)
+
+            Button {
+                editingGroup = group
+            } label: {
+                HStack(spacing: 6) {
+                    Text(group.ssid.isEmpty ? "—" : group.ssid)
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 4)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .disabled(!group.editable)
+
+            groupToggle(group)
         }
         .padding(.vertical, 8)
     }
