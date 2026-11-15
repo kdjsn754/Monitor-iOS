@@ -102,75 +102,150 @@ struct RouterInfo {
     var cpuCores = 0
 }
 
-/// 网络页的一整块数据（v2.6.5 起）。
+/// 当前在用的上网方式。
 ///
-/// 只读：全部来自 `uci show` / `ubus call network.interface…` / `iw dev …`，
-/// 一条写操作都没有。用户 2026-11-15 明确「先只看」。
+/// 官方 App（`intl_zh.arb` 的 `internet_*` 一组）就是这四类：
+/// 中继 / 以太网 / 蜂窝 / 热点共享。这台 MT3600BE 没有 Modem 口，
+/// 所以只保留前两类 + 「未联网」——多列两个永远不可能出现的方式只会误导。
+enum UplinkKind: String {
+    case none
+    case wired
+    case repeater
+
+    var title: String {
+        switch self {
+        case .none: return "未联网"
+        case .wired: return "以太网"
+        case .repeater: return "中继"
+        }
+    }
+}
+
+/// 网络页的一整块数据（v2.6.5 起，v2.6.8 按官方 App 的字段补齐）。
+///
+/// 只读：全部来自 `ubus` / `uci` / `iwinfo` / `gl-clients`，一条写操作都没有。
+/// 用户 2026-11-15 明确「先只看」。
 struct NetworkInfo {
     /// 第一次采集回来之前为 false，界面据此把数值位置先占住（避免卡片长高再缩回）。
     var loaded = false
 
-    var wanUp = false
-    var wanProto = ""
-    var wanIP = ""
-    var wanGateway = ""
-    /// 真正承载流量的网口名（`ubus` 的 `l3_device`），用来给端口标 WAN。
-    var wanDevice = ""
-    var wanUptime: Double = 0
-    var dns: [String] = []
+    // ---- 出口：哪一个接口真在联网 ----
+    //
+    // 这台机器（2026-11-15 实机）WAN 口根本没插线，上网走的是 5G 中继 `apclii0`。
+    // v2.6.7 只认 `network.interface.wan`，于是整页显示「未连接」——这就是
+    // 用户说的「数据有问题」。现在按默认路由的 dev 认领出口，中继也能正确显示。
+    var uplink: UplinkKind = .none
+    var uplinkProto = ""
+    var uplinkIP = ""
+    var uplinkGateway = ""
+    var uplinkDNS: [String] = []
+    var uplinkUptime: Double = 0
+    var uplinkIfname = ""
 
+    // ---- 中继上游（只有 uplink == .repeater 时有值）----
+    var upstreamSSID = ""
+    var upstreamSignal = 0
+    var upstreamNoise = 0
+    var upstreamRate = ""
+    var upstreamChannel = ""
+    var upstreamWidth = ""
+
+    /// 实时速率（字节/秒），来自 `gl-clients get_wan_speed`。
+    var rxSpeed: Double = 0
+    var txSpeed: Double = 0
+
+    /// 物理 WAN 口插没插线（和「是否在用」无关：中继时它可能空着）。
+    var wanCable = false
+
+    // ---- 局域网 ----
     var lanIP = ""
     var lanMask = ""
     var dhcpStart = ""
     var dhcpLimit = ""
     var dhcpLease = ""
+    var leaseCount = 0
 
     var bands: [WifiBandInfo] = []
     var ports: [NetPortInfo] = []
+    var clients: [NetClient] = []
 
+    var onlineClients: [NetClient] { clients.filter(\.online) }
+    var offlineClients: [NetClient] { clients.filter { !$0.online } }
     var wifiClients: Int { bands.reduce(0) { $0 + $1.clients } }
 
-    /// 状态环的三段，按「WAN → 无线 → 有线」顺序。
-    ///
-    /// **不做加权总分**：合成分数看着漂亮，但只要有一项判错，用户就会觉得「数据有问题」——
-    /// 这三项各自都能在页面上找到对应的那一行去核对，错了也一眼能指出来。
-    var wanOK: Bool { wanUp && !wanIP.isEmpty }
-    var wifiOK: Bool { bands.contains { $0.up } }
+    /// 拓扑三片叶子各自的「通不通」。
+    var uplinkOK: Bool { uplink != .none }
+    var wifiOK: Bool { bands.contains { $0.up && $0.ssidOn } }
     var wiredOK: Bool { ports.contains { $0.up } }
 
-    var wanLabel: String {
-        guard wanUp else { return "未连接" }
-        return wanIP.isEmpty ? wanProtoLabel : "\(wanProtoLabel) · \(wanIP)"
+    /// 出口那一行最要紧的两个事实：走什么方式、上级地址。
+    var uplinkLabel: String {
+        switch uplink {
+        case .none:
+            return "未联网"
+        case .repeater:
+            return upstreamSSID.isEmpty ? "中继" : "中继 · \(upstreamSSID)"
+        case .wired:
+            return uplinkIP.isEmpty ? "以太网" : "以太网 · \(uplinkIP)"
+        }
     }
 
-    /// 头图胶囊：最快那个网口的握手速率。
+    /// 最快那个网口的协商速率（2.5G / 1G / 100M）。
     var bestPortLabel: String {
         let speed = ports.map(\.speed).max() ?? 0
+        return Self.speedLabel(speed)
+    }
+
+    static func speedLabel(_ speed: Int) -> String {
         guard speed > 0 else { return "—" }
         if speed >= 2500 { return "2.5G" }
         if speed >= 1000 { return "1G" }
         return "\(speed)M"
     }
 
-    /// 头图胶囊：频段里最宽的那个频宽。
-    var widestBandLabel: String {
-        let widths = bands.compactMap { band -> Int? in
-            let digits = band.width.filter(\.isNumber)
-            guard !digits.isEmpty else { return nil }
-            return Int(digits)
-        }
-        guard let widest = widths.max() else { return "—" }
-        return "\(widest)M"
-    }
-
-    var wanProtoLabel: String {
-        switch wanProto {
+    var protoLabel: String {
+        switch uplinkProto {
         case "dhcp": return "DHCP"
         case "pppoe": return "PPPoE"
         case "static": return "静态"
-        case "": return wanUp ? "已连接" : "未连接"
-        default: return wanProto.uppercased()
+        case "": return uplink == .none ? "—" : "已连接"
+        default: return uplinkProto.uppercased()
         }
+    }
+}
+
+/// 一台客户端（`ubus call gl-clients list` 的一条）。
+///
+/// 只用官方 App 客户端详情里也有的那几项：名称 / IP / 接入方式 / 上下行流量。
+/// 每台设备的「瞬时速率」不进列表——它两秒变一次，一屏数字乱跳，
+/// 实时速率放到顶部路由器节点去（那里只有一个数字）。
+struct NetClient: Identifiable, Equatable {
+    var mac = ""
+    var name = ""
+    var ip = ""
+    /// `2.4G` / `5G` / `6G` / `有线`
+    var iface = ""
+    var online = false
+    var totalRx: Double = 0
+    var totalTx: Double = 0
+    var onlineTime: Double = 0
+    /// dBm，0 表示没读到（有线设备本来就没有）
+    var signal = 0
+
+    var id: String { mac.isEmpty ? name + ip : mac }
+
+    /// 名字是手机自己报的，经常是空的或者一排 `*`，那就退到 IP 尾号。
+    var displayName: String {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        if !trimmed.isEmpty && trimmed != "*" { return trimmed }
+        if !ip.isEmpty { return ip }
+        return mac.uppercased()
+    }
+
+    var trafficLabel: String {
+        let total = totalRx + totalTx
+        guard total > 0 else { return "—" }
+        return formatBytes(total)
     }
 }
 
@@ -191,10 +266,37 @@ struct WifiBandInfo: Identifiable, Equatable {
     var clients = 0
     /// 这个 radio 是否开着（UCI `disabled=1` 为关）。
     var up = false
+    /// 主 SSID 是否在广播（`wireless.<主接口>.disabled`）。关掉主 SSID 但留着
+    /// 访客 / IoT / MLO 网络是常见操作，两种情况都要能说清。
+    var ssidOn = true
+    /// `WPA3 混合` / `WPA2` / `无密码`
+    var encryption = ""
+    /// 发射功率，dBm；0 表示没读到。
+    var txPower = 0
+    /// 同一 radio 上除主 SSID 之外的网络个数（访客 / IoT / MLO）。
+    var extraNets = 0
 
     var id: String { ifname.isEmpty ? band : ifname }
 
     var bandName: String { band.isEmpty ? "无线" : "\(band) GHz" }
+
+    var channelLabel: String {
+        var parts: [String] = []
+        if channel > 0 { parts.append("CH \(channel)") }
+        if !width.isEmpty { parts.append("\(width) MHz") }
+        return parts.isEmpty ? "—" : parts.joined(separator: " · ")
+    }
+
+    var securityLabel: String {
+        switch encryption {
+        case "", "none": return "无密码"
+        case "psk2", "psk2+ccmp", "psk2+tkip+ccmp": return "WPA2"
+        case "psk", "psk+ccmp": return "WPA"
+        case "sae", "sae-mixed", "psk3", "sae+ccmp": return encryption == "sae" ? "WPA3" : "WPA3 混合"
+        case "psk-mixed", "psk-mixed+ccmp": return "WPA/WPA2 混合"
+        default: return encryption.uppercased()
+        }
+    }
 }
 
 /// 一个物理网口。
@@ -205,6 +307,8 @@ struct NetPortInfo: Identifiable, Equatable {
     var up = false
     /// 握手速率（Mbps），断开或读不到时为 0。
     var speed = 0
+    /// `full` / `half` / ``（断开时读不到）。
+    var duplex = ""
 
     var id: String { name }
 
@@ -212,6 +316,15 @@ struct NetPortInfo: Identifiable, Equatable {
         guard speed > 0 else { return up ? "—" : "未连接" }
         if speed >= 1000 { return String(format: "%.0f Gbps", Double(speed) / 1000) }
         return "\(speed) Mbps"
+    }
+
+    /// 官方 App 的端口行是「已连接 · 1000 Mbps 全双工」。
+    var detailLabel: String {
+        guard up else { return "未连接" }
+        let bits = speed > 0 ? "\(speed) Mbps" : ""
+        let full = duplex == "full" ? "全双工" : ""
+        let joined = [bits, full].filter { !$0.isEmpty }.joined(separator: " ")
+        return joined.isEmpty ? "已连接" : joined
     }
 }
 

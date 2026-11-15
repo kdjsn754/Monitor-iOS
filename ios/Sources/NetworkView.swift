@@ -1,16 +1,19 @@
 import SwiftUI
 
-/// 网络页（v2.6.5 新增；v2.6.6 按用户要求换成 C 版：细线分层 + 状态环）。
+/// 网络页（v2.6.5 新增；v2.6.7 顶部换拓扑树；v2.6.8 按官方 App 的字段补全）。
 ///
-/// **只读**：全部字段来自 `PollItem.network` 那条采集脚本（`uci` / `ubus` / `iwinfo`），
-/// 这一页没有任何写操作。
+/// **只读**：全部字段来自 `PollItem.network` 那一条采集脚本（`ubus` / `uci` / `iwinfo` /
+/// `gl-clients`），这一页没有任何写操作。
 ///
-/// 版式的取舍（v2.6.7 用户「太丑了顶部改成拓扑图」→ 三段弧换成拓扑树）：
-///   - 顶部是一张**拓扑图**：互联网 → WAN → 路由器 → 三个叶子（2.4G / 5G / 有线）。
-///     哪一路不通，那一节节点和连线一起变灰——不合成总分，因为合成分数一旦算错，
-///     用户第一反应就是「数据有问题」，而每一节都能在下面找到对应的行去核对。
-///   - 路由器节点里放**当前下行速率**（每秒更新，是本页唯一持续变化的值）和型号；
-///   - 下面三张细线卡片：无线（2.4G / 5G 各一行）、有线（WAN / LAN 各一行）、地址。
+/// 版式与字段都照 GL.iNet 官方 App 的组织来（`intl_zh.arb` 里的 `internet_*` / `client_*` /
+/// `eth_*` / `lan_*` 四组就是它的页面结构，不是我自己编的）：
+///   - 顶部**拓扑图**：互联网 → 路由器 → 2.4G / 5G / 有线。出口可能是**中继**，
+///     不一定是有线 WAN——这台机器当时 WAN 口就空着（v2.6.7 整页「未连接」的根源）；
+///   - 「上网」：方式 / 上级网络 / 信号 / 协商速率 / 地址 / 网关 / DNS / 在线时长；
+///   - 「在线设备」：名称 / IP / 接入方式 / 累计流量（官方客户端列表那几项）；
+///   - 「无线」：每频段 SSID / 信道与频宽 / 加密 / 台数；
+///   - 「网络端口」：已连接或未连接 / 协商速率 / 全双工；
+///   - 「局域网」：路由器 IP / DHCP 池 / 租期与租约数。
 ///
 /// **没有一行说明性小字**（用户 2026-10-31 定的规矩）：卡片里只有「名字 → 值」。
 struct NetworkView: View {
@@ -19,14 +22,18 @@ struct NetworkView: View {
 
     private var info: NetworkInfo { model.network }
 
+    private static let leafSpacing: CGFloat = 8
+
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 20) {
+                VStack(spacing: 18) {
                     topology
+                    uplinkCard
+                    clientsCard
                     wifiCard
                     portCard
-                    addressCard
+                    lanCard
                 }
                 .padding(.horizontal, 18)
                 .padding(.top, 6)
@@ -65,14 +72,14 @@ struct NetworkView: View {
 
     // MARK: - 拓扑
 
-    /// 竖着排的一条链路：互联网 → WAN → 路由器 → 分叉 → 叶子。
+    /// 竖着排的一条链路：互联网 → 路由器 → 分叉 → 叶子。
     /// 连线由 `trunk` / `TopoFork` 画，节点各自是独立的小卡片，
     /// 这样断线只要把那一节变灰，不用重算整张图。
     private var topology: some View {
         let leaves = leafNodes
         return VStack(spacing: 0) {
             internetNode
-            trunk(ok: info.wanOK, color: NetPalette.wan)
+            trunk(ok: info.uplinkOK, color: NetPalette.wan)
             routerNode
             if !leaves.isEmpty {
                 TopoFork(leaves: leaves, spacing: Self.leafSpacing)
@@ -87,22 +94,22 @@ struct NetworkView: View {
         .padding(.top, 4)
     }
 
-    private static let leafSpacing: CGFloat = 8
-
-    /// 公网那一个胶囊：只有「地址 + 连接方式」两个事实，没有别的话。
+    /// 出口那一个胶囊：走什么方式、上级是谁、什么协议。
+    ///
+    /// 中继时是「中继 · @Ruijie-s0051」，有线时是「以太网 · 192.168.1.2」，
+    /// 都没通才是「未联网」——不会再出现「WAN 没插线所以整页说没网」那种误判。
     private var internetNode: some View {
-        let on = info.wanOK
-        let address = info.wanIP.isEmpty ? (on ? "已连接" : "未连接") : info.wanIP
+        let on = info.uplinkOK
         return HStack(spacing: 8) {
-            Image(systemName: "globe")
+            Image(systemName: info.uplink == .repeater ? "wifi" : "globe")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(on ? NetPalette.wan : Color.secondary)
-            Text(address)
+            Text(info.uplinkLabel)
                 .font(.system(size: 14, weight: .medium))
-                .monospacedDigit()
                 .foregroundStyle(on ? Color.primary : Color.secondary)
                 .lineLimit(1)
-            Text(info.wanProtoLabel)
+                .minimumScaleFactor(0.75)
+            Text(info.uplink == .none ? "—" : info.protoLabel)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(on ? NetPalette.wan : Color.secondary)
                 .padding(.horizontal, 6)
@@ -125,7 +132,7 @@ struct NetworkView: View {
             .frame(width: 1.6, height: 22)
     }
 
-    /// 中心节点：型号 / 局域网地址 / 下行速率。整页的视觉重心就是这一块。
+    /// 中心节点：型号 / 局域网地址 / 实时下行速率。整页的视觉重心就是这一块。
     private var routerNode: some View {
         let speed = speedParts
         return HStack(spacing: 12) {
@@ -170,15 +177,16 @@ struct NetworkView: View {
         }
     }
 
-    /// 叶子：2.4G / 5G 各一个，最后一个是有线（不分 WAN、LAN，速率取最快的那个口）。
+    /// 叶子：2.4G / 5G 各一片，最后一片是有线。
+    /// 这一层只回答「通不通、几台」，明细都在下面的卡片里。
     private var leafNodes: [TopoLeaf] {
         var out: [TopoLeaf] = []
         for band in info.bands.prefix(2) {
             let value: String
-            if !band.up {
+            if !band.up || !band.ssidOn {
                 value = "已关闭"
             } else if band.channel > 0 {
-                value = "CH \(band.channel)"
+                value = "\(band.clients) 台 · CH \(band.channel)"
             } else {
                 value = "\(band.clients) 台"
             }
@@ -187,7 +195,7 @@ struct NetworkView: View {
                                 value: value,
                                 icon: "wifi",
                                 color: NetPalette.wifi,
-                                on: band.up))
+                                on: band.up && band.ssidOn))
         }
         out.append(TopoLeaf(id: "wired",
                             title: "有线",
@@ -213,14 +221,14 @@ struct NetworkView: View {
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
                 .lineLimit(1)
-                .minimumScaleFactor(0.8)
+                .minimumScaleFactor(0.7)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 9)
         .background { nodeBackground(radius: 14) }
     }
 
-    /// 节点底：白底 + 一条细边，与下面三张卡片同一套语言（只是没有阴影）。
+    /// 节点底：白底 + 一条细边，与下面几张卡片同一套语言（只是没有阴影）。
     private func nodeBackground(radius: CGFloat) -> some View {
         RoundedRectangle(cornerRadius: radius, style: .continuous)
             .fill(Color(.secondarySystemGroupedBackground))
@@ -232,7 +240,7 @@ struct NetworkView: View {
 
     /// 路由器节点里那两个值：把 `12.4 MB/s` 拆成数字和单位，数字才能用大字号。
     private var speedParts: (value: String, unit: String) {
-        let parts = formatBytes(model.stats.download).split(separator: " ")
+        let parts = formatBytes(info.rxSpeed).split(separator: " ")
         let value = parts.first.map(String.init) ?? "0"
         let unit = parts.count > 1 ? String(parts[1]) : "B"
         return (value, unit + "/s")
@@ -247,10 +255,122 @@ struct NetworkView: View {
         return model.connectionName(for: profile)
     }
 
+    // MARK: - 上网
+
+    private var uplinkCard: some View {
+        card("上网", trailing: info.uplink == .none ? "未联网" : info.protoLabel) {
+            infoRow("方式", info.uplink.title)
+            if info.uplink == .repeater {
+                if !info.upstreamSSID.isEmpty {
+                    hairline
+                    infoRow("上级网络", info.upstreamSSID)
+                }
+                if info.upstreamSignal != 0 {
+                    hairline
+                    infoRow("信号", "\(info.upstreamSignal) dBm",
+                            valueColor: signalColor(info.upstreamSignal))
+                }
+                if !info.upstreamRate.isEmpty {
+                    hairline
+                    infoRow("协商速率", info.upstreamRate)
+                }
+            }
+            if !info.uplinkIP.isEmpty {
+                hairline
+                infoRow("地址", info.uplinkIP)
+            }
+            if !info.uplinkGateway.isEmpty {
+                hairline
+                infoRow("网关", info.uplinkGateway)
+            }
+            // 网关和 DNS 相同时只显示一行：中继上游这两项基本永远是同一个地址。
+            if let dns = info.uplinkDNS.first, dns != info.uplinkGateway {
+                hairline
+                infoRow("DNS", info.uplinkDNS.prefix(2).joined(separator: "  "))
+            }
+            if info.uplinkUptime > 0 {
+                hairline
+                infoRow("在线时长", durationLabel(info.uplinkUptime))
+            }
+            hairline
+            infoRow("实时速率", "↓ \(rateText(info.rxSpeed))   ↑ \(rateText(info.txSpeed))")
+        }
+    }
+
+    private func rateText(_ bytes: Double) -> String {
+        formatBytes(max(bytes, 0)) + "/s"
+    }
+
+    private func durationLabel(_ seconds: Double) -> String {
+        let total = Int(max(seconds, 0))
+        let days = total / 86400
+        let hours = (total % 86400) / 3600
+        let minutes = (total % 3600) / 60
+        if days > 0 { return "\(days) 天 \(hours) 小时" }
+        if hours > 0 { return "\(hours) 小时 \(minutes) 分" }
+        return "\(minutes) 分钟"
+    }
+
+    private func signalColor(_ dbm: Int) -> Color {
+        if dbm >= -55 { return Color(red: 0.13, green: 0.66, blue: 0.38) }
+        if dbm >= -70 { return Color(red: 0.90, green: 0.55, blue: 0.10) }
+        return Color(red: 0.85, green: 0.25, blue: 0.22)
+    }
+
+    // MARK: - 在线设备
+
+    private var clientsCard: some View {
+        card("在线设备", trailing: "\(info.onlineClients.count) 台") {
+            let clients = info.onlineClients
+            if clients.isEmpty {
+                emptyLine
+            } else {
+                ForEach(clients) { client in
+                    if client.id != clients.first?.id { hairline }
+                    clientRow(client)
+                }
+            }
+        }
+    }
+
+    private func clientRow(_ client: NetClient) -> some View {
+        let wired = client.iface == "有线"
+        return HStack(spacing: 10) {
+            Image(systemName: wired ? "cable.connector" : "wifi")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(wired ? NetPalette.wired : NetPalette.wifi)
+                .frame(width: 28, height: 28)
+                .background {
+                    Circle().fill((wired ? NetPalette.wired : NetPalette.wifi).opacity(0.12))
+                }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(client.displayName)
+                    .font(.system(size: 15))
+                    .lineLimit(1)
+                Text(client.ip.isEmpty ? client.mac : client.ip)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(client.iface.isEmpty ? "—" : client.iface)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                Text(client.trafficLabel)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+        }
+        .padding(.vertical, 9)
+    }
+
     // MARK: - 无线
 
     private var wifiCard: some View {
-        card("无线") {
+        card("无线", trailing: info.wifiClients > 0 ? "\(info.wifiClients) 台在线" : "") {
             if info.bands.isEmpty {
                 emptyLine
             } else {
@@ -269,7 +389,7 @@ struct NetworkView: View {
                     .font(.system(size: 15))
                     .foregroundStyle(band.up ? Color.primary : Color.secondary)
                 Spacer(minLength: 8)
-                Text(bandMeta(band))
+                Text(band.channelLabel)
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
@@ -280,26 +400,32 @@ struct NetworkView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Spacer(minLength: 8)
-                Text(band.up ? "\(band.clients) 台" : "已关闭")
+                Text(bandStatus(band))
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
         }
         .padding(.vertical, 10)
     }
 
-    private func bandMeta(_ band: WifiBandInfo) -> String {
+    /// 主 SSID 关掉但访客 / IoT / MLO 还在广播是常见操作（这台机器 2.4G 就是这样），
+    /// 所以状态按「这条路还通不通」说，而不是按 radio 的开关说。
+    private func bandStatus(_ band: WifiBandInfo) -> String {
+        guard band.up, band.ssidOn else { return "已关闭" }
         var parts: [String] = []
-        if band.channel > 0 { parts.append("CH \(band.channel)") }
-        if !band.width.isEmpty { parts.append("\(band.width)M") }
-        return parts.isEmpty ? "—" : parts.joined(separator: " · ")
+        if !band.encryption.isEmpty { parts.append(band.securityLabel) }
+        parts.append("\(band.clients) 台")
+        if band.extraNets > 0 { parts.append("另 \(band.extraNets) 个网络") }
+        return parts.joined(separator: " · ")
     }
 
-    // MARK: - 有线
+    // MARK: - 网络端口
 
     private var portCard: some View {
-        card("有线") {
+        card("网络端口", trailing: info.ports.filter(\.up).isEmpty ? "" : "\(info.ports.filter(\.up).count) 个已连接") {
             if info.ports.isEmpty {
                 emptyLine
             } else {
@@ -319,78 +445,74 @@ struct NetworkView: View {
                     .frame(width: 6, height: 6)
                 Text(port.role)
                     .font(.system(size: 15))
+                Text(port.name)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
                 Spacer(minLength: 8)
-                Text(port.speedLabel)
+                Text(port.detailLabel)
                     .font(.system(size: 13))
                     .foregroundStyle(port.up ? Color.primary : Color.secondary)
                     .monospacedDigit()
             }
-            Text(portDetail(port))
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            if port.role == "WAN" && !port.up {
+                Text(info.wanCable ? "已插网线，未联网" : "未插网线")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(.vertical, 10)
     }
 
-    /// WAN 那行后面跟「连接方式 · 公网地址」，LAN 那行跟路由器地址。
-    /// 网口本身的名字（`eth0`）不显示：这一行要回答的是「这条线通不通、有多快」。
-    private func portDetail(_ port: NetPortInfo) -> String {
-        if port.role == "WAN" { return info.wanLabel }
-        return info.lanIP.isEmpty ? "—" : info.lanIP
-    }
+    // MARK: - 局域网
 
-    // MARK: - 地址
-
-    private var addressCard: some View {
-        card("地址") {
-            infoRow("公网", info.wanOK ? (info.wanIP.isEmpty ? "—" : info.wanIP) : "未连接")
-            if !info.wanGateway.isEmpty {
-                hairline
-                infoRow("网关", info.wanGateway)
-            }
-            if !info.dns.isEmpty {
-                hairline
-                infoRow("DNS", info.dns.prefix(2).joined(separator: "  "))
-            }
-            if !info.lanIP.isEmpty {
-                hairline
-                infoRow("局域网", info.lanIP)
-            }
+    private var lanCard: some View {
+        card("局域网", trailing: info.leaseCount > 0 ? "\(info.leaseCount) 个租约" : "") {
+            infoRow("路由器", info.lanMask.isEmpty ? info.lanIP : "\(info.lanIP) / \(info.lanMask)")
             if !info.dhcpStart.isEmpty {
                 hairline
-                infoRow("DHCP 池", info.dhcpLimit.isEmpty
-                        ? info.dhcpStart
-                        : "\(info.dhcpStart) · \(info.dhcpLimit)")
+                infoRow("DHCP 池", dhcpPoolLabel)
             }
+            if !info.dhcpLease.isEmpty {
+                hairline
+                infoRow("租期", info.dhcpLease)
+            }
+            hairline
+            infoRow("客户端", "\(info.onlineClients.count) 台在线 · \(info.clients.count) 台记录")
         }
     }
 
-    private func infoRow(_ title: String, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text(title)
-                .font(.system(size: 14))
-            Spacer(minLength: 8)
-            Text(value)
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                .lineLimit(1)
-                .truncationMode(.middle)
+    /// `dhcp.lan.start=100` + `limit=150` → `192.168.8.100 – 249`。
+    /// 直接拼网段的最后一节：池永远是「同网段 + 起止数字」，不需要真的算地址。
+    private var dhcpPoolLabel: String {
+        guard let start = Int(info.dhcpStart), let limit = Int(info.dhcpLimit), limit > 0 else {
+            return info.dhcpStart
         }
-        .padding(.vertical, 10)
+        let prefix = info.lanIP.split(separator: ".").dropLast().joined(separator: ".")
+        let end = start + limit - 1
+        return prefix.isEmpty ? "\(start) – \(end)" : "\(prefix).\(start) – \(end)"
     }
 
     // MARK: - 小组件
 
-    /// C 版的卡片：白底 + 一条 0.6pt 细边，没有阴影。靠留白分层，不靠色块。
+    /// 卡片：白底 + 一条 0.6pt 细边，没有阴影。靠留白分层，不靠色块。
+    /// `trailing` 是标题右侧那一个总览值（「3 台」「12 个租约」）。
     private func card<Content: View>(_ title: String,
+                                     trailing: String = "",
                                      @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(title)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .padding(.bottom, 2)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(title)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                if !trailing.isEmpty {
+                    Text(trailing)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+            }
+            .padding(.bottom, 2)
             content()
         }
         .padding(.horizontal, 16)
@@ -404,6 +526,23 @@ struct NetworkView: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .strokeBorder(Color(.separator).opacity(0.45), lineWidth: 0.6)
         }
+    }
+
+    private func infoRow(_ title: String, _ value: String,
+                         valueColor: Color? = nil) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(title)
+                .font(.system(size: 14))
+            Spacer(minLength: 8)
+            Text(value)
+                .font(.system(size: 13))
+                .foregroundStyle(valueColor ?? Color.secondary)
+                .monospacedDigit()
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .minimumScaleFactor(0.8)
+        }
+        .padding(.vertical, 10)
     }
 
     private var hairline: some View {
@@ -421,9 +560,8 @@ struct NetworkView: View {
     }
 }
 
-/// 拓扑图的三色：蓝=WAN、青=无线、紫=有线。
-/// 单独放一个 enum，是为了下面卡片里的圆点、叶子图标、连线全用同一组值，
-/// 改色只改这一处（v2.6.6 之前散在 `StatusArcs` 的 static 里）。
+/// 拓扑图的三色：蓝=联网 / 出口，青=无线，紫=有线。
+/// 单独放一个 enum，是为了卡片里的圆点、叶子图标、连线全用同一组值（改色只改一处）。
 enum NetPalette {
     static let wan = Color(red: 0.16, green: 0.45, blue: 0.95)
     static let wifi = Color(red: 0.09, green: 0.60, blue: 0.72)
