@@ -1120,6 +1120,9 @@ private struct NetVap {
     var mode = "ap"
     var disabled = false
     var guest = false
+    /// `network` 指向的 netifd 接口名（`lan` / `guest` / `iot` / `wwan`）。
+    /// 访客与 IoT 在 GL 固件里就是靠它区分的，比 `guest=1` 那种选项可靠。
+    var network = ""
 }
 
     /// 网络页：把一轮采集拆成 `NetworkInfo`（v2.6.8 按官方 App 的字段重做）。
@@ -1557,6 +1560,7 @@ private struct NetVap {
             vap.mode = flag("mode")
             vap.disabled = flag("disabled") == "1"
             vap.guest = flag("guest") == "1" || flag("iot") == "1" || flag("multi_ap") == "1"
+            vap.network = flag("network")
             vaps.append(vap)
         }
 
@@ -1636,6 +1640,102 @@ private struct NetVap {
         }
         bands.sort { $0.band < $1.band }
         info.bands = bands
+
+        // ---- 无线四组（v3.0.0）----
+        //
+        // 主 / 访客 / IoT / 多链路各一张卡。分组线索全在 UCI 里：
+        //   - `network=guest|iot` → 访客 / IoT（GL 固件就是这么分的，比 `guest=1` 那类选项可靠）；
+        //   - `wireless.mld0.iface='ra2 rai2'` 里列到的网口 → 多链路；
+        //   - 剩下 `network=lan` 的 AP → 主网络（一个 radio 一条）。
+        let wifiNetcfg = uciValues(sections["NETCFG"])
+        let mldIfaces = (wifi["wireless.mld0.iface"] ?? "")
+            .split(separator: " ")
+            .map(String.init)
+            .filter { !$0.isEmpty }
+        let mloSupported = !mldIfaces.isEmpty || wifi["wireless.mld0.disabled"] != nil
+
+        // 每个网口此刻的关联台数（采集脚本里 `iw dev <if> station dump` 数的）。
+        var staCounts: [String: Int] = [:]
+        for raw in (sections["WLSTA"] ?? "").split(separator: "\n") {
+            let parts = raw.split(separator: " ", maxSplits: 1).map(String.init)
+            guard parts.count == 2,
+                  let count = Int(parts[1].trimmingCharacters(in: .whitespaces)) else { continue }
+            staCounts[parts[0]] = count
+        }
+
+        /// 把一条 `wifi-iface` 摊成编辑页要用的那一套字段（和主网络同构）。
+        func memberInfo(_ vap: NetVap) -> WifiBandInfo {
+            var item = WifiBandInfo()
+            item.band = bandLabel(wifi["wireless.\(vap.radio).band"] ?? "")
+            item.ifname = vap.ifname
+            item.section = vap.section
+            item.radio = vap.radio
+            item.ssid = vap.ssid
+            item.ssidOn = !vap.disabled
+            item.encryption = vap.encryption
+            item.key = wifi["wireless.\(vap.section).key"] ?? ""
+            item.hidden = (wifi["wireless.\(vap.section).hidden"] ?? "0") == "1"
+            item.clients = staCounts[vap.ifname] ?? 0
+            item.channelMode = wifi["wireless.\(vap.radio).channel"] ?? ""
+            item.htmode = wifi["wireless.\(vap.radio).htmode"] ?? ""
+            item.txPowerPercent = Int(wifi["wireless.\(vap.radio).txpower"] ?? "") ?? 0
+            let radioOff = (wifi["wireless.\(vap.radio).disabled"] ?? "0") == "1"
+            item.up = !radioOff && item.ssidOn
+            return item
+        }
+
+        func makeGroup(_ kind: WifiNetGroup.Kind, _ source: [NetVap]) -> WifiNetGroup? {
+            let apVaps = source.filter { $0.mode == "ap" }
+            guard !apVaps.isEmpty else { return nil }
+            var group = WifiNetGroup()
+            group.kind = kind
+            group.members = apVaps.map { memberInfo($0) }.sorted { $0.band < $1.band }
+            group.ssid = apVaps.first?.ssid ?? ""
+            group.key = group.members.first?.key ?? ""
+            group.hidden = group.members.first?.hidden ?? false
+            group.broadcasting = group.members.contains { $0.ssidOn }
+            group.clients = group.members.reduce(0) { $0 + $1.clients }
+            let net = kind.networkName
+            if !net.isEmpty {
+                group.networkOn = (wifiNetcfg["network.\(net).disabled"] ?? "0") != "1"
+            }
+            group.editable = group.members.allSatisfy { $0.editable }
+            return group
+        }
+
+        var groups: [WifiNetGroup] = []
+        // 多链路先挑：它的成员也是 `network=lan`，不先剔出去就会被算进主网络。
+        if mloSupported {
+            if let group = makeGroup(.mlo, vaps.filter { mldIfaces.contains($0.ifname) }) {
+                groups.append(group)
+            }
+        }
+        let claimed = Set(mldIfaces)
+        let mainVaps = vaps.filter {
+            $0.mode == "ap" && !claimed.contains($0.ifname)
+                && $0.network != "guest" && $0.network != "iot"
+        }
+        if let group = makeGroup(.main, mainVaps) { groups.append(group) }
+        if let group = makeGroup(.guest, vaps.filter { $0.network == "guest" }) { groups.append(group) }
+        if let group = makeGroup(.iot, vaps.filter { $0.network == "iot" }) { groups.append(group) }
+
+        // 访客 / IoT 一条都没建时也留一张空卡（里面放「添加网络」），否则用户没入口。
+        for kind in [WifiNetGroup.Kind.guest, .iot] where !groups.contains(where: { $0.kind == kind }) {
+            var empty = WifiNetGroup()
+            empty.kind = kind
+            empty.editable = false
+            let net = kind.networkName
+            empty.networkOn = (wifiNetcfg["network.\(net).disabled"] ?? "0") != "1"
+            groups.append(empty)
+        }
+
+        // 固定顺序：主网络 → 访客 → IoT → 多链路。
+        let kindOrder: [WifiNetGroup.Kind] = [.main, .guest, .iot, .mlo]
+        groups.sort {
+            (kindOrder.firstIndex(of: $0.kind) ?? 9) < (kindOrder.firstIndex(of: $1.kind) ?? 9)
+        }
+        info.wifiGroups = groups
+        info.mloSupported = mloSupported
 
         network = info
     }
@@ -1803,6 +1903,202 @@ private struct NetVap {
     private func htmodePrefix(_ raw: String) -> String {
         let letters = raw.prefix { $0.isLetter }
         return letters.isEmpty ? "EHT" : String(letters).uppercased()
+    }
+
+    // MARK: - 无线四组（写）
+    //
+    // 主 / 访客 / IoT / 多链路这一层是 v3.0.0 新加的。写的时候有三处要同时动，
+    // 少一个就会出现「界面开着、手机搜不到」：
+    //   1. 每个频段那条 `wifi-iface` 的 `disabled`；
+    //   2. 打开时把所在 radio 也拉起来（这台机器出现过 SSID 开着、radio 被关的状态）；
+    //   3. 访客 / IoT 还有独立的 `network.guest|iot`（关了就没有 DHCP），
+    //      多链路还有聚合段 `wireless.mld0`（它的 ssid / key 要和成员一致）。
+
+    /// 开 / 关一整组网络。返回 `nil` 表示成功。
+    @discardableResult
+    func setWifiGroup(_ group: WifiNetGroup, on: Bool) async -> String? {
+        guard connected else { return "还没连上路由器" }
+        guard group.editable, !group.members.isEmpty else { return "这组网络还没建，先添加再说" }
+
+        let off = on ? "0" : "1"
+        var lines: [String] = []
+        for member in group.members where !member.section.isEmpty {
+            lines.append("uci -q set wireless.\(member.section).disabled='\(off)'")
+            if on, !member.radio.isEmpty {
+                lines.append("uci -q set wireless.\(member.radio).disabled='0'")
+            }
+        }
+        if group.kind == .mlo {
+            lines.append("uci -q set wireless.mld0.disabled='\(off)'")
+        }
+        let net = group.kind.networkName
+        if !net.isEmpty {
+            lines.append("uci -q set network.\(net).disabled='\(off)'")
+        }
+        lines.append("uci -q commit wireless")
+        if !net.isEmpty { lines.append("uci -q commit network") }
+
+        // 回读：每条成员的 disabled、mld0、独立 network 段都要对上。
+        var expect: [(String, String)] = []
+        for member in group.members where !member.section.isEmpty {
+            expect.append((member.section, off))
+            lines.append("echo \"@@RB \(member.section) $(uci -q get wireless.\(member.section).disabled)\"")
+        }
+        if group.kind == .mlo {
+            expect.append(("mld0", off))
+            lines.append("echo \"@@RB mld0 $(uci -q get wireless.mld0.disabled)\"")
+        }
+        if !net.isEmpty {
+            expect.append((net, off))
+            lines.append("echo \"@@RB \(net) $(uci -q get network.\(net).disabled)\"")
+        }
+        lines.append("wifi reload >/dev/null 2>&1 && echo @@RELOAD ok || echo @@RELOAD fail")
+        // 网桥启停：只改 uci 不 ifup，DHCP 不会重新起来。
+        if !net.isEmpty {
+            lines.append("\(on ? "ifup" : "ifdown") \(net) >/dev/null 2>&1")
+        }
+        lines.append("echo @@DONE ok")
+
+        do {
+            let text = try await execute(lines.joined(separator: "; "), timeout: 90)
+            guard text.contains("@@DONE ok") else { return "路由器没有回应，配置可能没写进去" }
+            var readBack: [String: String] = [:]
+            for raw in text.split(separator: "\n") {
+                let parts = raw.split(separator: " ").map(String.init)
+                guard parts.count >= 3, parts[0] == "@@RB" else { continue }
+                readBack[parts[1]] = parts[2].trimmingCharacters(in: .whitespaces)
+            }
+            for (name, want) in expect where readBack[name] != want {
+                let got = readBack[name] ?? "空"
+                return "「\(name)」没写进去（读回来是「\(got)」）"
+            }
+            if text.contains("@@RELOAD fail") {
+                return "配置已保存，但无线没重新加载，重启路由器后才生效"
+            }
+            // 界面自己 refresh（saveBand 的做法一致），这里不重复采一轮
+            return nil
+        } catch {
+            return describe(error)
+        }
+    }
+
+    /// 改一组网络的名称 / 密码 / 隐藏。返回 `nil` 表示成功。
+    ///
+    /// 同一组的 2.4G 与 5G 是两条独立配置，名称和密码必须写成一样，
+    /// 否则手机在两个频段上会看到两个不同名字的网络。
+    @discardableResult
+    func saveWifiGroup(_ group: WifiNetGroup, ssid: String, key: String,
+                       hidden: Bool) async -> String? {
+        guard connected else { return "还没连上路由器" }
+        guard group.editable, !group.members.isEmpty else { return "这组网络还没建" }
+
+        let name = ssid.trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.isEmpty { return "Wi-Fi 名称不能为空" }
+        if name.count > 32 { return "Wi-Fi 名称不能超过 32 个字符" }
+
+        let secret = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        let keyChanged = group.needsKey && secret != group.key
+        if keyChanged, secret.count < 8 || secret.count > 63 { return "密码要 8–63 个字符" }
+
+        var lines: [String] = []
+        for member in group.members where !member.section.isEmpty {
+            lines.append("uci -q set wireless.\(member.section).ssid=\(shQuote(name))")
+            if keyChanged {
+                lines.append("uci -q set wireless.\(member.section).key=\(shQuote(secret))")
+            }
+            lines.append("uci -q set wireless.\(member.section).hidden='\(hidden ? "1" : "0")'")
+        }
+        if group.kind == .mlo {
+            lines.append("uci -q set wireless.mld0.ssid=\(shQuote(name))")
+            if keyChanged {
+                lines.append("uci -q set wireless.mld0.key=\(shQuote(secret))")
+            }
+            lines.append("uci -q set wireless.mld0.hidden='\(hidden ? "1" : "0")'")
+        }
+        lines.append("uci -q commit wireless")
+
+        var sections: [String] = []
+        for member in group.members where !member.section.isEmpty {
+            sections.append(member.section)
+            lines.append("echo \"@@RB \(member.section) $(uci -q get wireless.\(member.section).ssid)\"")
+        }
+        lines.append("wifi reload >/dev/null 2>&1 && echo @@RELOAD ok || echo @@RELOAD fail")
+        lines.append("echo @@DONE ok")
+
+        do {
+            let text = try await execute(lines.joined(separator: "; "), timeout: 90)
+            guard text.contains("@@DONE ok") else { return "路由器没有回应，配置可能没写进去" }
+            var readBack: [String: String] = [:]
+            for raw in text.split(separator: "\n") {
+                let parts = raw.split(separator: " ").map(String.init)
+                guard parts.count >= 3, parts[0] == "@@RB" else { continue }
+                readBack[parts[1]] = parts.dropFirst(2).joined(separator: " ")
+                    .trimmingCharacters(in: .whitespaces)
+            }
+            for section in sections where readBack[section] != name {
+                return "名称没写进去（「\(section)」读回来是「\(readBack[section] ?? "空")」）"
+            }
+            if text.contains("@@RELOAD fail") {
+                return "配置已保存，但无线没重新加载，重启路由器后才生效"
+            }
+            // 界面自己 refresh（saveBand 的做法一致），这里不重复采一轮
+            return nil
+        } catch {
+            return describe(error)
+        }
+    }
+
+    /// 建一个访客 / IoT 网络：把模板段（GL 固件预留的 `guest2g` / `guest5g` 之类）
+    /// 就地启用并改名，返回 `nil` 表示成功。
+    ///
+    /// 只用现成模板，不凭空造 `wifi-iface`：MTK 驱动的 `vifidx` 与 `ifname`
+    /// 是固件分配好的，乱写会把主网络挤掉。
+    @discardableResult
+    func createWifiGroup(_ kind: WifiNetGroup.Kind, ssid: String, key: String) async -> String? {
+        guard connected else { return "还没连上路由器" }
+        let net = kind.networkName
+        guard !net.isEmpty else { return "这组网络不能用这个入口创建" }
+
+        let name = ssid.trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.isEmpty { return "Wi-Fi 名称不能为空" }
+        if name.count > 32 { return "Wi-Fi 名称不能超过 32 个字符" }
+        let secret = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        if secret.count < 8 || secret.count > 63 { return "密码要 8–63 个字符" }
+
+        var lines: [String] = []
+        // 先问路由器：这个 network 下已经有哪些 AP 段（GL 固件预置的 guest2g / guest5g …）。
+        // 分成两步跑，是因为把 for 循环拼进 `; ` 拼接的单行里会变成 `do;` 语法错误。
+        let probe = "uci show wireless 2>/dev/null | grep -F \"network='\\(net)'\" | cut -d. -f2"
+        do {
+            let found = try await execute(probe, timeout: 20)
+            let sections = found.split(separator: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            guard !sections.isEmpty else {
+                return "路由器上没有 \(net) 的模板段，先在路由器后台建一次再回来"
+            }
+            for section in sections {
+                lines.append("uci -q set wireless.\(section).ssid=\(shQuote(name))")
+                lines.append("uci -q set wireless.\(section).key=\(shQuote(secret))")
+                lines.append("uci -q set wireless.\(section).disabled='0'")
+                lines.append("uci -q set wireless.\(section).hidden='0'")
+            }
+            lines.append("uci -q set network.\(net).disabled='0'")
+            lines.append("uci -q commit wireless")
+            lines.append("uci -q commit network")
+            lines.append("wifi reload >/dev/null 2>&1")
+            lines.append("ifup \(net) >/dev/null 2>&1")
+            lines.append("echo \"@@RB \(net) $(uci -q get network.\(net).disabled)\"")
+            lines.append("echo @@DONE ok")
+
+            let text = try await execute(lines.joined(separator: "; "), timeout: 90)
+            guard text.contains("@@DONE ok") else { return "路由器没有回应，配置可能没写进去" }
+            guard text.contains("@@RB \(net) 0") else { return "网络没启用成功，请稍后再试" }
+            // 界面自己 refresh（saveBand 的做法一致），这里不重复采一轮
+            return nil
+        } catch {
+            return describe(error)
+        }
     }
 
     // MARK: - 中继（写）
@@ -4263,7 +4559,12 @@ private extension AppModel {
             echo @@DHCPCFG
             uci show dhcp 2>/dev/null
             echo @@WLCFG
-            uci show wireless 2>/dev/null | grep -E '\\.(band|channel|htmode|txpower|disabled|ssid|ifname|mode|device|encryption|guest|iot|multi_ap|key|hidden)='
+            uci show wireless 2>/dev/null | grep -E '\\.(band|channel|htmode|txpower|disabled|ssid|ifname|iface|mldgroup|network|mode|device|encryption|guest|iot|multi_ap|key|hidden)='
+            echo @@WLSTA
+            for i in $(uci show wireless 2>/dev/null | sed -n "s/^wireless\\.[^.=]*\\.ifname='\\(.*\\)'/\\1/p"); do
+              [ -d "/sys/class/net/$i" ] || continue
+              echo "$i $(iw dev "$i" station dump 2>/dev/null | grep -c '^Station')"
+            done
             echo @@BLACK
             uci show gl-black_white_list 2>/dev/null | grep -E '\\.(mac|mode|enable)='
             echo @@REPEATER

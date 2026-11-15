@@ -174,6 +174,10 @@ struct NetworkInfo {
     var leaseCount = 0
 
     var bands: [WifiBandInfo] = []
+    /// 无线四组（v3.0.0）：主 / 访客 / IoT / 多链路。网络页「无线」那几张卡读它。
+    var wifiGroups: [WifiNetGroup] = []
+    /// 驱动里有没有 MLO 段（`wireless.mld0`）。没有就不画多链路那张卡。
+    var mloSupported = false
     var ports: [NetPortInfo] = []
     var clients: [NetClient] = []
 
@@ -619,6 +623,79 @@ struct WifiBandInfo: Identifiable, Equatable {
         default: return encryption.uppercased()
         }
     }
+}
+
+/// 一组无线网络：主网络 / 访客 / IoT / 多链路（MLO）。
+///
+/// 这台机器（GL-MT3600BE，MT7993）每个频段是一条独立的 `wifi-iface`，同一组的两条
+/// 只能靠配置里的线索认：访客 / IoT 看 `network=guest|iot`，MLO 看 `wireless.mld0.iface`
+/// 里列的那几个网口名，剩下的 `network=lan` 的 AP 就是主网络。
+///
+/// 三个开关的语义要分清（v3.0.0）：
+///   - 成员 `disabled`：这一条 BSS 有没有在广播；
+///   - 独立 network 段 `network.guest.disabled`：那个网桥和网段在不在；
+///   - 两者都开，用户才认为「这个网络开着」。
+struct WifiNetGroup: Identifiable, Equatable {
+    enum Kind: String, CaseIterable {
+        case mlo
+        case main
+        case guest
+        case iot
+
+        var title: String {
+            switch self {
+            case .mlo: return "多链路"
+            case .main: return "主网络"
+            case .guest: return "访客网络"
+            case .iot: return "IoT 网络"
+            }
+        }
+
+        /// 独立网络段的 UCI 名；主网络与 MLO 没有单独的段。
+        var networkName: String {
+            switch self {
+            case .guest: return "guest"
+            case .iot: return "iot"
+            default: return ""
+            }
+        }
+
+        /// 关掉之后要跟着 `ifdown` 的接口名（和 UCI 段同名）。
+        var interfaceName: String { networkName }
+    }
+
+    var kind: Kind = .main
+    var ssid = ""
+    var key = ""
+    var hidden = false
+    /// 组里各频段那条 `wifi-iface`（2.4G / 5G 各一条）。
+    var members: [WifiBandInfo] = []
+    /// 接在这个组上的在线设备数（按成员网口的关联表相加）。
+    var clients = 0
+    /// 有没有任何一条成员在广播。
+    var broadcasting = false
+    /// 独立 network 段（`guest` / `iot`）是否启用；主网络与 MLO 恒为 true。
+    var networkOn = true
+    /// 段名齐了才能改。
+    var editable = true
+
+    var id: String { kind.rawValue }
+
+    var isOn: Bool { broadcasting && networkOn }
+
+    /// 「2.4 GHz + 5 GHz」这种频段串。
+    var bandSummary: String {
+        let names = members.map(\.bandName).filter { !$0.isEmpty }
+        return names.isEmpty ? "未配置" : names.joined(separator: " + ")
+    }
+
+    /// 有没有任意一条成员是加密的（决定编辑页要不要密码行）。
+    var needsKey: Bool {
+        members.contains { !$0.encryption.isEmpty && $0.encryption != "none" }
+    }
+
+    /// 加密方式取第一条成员的（同组几条本来就一致）。
+    var securityLabel: String { members.first?.securityLabel ?? "" }
 }
 
 /// 一个物理网口。
