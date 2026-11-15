@@ -1295,33 +1295,13 @@ private struct NetVap {
 
         // ---- 客户端 ----
         //
-        // 走 GL 自己的 `gl-clients`（官方 App 也是这个接口）：一次给出名称、IP、
-        // 接入方式、累计流量。逐行解析——脚本那边已经把每台客户端压成一行 JSON，
-        // 并把 60 点的历史数组清空了（`last_rx: []`），一行 300 字节左右。
-        var signalByMAC: [String: Int] = [:]
-        var clientsByIface: [String: Int] = [:]
-        for (key, body) in sections where key.hasPrefix("CLI ") {
-            let ifname = String(key.dropFirst("CLI ".count))
-            var count = 0
-            for rawLine in body.split(separator: "\n") {
-                let line = String(rawLine)
-                guard let first = line.split(separator: " ").first else { continue }
-                let candidate = String(first)
-                // iwinfo 的关联行是 `MAC  -50 dBm / -92 dBm (SNR 42) …`，
-                // MAC 恰好 17 个字符、5 个冒号——用这个认行，`RX:` / `TX:` 行不会被算进去
-                // （v2.6.7 用 `grep -c ':'`，一台设备能数成三台，8 台就是这么来的）。
-                guard candidate.count == 17,
-                      candidate.filter({ $0 == ":" }).count == 5 else { continue }
-                count += 1
-                for token in line.split(separator: " ") where token.hasSuffix("dBm") {
-                    if let value = Int(token.replacingOccurrences(of: "dBm", with: "")) {
-                        signalByMAC[candidate.uppercased()] = value
-                        break
-                    }
-                }
-            }
-            clientsByIface[ifname] = count
-        }
+        // **只认 GL 自己的接口**（v2.8.1 按用户要求改）：名单、名称、IP、接入方式、
+        // 实时速率、累计流量、在线状态全部来自 `ubus call gl-clients list`，
+        // 别名与设备类型来自 `uci show gl-client`，拦截状态来自 `gl-black_white_list`。
+        // 以前还抓 iwinfo 的关联表补信号、读 `/tmp/dhcp.leases` 补名称，两条都不要了：
+        // iwinfo 是 LuCI 那一套，读出来的 MAC 与官方列表对不上（这台机器上随机 MAC
+        // 一变，官方列表里是 9C:…:0D、关联表里是 9E:…:8D，信号就永远落到空处），
+        // 租约同理——官方 `name` 本来就是从租约来的，再读一遍只是绕路。
 
         // ---- 黑名单：哪些设备被禁止上网 ----
         //
@@ -1348,27 +1328,20 @@ private struct NetVap {
         }
         info.reservedIPs = reserved
 
-        // ---- 名字的三个可靠来源（顺序就是可信度）----
+        // ---- 名字与设备类型：都从官方配置 `gl-client` 取 ----
         //
-        // ① `gl-client.alias`：用户在官方 App 里改过的名字，按 MAC 存；
-        // ② `/tmp/dhcp.leases` 的主机名：设备自己上报的，按 MAC 存，`*` 表示没报；
-        // ③ `gl-clients` 的 `name`：这台固件上有 bug——同一份缓存被多台离线设备共用，
-        //    4 个不同 MAC 会一起报成「Xiaomi-14」。所以只在「全场唯一」时才敢用。
+        // `alias` 是用户在官方 App 里改过的名字，`class` 是官方 App 给这台设备判的
+        // 设备类型（phone / laptop / television…）。两者都按 MAC 存，比其他来源可靠。
+        // 名称顺序：别名 → 官方列表的 `name`（全场唯一时才用，见下）→ IP。
         let glClient = uciValues(sections["GCONF"])
         var aliasByMAC: [String: String] = [:]
-        for (key, value) in glClient where key.hasSuffix(".alias") && !value.isEmpty {
-            let prefix = String(key.dropLast(".alias".count))
+        var classByMAC: [String: String] = [:]
+        for (key, value) in glClient where !value.isEmpty
+        && (key.hasSuffix(".alias") || key.hasSuffix(".class")) {
+            let prefix = String(key.dropLast(6))
             guard let mac = glClient[prefix + ".mac"], !mac.isEmpty else { continue }
-            aliasByMAC[mac.uppercased()] = value
-        }
-
-        var leaseByMAC: [String: String] = [:]
-        for line in (sections["LEASES"] ?? "").split(separator: "\n") {
-            let parts = line.split(separator: " ")
-            guard parts.count >= 4 else { continue }
-            let mac = String(parts[1]).uppercased()
-            let host = String(parts[3])
-            if !host.isEmpty, host != "*" { leaseByMAC[mac] = host }
+            if key.hasSuffix(".alias") { aliasByMAC[mac.uppercased()] = value }
+            if key.hasSuffix(".class") { classByMAC[mac.uppercased()] = value }
         }
 
         // 先按原始字段读一遍，再统一决定名字——「唯一性」要看到全场才能判。
@@ -1399,19 +1372,17 @@ private struct NetVap {
             client.totalTx = looseNumber(object["total_tx"]) ?? 0
             client.rxSpeed = looseNumber(object["rx"]) ?? 0
             client.txSpeed = looseNumber(object["tx"]) ?? 0
-            client.signal = signalByMAC[client.mac] ?? 0
             client.blocked = blocked.contains(client.mac)
             client.reservedIP = reserved[client.mac] ?? ""
+            client.deviceClass = classByMAC[client.mac] ?? ""
 
-            // 名字：别名 → 租约 → 唯一才敢用的接口名 → IP（displayName 兜底）。
+            // 名字：别名 → 官方 `name`（只在这一份缓存没串号时才敢用）→ IP。
             if let alias = aliasByMAC[client.mac] {
                 client.alias = alias
                 client.name = alias
-            } else if let lease = leaseByMAC[client.mac] {
-                client.name = lease
             } else {
                 let reported = ((object["name"] as? String) ?? "").trimmingCharacters(in: .whitespaces)
-                if reported != "*", (nameCount[reported] ?? 0) <= 1 {
+                if reported != "*", !reported.isEmpty, (nameCount[reported] ?? 0) <= 1 {
                     client.name = reported
                 }
             }
@@ -1491,15 +1462,11 @@ private struct NetVap {
                 band.hidden = (wifi["wireless.\(sec).hidden"] ?? "0") == "1"
             }
 
-            // 台数：这个 radio 下**所有** VAP 的关联客户端加起来。只数主 SSID 会漏掉
-            // 连在访客 / IoT / MLO 上的设备（官方客户端列表不分 VAP，这里也别分）。
-            band.clients = vaps.filter { $0.radio == radio }
-                .reduce(0) { $0 + (clientsByIface[$1.ifname] ?? 0) }
-            if band.clients == 0 {
-                // iwinfo 读不到关联表时，退到 gl-clients 的接入方式统计。
-                let tag = band.band.isEmpty ? "" : "\(band.band)G"
-                band.clients = clients.filter { $0.online && $0.iface == tag }.count
-            }
+            // 台数：直接数官方客户端列表里接入方式等于这个频段、且在线的那几台。
+            // 以前数的是各 VAP 的 iwinfo 关联表——官方列表里有、关联表里没有的设备
+            // （随机 MAC 一变就是这种局面）会漏数，现在两边用同一个口径。
+            let tag = band.band.isEmpty ? "" : "\(band.band)G"
+            band.clients = clients.filter { $0.online && $0.iface == tag }.count
             band.extraNets = vaps.filter {
                 $0.radio == radio && $0.section != main?.section && !$0.disabled && $0.mode == "ap"
             }.count
@@ -3860,10 +3827,12 @@ private extension AppModel {
             // 于是整页「未连接」。现在先取默认路由的 dev（`@@DEFDEV`），
             // 再拿它去比对 wan / wwan 的 `l3_device`，谁在真跑就是谁。
             //
-            // **客户端与速率走 GL 自己的 ubus**（`gl-clients`，官方 App 也是这么取的）：
-            //   `list`           —— 每台客户端的名称 / IP / 接入方式 / 累计流量；
-            //   `get_wan_speed`  —— 全局实时上下行，比 `/proc/net/dev` 差值稳；
-            // 老固件没有这个对象时整段为空，页面退到「端口 + iwinfo」那一路，不会崩。
+            // **客户端只走 GL 自己的接口**（v2.8.1）：`gl-clients list` 给名单、
+            // 名称、IP、接入方式、实时与累计流量、在线状态；`gl-client` 给别名与
+            // 设备类型；`gl-black_white_list` 给拦截状态。**不再抓 iwinfo 关联表、
+            // 也不再读 `/tmp/dhcp.leases`**——那些是 LuCI 那一套，随机 MAC 一变就与
+            // 官方列表对不上（本机实测官方是 9C:…:0D、关联表是 9E:…:8D）。
+            // `get_wan_speed` 是全局实时上下行，比 `/proc/net/dev` 差值稳。
             //
             // 无线仍然是 UCI（配置面）+ iwinfo（实测面）两路：MTK 私有驱动下
             // iwinfo 读不到 SSID 的 VAP 很常见（主 SSID 被 `disabled=1` 关掉时就是这样），
@@ -3919,12 +3888,6 @@ private extension AppModel {
               [ -d "/sys/class/net/$n" ] || continue
               echo "@@AP $n"
               iwinfo "$n" info 2>/dev/null
-            done
-            for d in /sys/class/net/*; do
-              n=${d##*/}
-              case "$n" in ra*|rai*|rax*) ;; *) continue;; esac
-              echo "@@CLI $n"
-              iwinfo "$n" assoclist 2>/dev/null
             done
             true
 

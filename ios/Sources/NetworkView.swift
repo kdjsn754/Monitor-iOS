@@ -489,12 +489,13 @@ struct NetworkView: View {
     }
 
     private func clientRow(_ client: NetClient) -> some View {
-        // 第二行是「地址 · 接入 · 信号」，比单独一列「接入方式」信息量高，
-        // 而右侧留给速率与累计流量（在线时才变的那两个数）。
+        // 第二行是「地址 · 接入 · 设备类型」，右侧留给速率与累计流量
+        // （在线时才变的那两个数）。设备类型是官方 App 判好的 `gl-client.class`，
+        // 没归类就不占位；信号不再显示——官方接口里没有这一项，抓 iwinfo 又对不上 MAC。
         var bits: [String] = []
         if !client.ip.isEmpty { bits.append(client.ip) }
         if !client.iface.isEmpty { bits.append(client.iface) }
-        if client.signal != 0 { bits.append("\(client.signal) dBm") }
+        if !client.deviceClass.isEmpty { bits.append(client.classLabel) }
         if !client.reservedIP.isEmpty { bits.append("固定") }
         let detail = bits.isEmpty ? client.mac : bits.joined(separator: " · ")
 
@@ -936,11 +937,10 @@ private struct ClientEditorSheet: View {
                     }
                     .adaptiveRowBackground()
                     HStack {
-                        Text("流量")
+                        Text("设备类型")
                         Spacer(minLength: 8)
-                        Text(client.trafficLabel)
+                        Text(client.classLabel)
                             .foregroundStyle(.secondary)
-                            .monospacedDigit()
                     }
                     .adaptiveRowBackground()
                     HStack {
@@ -948,6 +948,41 @@ private struct ClientEditorSheet: View {
                         Spacer(minLength: 8)
                         Text(client.mac)
                             .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                    .adaptiveRowBackground()
+                }
+
+                Section {
+                    HStack {
+                        Text("下载速率")
+                        Spacer(minLength: 8)
+                        Text(client.downRateLabel)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                    .adaptiveRowBackground()
+                    HStack {
+                        Text("上传速率")
+                        Spacer(minLength: 8)
+                        Text(client.upRateLabel)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                    .adaptiveRowBackground()
+                    HStack {
+                        Text("下载流量")
+                        Spacer(minLength: 8)
+                        Text(client.totalRx > 0 ? formatBytes(client.totalRx) : "—")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                    .adaptiveRowBackground()
+                    HStack {
+                        Text("上传流量")
+                        Spacer(minLength: 8)
+                        Text(client.totalTx > 0 ? formatBytes(client.totalTx) : "—")
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                     }

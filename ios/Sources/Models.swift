@@ -246,16 +246,18 @@ struct NetworkInfo {
 
 /// 一台客户端（`ubus call gl-clients list` 的一条）。
 ///
-/// **名字的三级回落是本类的重点**（v2.8.0 修）：`gl-clients` 自己返回的 `name`
-/// 在这台固件上是错的——4 个不同 MAC 会一起报成「Xiaomi-14」，因为它是从一份
-/// 共享缓存里取的，离线设备互相串。所以上屏顺序是：
-///   ① `gl-client` 的 `alias`（用户在官方 App 里改过的名字，按 MAC 存，可靠）；
-///   ② `/tmp/dhcp.leases` 里的主机名（设备自己上报的，按 MAC 存，可靠；`*` 表示没报）；
-///   ③ 官方接口的 `name`，**只有在全场唯一时才敢用**（两台以上同名就整批丢掉）；
-///   ④ 兜底 IP → MAC。
+/// **v2.8.1 起这一整块只认官方数据**（用户要求）：名单、名称、IP、接入方式、
+/// 实时速率、累计流量、在线状态来自 `gl-clients list`；别名与设备类型来自
+/// `gl-client` 的 UCI 配置；拦截状态来自 `gl-black_white_list`。不再抓 iwinfo
+/// 关联表、也不再读 `/tmp/dhcp.leases`——那是 LuCI 那一套，随机 MAC 一变就跟
+/// 官方列表对不上（本机实测：官方是 9C:…:0D，关联表是 9E:…:8D）。
+///
+/// 名称顺序：`gl-client.alias`（用户在官方 App 里改的）→ 官方 `name`
+/// （这台固件的缓存会串号，4 个 MAC 一起报同一个名字，所以只在全场唯一时才用）
+/// → IP（`displayName` 兜底）。
 struct NetClient: Identifiable, Equatable {
     var mac = ""
-    /// 最终上屏的名字（已经按上面三级回落算好，解析时就填进来）。
+    /// 最终上屏的名字（已经按上面顺序算好，解析时就填进来）。
     var name = ""
     /// 用户在官方 App 里设的别名；编辑页回填用，空字符串表示没设过。
     var alias = ""
@@ -268,8 +270,9 @@ struct NetClient: Identifiable, Equatable {
     /// 实时速率（字节/秒），`gl-clients` 的 `rx` / `tx`。离线时为 0。
     var rxSpeed: Double = 0
     var txSpeed: Double = 0
-    /// dBm，0 表示没读到（有线设备本来就没有）
-    var signal = 0
+    /// 官方 App 判的设备类型（`gl-client.class`）：`phone` / `laptop` / `television`…
+    /// 空表示官方还没归类。
+    var deviceClass = ""
     /// 已加入黑名单（`gl-black_white_list`），当前不允许访问网络。
     /// 由 `uci show gl-black_white_list` 的 MAC 列表判定，不看缓存，写完立刻能核对。
     var blocked = false
@@ -298,13 +301,61 @@ struct NetClient: Identifiable, Equatable {
         return "↓ \(formatBytes(rxSpeed))/s"
     }
 
+    /// 详情页的两个方向速率，离线或没流量时给「—」。
+    var downRateLabel: String {
+        guard online, rxSpeed >= 1 else { return "—" }
+        return "\(formatBytes(rxSpeed))/s"
+    }
+    var upRateLabel: String {
+        guard online, txSpeed >= 1 else { return "—" }
+        return "\(formatBytes(txSpeed))/s"
+    }
+
     var wired: Bool { iface == "有线" }
 
-    /// 设备行左边那个图标：网线一根、无线按信号强弱（弱信号时换成空心）。
+    /// 设备类型的中文名，直接照官方 App 的 `client_*` 文案。
+    var classLabel: String {
+        switch deviceClass {
+        case "phone": return "手机"
+        case "pad": return "平板电脑"
+        case "laptop": return "笔记本"
+        case "computer": return "电脑"
+        case "television": return "电视"
+        case "camera": return "相机"
+        case "sound": return "音响"
+        case "printer": return "打印机"
+        case "watch": return "可穿戴设备"
+        case "gamepad": return "游戏机"
+        case "homeAppliances": return "智能家电"
+        case "router": return "网关"
+        case "nas": return "NAS"
+        case "server": return "服务器"
+        case "switch": return "交换机"
+        case "": return wired ? "有线设备" : "无线设备"
+        default: return deviceClass
+        }
+    }
+
+    /// 设备行左边那个图标：优先用官方给的类型，认不出来再按有线 / 无线分。
     var icon: String {
-        if wired { return "cable.connector" }
-        if signal != 0 && signal <= -75 { return "wifi.exclamationmark" }
-        return "wifi"
+        switch deviceClass {
+        case "phone": return "iphone"
+        case "pad": return "ipad"
+        case "laptop": return "laptopcomputer"
+        case "computer": return "desktopcomputer"
+        case "television": return "tv"
+        case "camera": return "video"
+        case "sound": return "hifispeaker"
+        case "printer": return "printer"
+        case "watch": return "applewatch"
+        case "gamepad": return "gamecontroller"
+        case "homeAppliances": return "lightbulb"
+        case "router": return "wifi.router"
+        case "nas": return "externaldrive"
+        case "server": return "server.rack"
+        case "switch": return "network"
+        default: return wired ? "cable.connector" : "wifi"
+        }
     }
 }
 
