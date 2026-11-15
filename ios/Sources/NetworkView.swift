@@ -143,7 +143,12 @@ struct NetworkView: View {
     /// 有了这层底色，整块读起来是「一张图」，而不是三张并排的白卡。
     private var topologyPanel: some View {
         RoundedRectangle(cornerRadius: 24, style: .continuous)
-            .fill(Color(.secondarySystemGroupedBackground))
+            .fill(Color.clear)
+            .background {
+                // 底板跟透明度；那层蓝→青的极淡渐变是图的一部分，留着。
+                AdaptiveFill(shape: RoundedRectangle(cornerRadius: 24, style: .continuous),
+                             color: Color(.secondarySystemGroupedBackground))
+            }
             .overlay {
                 RoundedRectangle(cornerRadius: 24, style: .continuous)
                     .fill(
@@ -195,12 +200,12 @@ struct NetworkView: View {
             .padding(.horizontal, 13)
             .padding(.vertical, 7)
             .background {
-                Capsule()
-                    .fill(Color(.systemBackground))
+                AdaptiveFill(shape: Capsule(), color: Color(.systemBackground))
                     .overlay {
-                        Capsule()
-                            .strokeBorder((on ? NetPalette.wan : Color(.separator)).opacity(0.35),
-                                          lineWidth: 0.8)
+                        // 描边颜色照旧跟着「通没通」走（在线蓝、断开灰），只把不透明度交给滑块。
+                        AdaptiveBorder(shape: Capsule(),
+                                       color: on ? NetPalette.wan : Color(.separator),
+                                       width: 0.8, strength: 0.35)
                     }
                     .shadow(color: Color.black.opacity(0.05), radius: 6, y: 2)
             }
@@ -238,8 +243,7 @@ struct NetworkView: View {
                 Circle()
                     .strokeBorder(NetPalette.wan.opacity(0.12), lineWidth: 0.8)
                     .frame(width: 63, height: 63)
-                Circle()
-                    .fill(Color(.systemBackground))
+                AdaptiveFill(shape: Circle(), color: Color(.systemBackground))
                     .frame(width: 49, height: 49)
                     .shadow(color: Color.black.opacity(0.08), radius: 7, y: 2)
                 Image(systemName: "wifi.router")
@@ -370,8 +374,8 @@ struct NetworkView: View {
             .padding(.vertical, 11)
             .padding(.horizontal, 4)
             .background {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(Color(.systemBackground))
+                AdaptiveFill(shape: RoundedRectangle(cornerRadius: 16, style: .continuous),
+                             color: Color(.systemBackground))
                     .overlay {
                         RoundedRectangle(cornerRadius: 16, style: .continuous)
                             .strokeBorder(leaf.on ? leaf.color.opacity(0.28) : Color(.separator).opacity(0.4),
@@ -599,13 +603,17 @@ struct NetworkView: View {
         .padding(.horizontal, 16)
         .padding(.top, 14)
         .padding(.bottom, 8)
+        // v2.9.6：底色和细边改走 `AdaptiveFill` / `AdaptiveBorder`，跟设置页的
+        // 「卡片透明度」滑块一起变透。以前这里是死白
+        // `Color(.secondarySystemGroupedBackground)`，壁纸透上来时整页只有这一页的
+        // 卡片还实心（用户 2026-11-15：「网络页和他的二级页没有跟着透明度」）。
         .background {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color(.secondarySystemGroupedBackground))
+            AdaptiveFill(shape: RoundedRectangle(cornerRadius: 18, style: .continuous),
+                         color: Color(.secondarySystemGroupedBackground))
         }
         .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(Color(.separator).opacity(0.45), lineWidth: 0.6)
+            AdaptiveBorder(shape: RoundedRectangle(cornerRadius: 18, style: .continuous),
+                           strength: 0.45, width: 0.6)
         }
     }
 

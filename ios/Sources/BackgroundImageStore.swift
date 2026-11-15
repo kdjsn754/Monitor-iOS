@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import ImageIO
 
 /// 自定义背景的「唯一真相」（v2.4.1 重写）。
 ///
@@ -18,8 +19,32 @@ final class BackgroundImageStore {
     /// 已裁切、正好是整屏比例的那张——背景真正铺的就是它、也只有它。
     /// 因为已经按屏幕比例裁好，铺的时候不会再被二次裁掉，所见即所得。
     var image: UIImage?
-    /// 裁切前的原图。留着是为了「调整」：重开 App 也能把原图读回来重新框。
-    var original: UIImage?
+
+    /// 设置页左上角那枚 54pt 的小图。
+    ///
+    /// **v2.9.6**：以前缩略图直接用 `image`（长边 2400），SwiftUI 每次求值都要把整张
+    /// 纹理缩到 54pt —— 设置页一滚动就一遍遍重绘全尺寸图，选了大图之后这一页会明显发顿。
+    /// 现在单独缩一张 240 的，只算一次。
+    var thumbnail: UIImage?
+
+    /// 裁切前的原图。**懒加载**（v2.9.6）：以前 `init` 里就把它读出来，
+    /// 于是每次启动、每次进设置页都多读一张 3000 长边的 JPEG。
+    /// 它只在「调整已有背景」时才用得上，没必要为它付启动时间。
+    var original: UIImage? {
+        get {
+            if originalLoaded { return cachedOriginal }
+            originalLoaded = true
+            cachedOriginal = Self.read(Self.originalURL) ?? image
+            return cachedOriginal
+        }
+        set {
+            cachedOriginal = newValue
+            originalLoaded = true
+        }
+    }
+
+    @ObservationIgnored private var cachedOriginal: UIImage?
+    @ObservationIgnored private var originalLoaded = false
 
     var isOn = false
 
@@ -50,7 +75,9 @@ final class BackgroundImageStore {
             opacity = min(max(saved, 0), 1)
         }
         image = Self.read(Self.croppedURL)
-        original = Self.read(Self.originalURL) ?? image
+        // 缩略图直接从文件按 240 出（ImageIO 不解全图），进设置页不再为一张小图
+        // 把整张 2400 的位图先解一遍。
+        thumbnail = BackgroundCropper.downsample(url: Self.croppedURL, maxSide: 240)
         // 文件没了（清缓存、迁移失败）就别显示「已设置」——卡片跟着空出来。
         if image == nil { isOn = false }
     }
@@ -62,15 +89,20 @@ final class BackgroundImageStore {
         let ready = BackgroundCropper.downscale(cropped, maxSide: 2400)
         Self.write(ready, to: Self.croppedURL)
         image = ready
+        thumbnail = BackgroundCropper.downscale(ready, maxSide: 240)
 
         if let source {
-            let kept = BackgroundCropper.downscale(BackgroundCropper.upright(source),
-                                                   maxSide: 3000)
-            Self.write(kept, to: Self.originalURL)
-            original = kept
-        } else if original == nil {
-            original = ready
+            // `source` 已经是 `handlePickerItem` 里按 3000 解过的，这里只补一次落盘。
+            // **落盘放后台**：它只服务「以后再点调整」，丢了也不影响当前背景，
+            // 没必要让用户点完「使用」还等一次 JPEG 编码。
+            cachedOriginal = source
+            Task.detached(priority: .utility) {
+                Self.write(source, to: Self.originalURL)
+            }
+        } else if cachedOriginal == nil {
+            cachedOriginal = ready
         }
+        originalLoaded = true
 
         isOn = true
         defaults.set(true, forKey: BackgroundImageStore.onKey)
@@ -84,7 +116,9 @@ final class BackgroundImageStore {
         try? FileManager.default.removeItem(at: Self.croppedURL)
         try? FileManager.default.removeItem(at: Self.originalURL)
         image = nil
-        original = nil
+        thumbnail = nil
+        cachedOriginal = nil
+        originalLoaded = true
         isOn = false
         defaults.set(false, forKey: BackgroundImageStore.onKey)
         bumpVersion()
@@ -139,6 +173,38 @@ final class BackgroundImageStore {
 
 /// 缩图与裁切。纯几何，不碰状态，方便单独对。
 enum BackgroundCropper {
+    /// 直接从图片文件数据里**按目标尺寸解码**（ImageIO）。
+    ///
+    /// **v2.9.6 新增**，专治「选了大文件要加载很久」：
+    /// 以前是 `UIImage(data:)` 把整张 48MP 照片解成位图，再在主线程
+    /// `UIGraphicsImageRenderer` 重绘到 3000——一步都不能省，主线程就卡在那儿。
+    /// `CGImageSourceCreateThumbnailAtIndex` 直接在解码阶段按目标像素出图，
+    /// 既不生成中间的全尺寸位图，也能在后台线程跑；`kCGImageSourceCreateThumbnailWithTransform`
+    /// 顺带把 EXIF 方向应用好（等于内置了一个 `upright`）。
+    static func downsample(data: Data, maxSide: CGFloat) -> UIImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        return thumbnail(from: source, maxSide: maxSide)
+    }
+
+    /// 同上，直接从磁盘文件出（缩略图用，连 `Data` 都不用整块读进来）。
+    static func downsample(url: URL, maxSide: CGFloat) -> UIImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        return thumbnail(from: source, maxSide: maxSide)
+    }
+
+    private static func thumbnail(from source: CGImageSource, maxSide: CGFloat) -> UIImage? {
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: max(1, Int(maxSide)),
+            kCGImageSourceShouldCacheImmediately: true
+        ]
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        return UIImage(cgImage: cg, scale: 1, orientation: .up)
+    }
+
     /// 把 `UIImage` 的方向烘进像素里。
     ///
     /// 相册里带 EXIF 旋转的照片，`cgImage` 是原始朝向，直接拿它算裁切框会歪 90°。

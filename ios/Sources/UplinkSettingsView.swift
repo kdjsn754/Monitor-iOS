@@ -292,12 +292,12 @@ struct UplinkSettingsView: View {
         }
         .padding(3)
         .background {
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .fill(Color(.secondarySystemGroupedBackground))
+            AdaptiveFill(shape: RoundedRectangle(cornerRadius: 13, style: .continuous),
+                         color: Color(.secondarySystemGroupedBackground))
         }
         .overlay {
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .strokeBorder(Color(.separator).opacity(0.45), lineWidth: 0.6)
+            AdaptiveBorder(shape: RoundedRectangle(cornerRadius: 13, style: .continuous),
+                           strength: 0.45, width: 0.6)
         }
     }
 
@@ -600,13 +600,14 @@ struct UplinkSettingsView: View {
         .padding(.horizontal, 16)
         .padding(.top, 14)
         .padding(.bottom, 6)
+        // 跟设置页的「卡片透明度」滑块（v2.9.6，和网络页同一套 `AdaptiveFill`）。
         .background {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color(.secondarySystemGroupedBackground))
+            AdaptiveFill(shape: RoundedRectangle(cornerRadius: 18, style: .continuous),
+                         color: Color(.secondarySystemGroupedBackground))
         }
         .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(Color(.separator).opacity(0.45), lineWidth: 0.6)
+            AdaptiveBorder(shape: RoundedRectangle(cornerRadius: 18, style: .continuous),
+                           strength: 0.45, width: 0.6)
         }
     }
 
@@ -711,8 +712,8 @@ struct UplinkSettingsView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
             .background {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color(.tertiarySystemFill))
+                AdaptiveFill(shape: RoundedRectangle(cornerRadius: 10, style: .continuous),
+                             color: Color(.tertiarySystemFill))
             }
         }
         .padding(.vertical, 8)
@@ -914,12 +915,12 @@ private struct UplinkCardSurface: ViewModifier {
         content
             .padding(16)
             .background {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(Color(.secondarySystemGroupedBackground))
+                AdaptiveFill(shape: RoundedRectangle(cornerRadius: 18, style: .continuous),
+                             color: Color(.secondarySystemGroupedBackground))
             }
             .overlay {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .strokeBorder(Color(.separator).opacity(0.45), lineWidth: 0.6)
+                AdaptiveBorder(shape: RoundedRectangle(cornerRadius: 18, style: .continuous),
+                               strength: 0.45, width: 0.6)
             }
     }
 }

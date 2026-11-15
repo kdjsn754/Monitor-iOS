@@ -838,7 +838,7 @@ private struct BackgroundCard: View {
             ZStack {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(Color(uiColor: .secondarySystemFill))
-                if store.isOn, let thumb = store.image {
+                if store.isOn, let thumb = store.thumbnail {
                     Image(uiImage: thumb)
                         .resizable()
                         .scaledToFill()
@@ -976,16 +976,30 @@ private struct BackgroundCard: View {
         Task { @MainActor in
             let data = try? await item.loadTransferable(type: Data.self)
             pickerItem = nil
-            guard let data, let raw = UIImage(data: data) else {
+            guard let data else {
                 readingPick = false
                 pickError = "这张照片读不出来，换一张试试（iCloud 原图需要先下载）"
                 return
             }
-            // 方向在这里烘进像素——放主线程做，避免 UIKit 绘制跨线程。
-            let upright = BackgroundCropper.upright(raw, maxSide: 3000)
+            // **v2.9.6：改成 ImageIO 在后台按 3000 直接解码。**
+            // 以前是 `UIImage(data:)` 先把整张解出来（48MP 的照片就是几十 MB 位图），
+            // 再在主线程 `UIGraphicsImageRenderer` 重绘到 3000——选大文件时那几秒卡顿
+            // 全在这一步（用户 2026-11-15：「选了大文件背景进去要加载很久」）。
+            // ImageIO 在解码阶段就只出 3000 的图，还能放在后台线程，
+            // 顺带把 EXIF 方向应用好（`upright` 那一步也省了）。
+            let ready = await Task.detached(priority: .userInitiated) {
+                BackgroundCropper.downsample(data: data, maxSide: 3000)
+            }.value
+            guard let ready else {
+                readingPick = false
+                pickError = "这张照片读不出来，换一张试试（iCloud 原图需要先下载）"
+                return
+            }
             readingPick = false
-            try? await Task.sleep(nanoseconds: 320_000_000)
-            route = .adjust(UUID(), upright)
+            // 等系统照片选择器那一下关闭动画收完再弹裁切页，
+            // 否则 fullScreenCover 会在「已有 present 进行中」时被系统丢掉。
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            route = .adjust(UUID(), ready)
         }
     }
 
