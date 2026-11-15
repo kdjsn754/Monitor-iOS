@@ -335,6 +335,9 @@ struct NetworkView: View {
 
     private func clientRow(_ client: NetClient) -> some View {
         let wired = client.iface == "有线"
+        // 第一行是名字，没名字时退到 IP；这时第二行改显示 MAC，否则两行会一模一样。
+        let named = !client.name.trimmingCharacters(in: .whitespaces).isEmpty && client.name != "*"
+        let second = named ? (client.ip.isEmpty ? client.mac : client.ip) : client.mac
         return HStack(spacing: 10) {
             Image(systemName: wired ? "cable.connector" : "wifi")
                 .font(.system(size: 13, weight: .medium))
@@ -347,7 +350,7 @@ struct NetworkView: View {
                 Text(client.displayName)
                     .font(.system(size: 15))
                     .lineLimit(1)
-                Text(client.ip.isEmpty ? client.mac : client.ip)
+                Text(second)
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
