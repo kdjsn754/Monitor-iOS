@@ -1358,7 +1358,7 @@ private struct ClientEditorSheet: View {
                             if savingClass {
                                 ProgressView().controlSize(.small)
                             } else {
-                                DeviceGlyph(kind: ClientClass(rawValue: classValue), size: 16)
+                                DeviceGlyph(kind: ClientClass(rawValue: classValue), size: 19)
                                     .foregroundStyle(.secondary)
                                 Text(shownClass)
                                     .foregroundStyle(.secondary)
@@ -1526,42 +1526,35 @@ private struct ClientEditorSheet: View {
 
 /// 「设备类型」选择器。
 ///
-/// 照官方 App 的「修改客户端设备」：一列类型、当前项打勾，点一下就写回，
-/// 不等详情页那个「保存」——类型和名称/地址是各自独立的配置。
+/// 照官方 App（用户 2026-11-16 给了截图）：**三列九宫格**，每格一张白卡，卡里一个
+/// 圆形底 + 类型图标，下面一行名字，选中的那个圆变蓝、图标变白。
+///
+/// 以前是一列 `Form` 行、图标只有 18pt —— 线条图标缩到这个尺寸细节全糊，
+/// 一列七行也看不出「一批类型」这件事（用户：「自绘的图标小的太丑了」）。
+/// 现在图标 34pt 放在 56pt 的圆里，笔画的粗细才站得住。
+///
+/// 点一下直接写回，不等详情页那个「保存」——类型和名称/地址是各自独立的配置。
 private struct ClientClassSheet: View {
     @Environment(\.dismiss) private var dismiss
     let current: String
     let pick: (String) -> Void
 
+    /// 三列等宽，间距 12。
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 12), count: 3)
+
     var body: some View {
         NavigationStack {
-            Form {
-                Section {
-                    ForEach(ClientClass.allCases, id: \.rawValue) { item in
-                        Button {
-                            pick(item.rawValue)
-                        } label: {
-                            HStack(spacing: 12) {
-                                DeviceGlyph(kind: item, size: 18)
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 26, alignment: .center)
-                                Text(item.title)
-                                    .foregroundStyle(Color.primary)
-                                Spacer(minLength: 8)
-                                if item.rawValue == current {
-                                    Image(systemName: "checkmark")
-                                        .font(.system(size: 14, weight: .semibold))
-                                        .foregroundStyle(Color.accentColor)
-                                }
-                            }
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .adaptiveRowBackground()
+            ScrollView {
+                LazyVGrid(columns: columns, spacing: 12) {
+                    ForEach(ClientClass.pickerOrder, id: \.rawValue) { item in
+                        cell(item)
                     }
                 }
+                .padding(.horizontal, 16)
+                .padding(.top, 14)
+                .padding(.bottom, 28)
             }
-            .themedFormBackground()
+            .themedScrollBackground()
             .navigationTitle("设备类型")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -1571,6 +1564,38 @@ private struct ClientClassSheet: View {
                 }
             }
         }
+    }
+
+    /// 一格：圆底图标 + 名字。选中时圆底是主题蓝、图标转白、名字回主色。
+    private func cell(_ item: ClientClass) -> some View {
+        let on = item.rawValue == current
+        return Button {
+            pick(item.rawValue)
+        } label: {
+            VStack(spacing: 9) {
+                ZStack {
+                    // `systemGray4`：浅色下是 #D1D1D6（和官方那个灰团一个调子），
+                    // 深色下是 #3A3A3C，比卡片底亮一档——用 `systemGray5/6` 会跟卡片同色，
+                    // 圆整个看不见。
+                    Circle()
+                        .fill(on ? Color.accentColor : Color(.systemGray4))
+                        .frame(width: 56, height: 56)
+                    DeviceGlyph(kind: item, size: 34)
+                        .foregroundStyle(on ? Color.white : Color(.systemGray))
+                }
+                Text(item.title)
+                    .font(.system(size: 11.5, weight: on ? .medium : .regular))
+                    .foregroundStyle(on ? Color.primary : Color.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 14)
+            .padding(.horizontal, 4)
+            .plainTile(radius: 12)
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
     }
 }
 

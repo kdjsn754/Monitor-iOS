@@ -538,6 +538,14 @@ enum ClientClass: String, CaseIterable {
 
     /// 中文名之外的图形不在这里给：图标走 `DeviceGlyph`（自绘线条），
     /// 免得 SF Symbols 里实心/线框混在一起。
+
+    /// 选择器里的排列顺序，照官方 App 那个九宫格（手机 → 笔记本 → 可穿戴 → 电脑 →
+    /// 平板 → 相机 → 打印机 → 音响 → 电视 → 游戏机 → 网关 → 智能家电 → 未知）。
+    /// `allCases` 是声明顺序，直接用会显得像随手排的。
+    static var pickerOrder: [ClientClass] {
+        [.phone, .laptop, .watch, .computer, .pad, .camera, .printer,
+         .sound, .television, .games, .gateway, .smartAppliances, .unknown]
+    }
 }
 
 /// 一个 Wi-Fi 频段（一个 radio 一行）。
