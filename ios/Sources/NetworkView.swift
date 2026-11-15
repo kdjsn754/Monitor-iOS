@@ -264,10 +264,9 @@ struct NetworkView: View {
                 Circle()
                     .strokeBorder(NetPalette.wan.opacity(0.12), lineWidth: 0.8)
                     .frame(width: 74, height: 74)
-                AdaptiveFill(shape: Circle(), color: Color(.systemBackground))
-                    .frame(width: 66, height: 66)
-                    .shadow(color: Color.black.opacity(0.08), radius: 7, y: 2)
-                // 这台机器的**真实形状**，不是通用路由器符号：官方线稿（见 RouterGlyph）。
+                // **圈里不放白底**（v3.0.8，用户 03:09 看实机截图：「不要路由器图标的白底」）。
+                // 原来是 `AdaptiveFill(Circle, systemBackground)` 66pt + 柔和阴影，缩在淡蓝环里
+                // 像贴了一块膏药，也把线稿周围压出一圈硬边。现在线稿直接坐在淡蓝圆上。
                 RouterModelGlyph(width: 56, tint: NetPalette.wan)
             }
             .padding(.bottom, 3)
