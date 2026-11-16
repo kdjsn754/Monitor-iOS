@@ -454,11 +454,12 @@ struct FanControlView: View {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.orange)
-                Text("路由器上没有 gl-fanctrl")
+                Text("路由器上没有风扇控制插件")
                     .font(.subheadline.weight(.semibold))
             }
-            codeLine("opkg install /tmp/gl-fanctrl_0.1.0_all.ipk")
-            codeLine("apk add --allow-untrusted /tmp/gl-fanctrl-0.1.0-r1.apk")
+            // 两套插件都认（UCI 结构一样，只有包名不同），装哪个都行。
+            codeLine("GL 固件：opkg install gl-fanctrl")
+            codeLine("ImmortalWrt：apk add luci-app-fanctrl")
             Text("装好后回这页点右上角刷新。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)

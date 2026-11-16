@@ -1090,11 +1090,22 @@ struct FanControlState: Equatable {
     // 运行态（sysfs / proc）
     var temperature: Double?
     var rpm: Double?
-    /// cooling_device 的 cur_state 按 max_state 换算出来的百分比。
+    /// `hwmon*/pwm1` 的 0~255 换算出来的百分比（读不到才退回 cooling_device 的 cur/max）。
     var pwmPercent: Int?
-    /// gl-fanctrl 守护进程是否在跑。官方 gl_fan 的进程名在各型号固件里不统一，
-    /// 探不准就不显示——宁可少一格信息，也不要给一个会骗人的绿点。
-    var pluginRunning = false
+    /// 后端身份。两套插件可以同时装（用户 2026-11-17 明确要求），UCI 结构与十个键完全一样，
+    /// 只有包名 / init 名 / 守护进程路径不同，所以读一次记下来，写操作照着用。
+    ///
+    /// - `gl_fanctrl` + `gl_fanctrl`：GL 固件自带的 gl-fanctrl
+    /// - `fanctrl` + `fanctrl`：ImmortalWrt 的 luci-app-fanctrl
+    var pluginPackage = "gl_fanctrl"
+    var initScript = "gl_fanctrl"
+    /// 两个守护进程各自的存活状态。可能同时为真（两个插件都装着、都在跑）。
+    var glDaemonRunning = false
+    var fcDaemonRunning = false
+    /// 当前选中的那个后端的守护进程在不在跑。
+    /// 官方 `gl_fan` 的进程名在各型号固件里不统一，探不准就不显示——宁可少一格信息，
+    /// 也不要给一个会骗人的绿点。
+    var pluginRunning: Bool { pluginPackage == "fanctrl" ? fcDaemonRunning : glDaemonRunning }
 
     // v1.28.28 删掉了 `expectedPercent`：它唯一的用途是风扇页那行
     //「按曲线此刻应为 x%」的提示，而用户要求把那行去掉。
