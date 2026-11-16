@@ -22,6 +22,14 @@ final class AppModel {
     var connected = false
     var connecting = false
     var reconnecting = false
+    /// 自动重连停止的标志（v3.1.4）。
+    ///
+    /// `wifi reload` 之后手机要是没回到这台路由器的 Wi-Fi 上（典型场景：把手机正在连的
+    /// 那个频段关掉了），以前是「每一拍采集失败 → 立刻重连 → 失败 → 再重连」的无限循环，
+    /// 用户看到的就是一直转圈的「正在恢复连接」，而且永远不停。
+    /// 现在退避重试约一分钟仍连不上就置这个标志：**停止自动重连**，把重试权交回给用户
+    /// （点右上角刷新、或回前台）。用户手动发起时清掉它。
+    var autoReconnectPaused = false
     var activityTitle: String?
     var activitySubtitle: String?
     var busy = false
@@ -771,6 +779,8 @@ final class AppModel {
         guard connected else { return }
         // 系统浮层盖着：别重连、也别重开轮询，交给浮层收起时那句。
         guard !modalActive else { return }
+        // 回前台就是要看数据，退避重试用尽的挡板一起拉开。
+        autoReconnectPaused = false
         if let lastSuccessfulPoll,
            Date().timeIntervalSince(lastSuccessfulPoll) < 10 {
             startPolling()
@@ -781,6 +791,8 @@ final class AppModel {
 
     func manualRefresh() async {
         guard connected else { return }
+        // 用户主动刷新 = 明确要再试一次，把「已放弃自动重连」的挡板拉开。
+        autoReconnectPaused = false
         if status == "连接中断" || reconnecting ||
             (lastSuccessfulPoll.map { Date().timeIntervalSince($0) > 12 } ?? true) {
             await reconnect(force: true)
@@ -789,18 +801,21 @@ final class AppModel {
         await bootstrapRefresh()
     }
 
-    func reconnect(force: Bool) async {
+    /// 返回这次是否连上了。`false` 既包括「没去连」（正在连别的、密码没取到），
+    /// 也包括「连了但失败」——调用方只需要知道「现在能不能用」。
+    @discardableResult
+    func reconnect(force: Bool) async -> Bool {
         // 正在「新建/切换连接」时别插一脚：那会儿 currentProfile 可能已经指向新连接，
         // 抢着重连会把旧会话搅乱。
-        guard !reconnecting, !connecting, let profile = currentProfile else { return }
+        guard !reconnecting, !connecting, let profile = currentProfile else { return false }
         if !force, let lastReconnectAttempt,
            Date().timeIntervalSince(lastReconnectAttempt) < 5 {
-            return
+            return false
         }
         guard let password = activePassword ?? KeychainStore.loadPassword(
             account: KeychainStore.passwordAccount(for: profile)
         ) else {
-            return
+            return false
         }
 
         lastReconnectAttempt = Date()
@@ -820,7 +835,9 @@ final class AppModel {
             reconnecting = false
             lastReconnectAttempt = nil
             status = "已连接"
+            autoReconnectPaused = false
             clearError()
+            return true
         } catch {
             reconnecting = false
             status = "连接中断"
@@ -828,6 +845,7 @@ final class AppModel {
             if connected {
                 startPolling()
             }
+            return false
         }
     }
 
@@ -1006,8 +1024,10 @@ final class AppModel {
             // 正在连新连接时，旧会话的报错别去动界面状态。
             if connecting { return }
             status = "连接中断"
-            if !reconnecting, activePassword != nil {
-                Task { await self.reconnect(force: false) }
+            // `autoReconnectPaused`：退避重试用尽后就不再从每一拍采集里反复发起重连，
+            // 否则就是「失败→重连→失败」的无限循环，界面一直转圈（见 reloadWireless）。
+            if !reconnecting, !autoReconnectPaused, activePassword != nil {
+                Task { _ = await self.reconnect(force: false) }
             }
         }
     }
@@ -1874,6 +1894,13 @@ private struct NetVap {
         guard connected else { return "还没连上路由器" }
         guard band.editable else { return "读不到这个频段的配置段名，改不了" }
 
+        // 关掉「手机自己正在连的那一路」是单行道：一关手机就掉出 Wi-Fi，App 再也连不回去
+        // 把它打开，只能换别的信号或上网页后台。这里直接拦下来，把该先做的事说清楚。
+        if !enabled, !band.ifname.isEmpty, await linkInterfaceName() == band.ifname {
+            let name = band.band.isEmpty ? "当前" : "\(band.band) GHz "
+            return "这一路正是手机当前连接的那路无线（\(name)）：关掉后 App 会立刻失联，也没法再把它打开。请先把手机连到其它频段，再回来关它"
+        }
+
         let name = ssid.trimmingCharacters(in: .whitespacesAndNewlines)
         if name.isEmpty { return "Wi-Fi 名称不能为空" }
         if name.count > 32 { return "Wi-Fi 名称不能超过 32 个字符" }
@@ -2062,8 +2089,70 @@ private struct NetVap {
         ssh.disconnect()
         // 8 秒 = AP 自己回来（3~6 秒）+ iOS 重新连上 Wi-Fi（2~4 秒）。宁可多等一秒，
         // 也别在 AP 还没起来的时候去连——那会直接弹一个「连接中断」的红字。
-        try? await Task.sleep(nanoseconds: 8_000_000_000)
-        await reconnect(force: true)
+        // 但只连一次太脆：手机重新关联 Wi-Fi 的耗时 6~30 秒都有，关掉某个频段、或者上级
+        // AP 正在换信道时更久。所以是退避重试（合计约 50 秒）。改之前这里是「等 8 秒、连一次」，
+        // 失败之后就掉进 `pollTick` 的「失败→重连→再失败」死循环，界面永远在转圈
+        // 「正在恢复连接」（2026-11-17 用户截图：关掉一个无线后一直重连）。
+        let steps: [Double] = [8, 8, 12, 12, 10]
+        for step in steps {
+            try? await Task.sleep(nanoseconds: UInt64(step * 1_000_000_000))
+            if await reconnect(force: true) { return }
+            // `reconnect` 失败时会把轮询接回来（它默认「会话可能还活着」）。
+            // 这会儿无线还没回来，让轮询对着死会话跑，只会再触发一轮重连，先按住。
+            pausePolling()
+        }
+        // 全部失败：手机基本已经不在路由器的 Wi-Fi 上了（比如刚把手机正连的那路关掉）。
+        // 停掉自动重连，并把唯一的出路写清楚——继续转圈只会让人以为 App 卡死了。
+        autoReconnectPaused = true
+        reconnecting = false
+        status = "连接中断"
+        presentError("已与路由器断开：手机可能已经掉出 Wi-Fi。请先在系统设置里连回路由器的其它信号，再回这里点右上角刷新。",
+                     seconds: 20)
+    }
+
+    /// 手机这一条 SSH 连接是从哪个无线接口进来的（`ra0` / `rai0`…；走有线时空串）。
+    ///
+    /// 关掉手机正在连的那一路无线 = App 立刻失联，**而且再也连不回来把它打开**——
+    /// 2026-11-17 用户就是把 2.4 GHz 关掉，手机掉出 Wi-Fi，App 一直转圈重连。
+    /// 判据全是读回来的数据：`$SSH_CLIENT` 给客户端 IP，`/proc/net/arp` 换成 MAC，
+    /// 再到各无线接口的关联表里找。**按接口比而不是按频段比**：手机连在访客 SSID 上时，
+    /// 关掉同频段的主 SSID 并不影响它，按频段比会误拦。
+    func linkInterfaceName() async -> String {
+        guard let text = try? await execute(linkBandCommand, timeout: 12) else { return "" }
+        for line in text.split(separator: "\n") where line.hasPrefix("LINK ") {
+            let parts = line.split(separator: " ")
+            guard parts.count >= 2 else { continue }
+            let value = String(parts[1]).trimmingCharacters(in: .whitespaces)
+            if !value.isEmpty, value != "?" { return value }
+        }
+        return ""
+    }
+
+    var linkBandCommand: String {
+        lowPriority("""
+        CL=$(echo "$SSH_CLIENT" | awk '{print $1}')
+        [ -n "$CL" ] || CL=$(echo "$SSH_CONNECTION" | awk '{print $1}')
+        [ -n "$CL" ] || exit 0
+        MAC=$(awk -v ip="$CL" '$1==ip{print $4}' /proc/net/arp 2>/dev/null | head -n 1)
+        case "$MAC" in ""|00:00:00:00:00:00) exit 0;; esac
+        for f in $(iwinfo 2>/dev/null | awk '/ESSID:/{print $1}'); do
+          iwinfo "$f" assoclist 2>/dev/null | grep -qi "$MAC" || continue
+          GH=$(iwinfo "$f" info 2>/dev/null | grep -o "[0-9][0-9]*[.][0-9][0-9]* GHz" | head -n 1 | awk '{print $1}')
+          case "$GH" in
+            2.*) echo "LINK $f 2.4";;
+            6.*) echo "LINK $f 6";;
+            5.*) echo "LINK $f 5";;
+            *) case "$f" in
+                 rai*) echo "LINK $f 5";;
+                 rax*) echo "LINK $f 6";;
+                 ra*) echo "LINK $f 2.4";;
+                 *) echo "LINK $f ?";;
+               esac;;
+          esac
+          exit 0
+        done
+        true
+        """)
     }
 
     /// 改一组网络的名称 / 密码 / 隐藏。返回 `nil` 表示成功。
