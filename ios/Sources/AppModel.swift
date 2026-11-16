@@ -1123,6 +1123,11 @@ private struct NetVap {
     /// `network` 指向的 netifd 接口名（`lan` / `guest` / `iot` / `wwan`）。
     /// 访客与 IoT 在 GL 固件里就是靠它区分的，比 `guest=1` 那种选项可靠。
     var network = ""
+    /// 802.11 multi-AP 的**回程 BSS**（`multi_ap=1`）。4.11.0 起固件会给每个 radio
+    /// 预置一条 `bbss5g`（SSID 叫 `bh-`、隐藏、`wds=1`），它是给 mesh 回程用的隧道，
+    /// 不是用户能连的网络，混进主网络就会多出一行「5 GHz bh-」。
+    /// 主 AP 自己是 `multi_ap=2`，旧固件干脆没有这个字段——两种情况都不会被误杀。
+    var backhaul = false
 }
 
     /// 网络页：把一轮采集拆成 `NetworkInfo`（v2.6.8 按官方 App 的字段重做）。
@@ -1365,6 +1370,19 @@ private struct NetVap {
                     }
                 }
             }
+
+            // 信号：固件 4.11.0（OpenWrt 25.12 基线 + MTK 新驱动）里 `iwinfo apclii0 info`
+            // 的 `Signal` 恒为 `0 dBm`——`iwinfo` 这支工具没从 nl80211 取到 BSS 信号，
+            // 实测值只在 `iw dev apclii0 station dump` 的 `signal: -68 [...] dBm` 里。
+            // 所以 0 就当成「没读到」，用 `@@UPSTA` 这一档补上；旧固件那两行本来就是
+            // 非 0，这段不会覆盖它。
+            if info.upstreamSignal == 0 {
+                let raw = (sections["UPSTA"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let head = raw.split(separator: " ").first.map(String.init) ?? ""
+                if let value = Int(head), value != 0 {
+                    info.upstreamSignal = value
+                }
+            }
         } else {
             info.upstreamSSID = ""
             info.upstreamSignal = 0
@@ -1504,6 +1522,9 @@ private struct NetVap {
             client.ip = (object["ip"] as? String) ?? ""
             client.online = (object["online"] as? Bool) ?? false
             client.iface = clientIfaceName((object["iface"] as? String) ?? "")
+            // 官方列表里还带着接入口名（`rai0` / `ra1` / `wlan3`）。频段计数用它，
+            // 比上面那个粗标签准；旧固件没这个键就是空串。
+            client.dev = (object["dev"] as? String) ?? ""
             client.totalRx = looseNumber(object["total_rx"]) ?? 0
             client.totalTx = looseNumber(object["total_tx"]) ?? 0
             client.rxSpeed = looseNumber(object["rx"]) ?? 0
@@ -1561,6 +1582,7 @@ private struct NetVap {
             vap.disabled = flag("disabled") == "1"
             vap.guest = flag("guest") == "1" || flag("iot") == "1" || flag("multi_ap") == "1"
             vap.network = flag("network")
+            vap.backhaul = flag("multi_ap") == "1"
             vaps.append(vap)
         }
 
@@ -1583,6 +1605,12 @@ private struct NetVap {
         var bands: [WifiBandInfo] = []
         for radio in radios {
             let bandCode = bandLabel(wifi["wireless.\(radio).band"] ?? "")
+            // 认不出频段的 radio 直接跳过，不要拿空标签凑一片叶子。
+            // v3.1.0 之前这里会继续走：4.11.0 固件给 HaLow 外挂写 `band='s1g'`，
+            // `bandLabel` 不认识就返回空串，于是频段名成了「无线」、排序还排在最前
+            // （`"" < "2.4" < "5"`），拓扑 `prefix(2)` 取的是它和 2.4G，5G 那片叶子
+            // 就此消失——用户截图里顶部只剩「无线 / 2.4 GHz」就是这么来的。
+            guard !bandCode.isEmpty else { continue }
             let radioOff = (wifi["wireless.\(radio).disabled"] ?? "0") == "1"
             let main = mainVap(radio: radio, band: bandCode)
 
@@ -1595,6 +1623,11 @@ private struct NetVap {
             band.up = !radioOff && band.ssidOn
             band.channel = Int(wifi["wireless.\(radio).channel"] ?? "") ?? 0
             band.width = widthDigits(wifi["wireless.\(radio).htmode"] ?? "")
+            // HaLow（`type='morse'`、`band='s1g'`）没有 `htmode`，带宽写在 `s1g_chanbw`
+            // （`8` 就是 8 MHz）。不读这个字段，Sub-1 GHz 那行的频宽会一直是空的。
+            if band.width.isEmpty {
+                band.width = widthDigits(wifi["wireless.\(radio).s1g_chanbw"] ?? "")
+            }
             // 写回配置要用的三样：段名、当前密码、是否隐藏。
             band.radio = radio
             band.section = main?.section ?? ""
@@ -1607,11 +1640,19 @@ private struct NetVap {
                 band.hidden = (wifi["wireless.\(sec).hidden"] ?? "0") == "1"
             }
 
-            // 台数：直接数官方客户端列表里接入方式等于这个频段、且在线的那几台。
+            // 台数：直接数官方客户端列表里**接在这个网口上**、且在线的那几台。
             // 以前数的是各 VAP 的 iwinfo 关联表——官方列表里有、关联表里没有的设备
             // （随机 MAC 一变就是这种局面）会漏数，现在两边用同一个口径。
+            //
+            // 优先按官方列表的 `dev`（`rai0` / `ra1` / `wlan3`）对：`iface` 只有
+            // 「2.4G / 5G / 有线」三个粗标签，HaLow 与 6G 都表达不出来。旧固件没有
+            // `dev` 时留空，退回去按标签比，和以前一模一样。
             let tag = band.band.isEmpty ? "" : "\(band.band)G"
-            band.clients = clients.filter { $0.online && $0.iface == tag }.count
+            band.clients = clients.filter { client in
+                guard client.online else { return false }
+                if !client.dev.isEmpty, !band.ifname.isEmpty { return client.dev == band.ifname }
+                return client.iface == tag
+            }.count
             band.extraNets = vaps.filter {
                 $0.radio == radio && $0.section != main?.section && !$0.disabled && $0.mode == "ap"
             }.count
@@ -1714,6 +1755,8 @@ private struct NetVap {
         let mainVaps = vaps.filter {
             $0.mode == "ap" && !claimed.contains($0.ifname)
                 && $0.network != "guest" && $0.network != "iot"
+                // 回程 BSS（`multi_ap=1`）不是给人连的网络，剔掉。
+                && !$0.backhaul
         }
         if let group = makeGroup(.main, mainVaps) { groups.append(group) }
         if let group = makeGroup(.guest, vaps.filter { $0.network == "guest" }) { groups.append(group) }
@@ -1744,6 +1787,8 @@ private struct NetVap {
     private func clientIfaceName(_ raw: String) -> String {
         let value = raw.lowercased()
         if value.contains("cable") || value.contains("eth") { return "有线" }
+        // HaLow 的接入标签官方给的是 `S1G` / `s1g`（4.11.0 起有这支外挂）。
+        if value == "s1g" || value.contains("s1g") { return "S1G" }
         if value.hasPrefix("6") { return "6G" }
         if value.hasPrefix("2") { return "2.4G" }
         if value.hasPrefix("5") { return "5G" }
@@ -2568,6 +2613,9 @@ private struct NetVap {
     /// UCI 的 `band`：`2g` / `5g` / `6g`（个别固件写 `2.4g`）。
     private func bandLabel(_ code: String) -> String {
         let value = code.trimmingCharacters(in: .whitespaces).lowercased()
+        // HaLow：`s1g`（官方界面叫 Sub-1 GHz）。4.11.0 固件挂上 HaLow 外挂才会有这个值，
+        // 认成 `S1G` 之后排序自然落在 2.4 / 5 / 6 后面，拓扑那两片叶子不受影响。
+        if value == "s1g" || value == "1g" { return "S1G" }
         if value.hasPrefix("6") { return "6" }
         if value.hasPrefix("5") { return "5" }
         if value.hasPrefix("2") { return "2.4" }
@@ -4635,6 +4683,12 @@ private extension AppModel {
             cat /tmp/dhcp.leases 2>/dev/null
             echo @@UPWIFI
             iwinfo apclii0 info 2>/dev/null || iwinfo apcli0 info 2>/dev/null
+            echo @@UPSTA
+            for i in apclii0 apcli0; do
+              [ -d "/sys/class/net/$i" ] || continue
+              S=$(iw dev "$i" station dump 2>/dev/null | sed -n 's/^[[:space:]]*signal:[[:space:]]*//p' | head -n 1)
+              [ -n "$S" ] && { echo "$S"; break; }
+            done
             echo @@LEASEN
             wc -l < /tmp/dhcp.leases 2>/dev/null
             echo @@NETCFG
@@ -4642,7 +4696,7 @@ private extension AppModel {
             echo @@DHCPCFG
             uci show dhcp 2>/dev/null
             echo @@WLCFG
-            uci show wireless 2>/dev/null | grep -E '\\.(band|channel|htmode|txpower|disabled|ssid|ifname|iface|mldgroup|network|mode|device|encryption|guest|iot|multi_ap|key|hidden)='
+            uci show wireless 2>/dev/null | grep -E '\\.(band|channel|htmode|s1g_chanbw|txpower|disabled|ssid|ifname|iface|mldgroup|network|mode|device|encryption|guest|iot|multi_ap|key|hidden)='
             echo @@WLSTA
             for i in $(uci show wireless 2>/dev/null | sed -n "s/^wireless\\.[^.=]*\\.ifname='\\(.*\\)'/\\1/p"); do
               [ -d "/sys/class/net/$i" ] || continue

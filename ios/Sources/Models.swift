@@ -434,6 +434,10 @@ struct NetClient: Identifiable, Equatable {
     var ip = ""
     /// `2.4G` / `5G` / `6G` / `有线`
     var iface = ""
+    /// 官方列表给的接入口名（`rai0` / `ra1` / `wlan3`）。比 `iface` 那三个粗标签精确，
+    /// 数某个频段有多少台时按它对——HaLow（`wlan3`）这种 `iface` 认不出来的也能算进去。
+    /// 旧固件没这个字段时留空，退回按 `iface` 比。
+    var dev = ""
     var online = false
     var totalRx: Double = 0
     var totalTx: Double = 0
@@ -597,7 +601,14 @@ struct WifiBandInfo: Identifiable, Equatable {
 
     var id: String { ifname.isEmpty ? band : ifname }
 
-    var bandName: String { band.isEmpty ? "无线" : "\(band) GHz" }
+    /// 官方对 `s1g` 的叫法就是 **Sub-1 GHz**（见 `gl-sdk4-ui-wireless` 里那张频段名表：
+    /// `{"2g":"2.4 GHz", …, s1g:"Sub-1 GHz", mld:"MLO"}`）。固件 4.11.0 起这台机器
+    /// 可能挂一支 HaLow 外挂（`wireless.halow0`，`band='s1g'`），照旧拼成「S1G GHz」就成了乱码。
+    var bandName: String {
+        if band.isEmpty { return "无线" }
+        if band == "S1G" { return "Sub-1 GHz" }
+        return "\(band) GHz"
+    }
 
     var channelLabel: String {
         var parts: [String] = []
@@ -621,7 +632,10 @@ struct WifiBandInfo: Identifiable, Equatable {
     /// 这一频段能选的频宽。MT7993 的 2.4G 最高 EHT40、5G 最高 EHT160（固件
     /// `wifi-features-MT7993_1_1/_1_2` 里写死的），列超过上限的选项只会让路由器拒收。
     var widthOptions: [String] {
-        band == "2.4" ? ["20", "40"] : ["20", "40", "80", "160"]
+        // Sub-1 GHz 的带宽写在 `s1g_chanbw`（1/2/4/8 MHz），和 2.4/5/6 的 `htmode`
+        // 不是一套东西，所以这里不给选项——那个频段的带宽不在这一页改。
+        if band == "S1G" { return [] }
+        return band == "2.4" ? ["20", "40"] : ["20", "40", "80", "160"]
     }
 
     /// 可选信道。5G 只列非 DFS 的那几段——DFS 信道要等 60 秒雷达检测，
