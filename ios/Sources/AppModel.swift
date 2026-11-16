@@ -3507,7 +3507,7 @@ private struct NetVap {
         do {
             let output = try await execute(fanWriteCommand(assignments))
             guard output.contains("committed") else {
-                presentError("写入风扇配置失败，请确认路由器上已安装 gl-fanctrl 插件")
+                presentError("风扇配置没有写进去：检查 gl-fanctrl 是否装好，或温度参数是否被插件校验拒绝")
                 return
             }
             // 给守护进程一点时间重新起风、把转速读出来，再回读状态。
@@ -3895,21 +3895,38 @@ private struct NetVap {
     }
 
     private func updateSensors(temp: String, fan: String, pwm: String) {
-        let temps = temp.split(separator: "\n").compactMap { line -> Double? in
+        // `TC` 是风扇插件自己读的那颗（`/proc/gl-hw-info/temperature` 指向的
+        // cpu-thermal），`T` 是其余所有温区。概览这块「温度」和风扇页必须是同一个
+        // 数——v3.1.1 及以前这里只取 `max()`，而这台机器 eth2p5g 的温度常年比 CPU
+        // 高 1 度，于是概览 59.8、风扇页 59.2，差着一点点但看着像两个传感器。
+        var cpuTemp: Double?
+        var temps: [Double] = []
+        for line in temp.split(separator: "\n") {
             let parts = line.split(separator: " ")
-            guard parts.count >= 2, parts[0] == "T" else { return nil }
-            let value = Double(parts[1]) ?? 0
-            return value > 1000 ? value / 1000 : value
+            guard parts.count >= 2, let raw = Double(parts[1]) else { continue }
+            let value = raw > 1000 ? raw / 1000 : raw
+            // 显式转成 String 再 switch：`parts[0]` 是 Substring，本机没有编译器，
+            // 与其赌字面量推断，不如老老实实转一次（这个工程被 Substring 坑过一次）。
+            switch String(parts[0]) {
+            case "TC": if value > 0 { cpuTemp = value }
+            case "T": temps.append(value)
+            default: break
+            }
         }
-        if let value = temps.max(), value > 0 { stats.temperature = value }
+        if let value = cpuTemp ?? temps.max(), value > 0 { stats.temperature = value }
+
         let fans = fan.split(separator: "\n").compactMap { line -> Double? in
             let parts = line.split(separator: " ")
             guard parts.count >= 2, parts[0] == "F" else { return nil }
             return Double(parts[1])
         }
-        if let value = fans.max(), value > 0 { stats.fanRPM = value }
-        // 0 是有效值（风扇停着），所以只在解析出东西时才覆盖；一次读空留着上一拍，
-        // 免得轮询抖一下徽标就消失。
+        // **0 必须收下来**（v3.1.2，用户截图「风扇静止却显示 952 RPM」）。
+        // 停转 `pwm=0` 时 `fan*_input` 确实回 0（固件 4.11.0 实测：写 0% 后
+        // 一秒内归零），可这里原来写的是 `value > 0`，0 被当成「没读到」丢掉，
+        // 于是最后一拍的非零转速永远留在卡片上——左下角写着「静止」，
+        // 右边却一直显示 952 RPM，风扇页那边的 `fan.rpm` 反而是 0，两处还对不上。
+        // 空段（这一次真没读到）仍然不动，只是不再把 0 当无效值。
+        if let value = fans.max() { stats.fanRPM = value }
         if let value = parseFanPWM(pwm) { stats.fanPWM = value }
     }
 
@@ -4301,9 +4318,16 @@ private extension AppModel {
 
     /// 风扇状态：一次取回插件配置、温度、转速、PWM 和两个服务的运行情况。
     ///
-    /// 路径顺序照 gl-fanctrl README 的探测顺序来：先 `/proc/gl-hw-info/*`（GL 固件
-    /// 自己维护的，最准），再退到标准 sysfs。整段没有单引号，能安全塞进
-    /// `lowPriority` 的 `sh -c '...'` 里。
+    /// `/proc/gl-hw-info/temperature` 和 `/proc/gl-hw-info/fan` 里**装的是路径提示，
+    /// 不是数值**（4.11.0 实测分别是 `/sys/devices/…/thermal_zone0/temp` 和
+    /// `hwmon0 cooling_device0`）。原来直接把这两个文件 `cat` 进温度段/转速段，
+    /// 靠 `firstNumber` 跳过非数字行才没出错——这里改成**照着提示解出真文件再读**，
+    /// 顺便补上插件自己也会看的 `/proc/gl-hw-info/fan_speed`（有些 GL-MT 机型没有
+    /// hwmon 转速文件，只有这个）。
+    ///
+    /// 还有一处坑：`/proc/gl-hw-info/fan` 提示的 `hwmon0` 在这台机器上是 cpu_thermal，
+    /// **根本没有 fan 输入**，真正的转速在 `hwmon3`（`pwmfan`）。所以转速这里只认
+    /// `hwmon*/fan*_input` 全扫，不照着提示取单个目录。
     ///
     /// **守护进程的判断必须用 `ps w`**（v3.1.1，2026-11-16 用户截图「一直显示守护未运行」）：
     /// BusyBox 的 `ps` 在没有 tty 时按 **80 列**截断命令行，守护进程的
@@ -4317,13 +4341,14 @@ private extension AppModel {
         if [ -f /etc/config/gl_fanctrl ]; then echo installed; else echo missing; fi
         uci -q show gl_fanctrl 2>/dev/null
         echo @@FANTEMP
-        cat /proc/gl-hw-info/temperature 2>/dev/null
+        p=$(sed -n 1p /proc/gl-hw-info/temperature 2>/dev/null)
+        if [ -n "$p" ] && [ -r "$p" ]; then read -r v < "$p"; echo "$v"; fi
         for f in /sys/class/thermal/thermal_zone*/temp; do
           if [ -r "$f" ]; then read -r v < "$f"; echo "$v"; break; fi
         done
         echo @@FANRPM
-        cat /proc/gl-hw-info/fan 2>/dev/null
-        for f in /sys/class/hwmon/hwmon*/fan1_input; do
+        if [ -r /proc/gl-hw-info/fan_speed ]; then read -r v < /proc/gl-hw-info/fan_speed; echo "$v"; fi
+        for f in /sys/class/hwmon/hwmon*/fan*_input; do
           if [ -r "$f" ]; then read -r v < "$f"; echo "$v"; break; fi
         done
         echo @@FANPWM
@@ -4348,13 +4373,14 @@ private extension AppModel {
     var fanRuntimeCommand: String {
         lowPriority("""
         echo @@FANTEMP
-        cat /proc/gl-hw-info/temperature 2>/dev/null
+        p=$(sed -n 1p /proc/gl-hw-info/temperature 2>/dev/null)
+        if [ -n "$p" ] && [ -r "$p" ]; then read -r v < "$p"; echo "$v"; fi
         for f in /sys/class/thermal/thermal_zone*/temp; do
           if [ -r "$f" ]; then read -r v < "$f"; echo "$v"; break; fi
         done
         echo @@FANRPM
-        cat /proc/gl-hw-info/fan 2>/dev/null
-        for f in /sys/class/hwmon/hwmon*/fan1_input; do
+        if [ -r /proc/gl-hw-info/fan_speed ]; then read -r v < /proc/gl-hw-info/fan_speed; echo "$v"; fi
+        for f in /sys/class/hwmon/hwmon*/fan*_input; do
           if [ -r "$f" ]; then read -r v < "$f"; echo "$v"; break; fi
         done
         echo @@FANPWM
@@ -4584,10 +4610,13 @@ private extension AppModel {
         case .sensors:
             return """
             echo @@TEMP
+            p=$(sed -n 1p /proc/gl-hw-info/temperature 2>/dev/null)
+            if [ -n "$p" ] && [ -r "$p" ]; then read -r v < "$p"; echo "TC $v"; fi
             for f in /sys/class/thermal/thermal_zone*/temp /sys/class/hwmon/hwmon*/temp*_input; do
               if [ -r "$f" ]; then read -r v < "$f"; echo "T $v"; fi
             done
             echo @@FAN
+            if [ -r /proc/gl-hw-info/fan_speed ]; then read -r v < /proc/gl-hw-info/fan_speed; echo "F $v"; fi
             for f in /sys/class/hwmon/hwmon*/fan*_input; do
               if [ -r "$f" ]; then read -r v < "$f"; echo "F $v"; fi
             done

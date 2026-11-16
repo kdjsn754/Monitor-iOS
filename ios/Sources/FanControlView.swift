@@ -32,6 +32,13 @@ struct FanControlView: View {
     @State private var draftMode: FanControlState.Mode = .auto
     @State private var manualValue: Double = 0
     @State private var confirmReset = false
+    /// 接管开关按下之后、回读落地之前的临时值。
+    ///
+    /// 开关的 `get` 直接读 `model.fan.enabled`，而写入要 `uci set` + commit + 重启服务
+    /// 再回读，前后 1~2 秒。这段时间里 body 会重绘好几次，每次都拿旧值，开关就会
+    /// 先跳到新位置、再弹回去、等回读到了又跳一次——用户看到的是「点了没用」。
+    /// 用本地值顶住，写完再交还给真实值（失败时也自然弹回，正好是真实状态）。
+    @State private var pendingEnabled: Bool?
 
     var body: some View {
         ScrollView {
@@ -207,8 +214,15 @@ struct FanControlView: View {
                         ProgressView().controlSize(.mini)
                     }
                     Toggle("由插件接管风扇", isOn: Binding(
-                        get: { model.fan.enabled },
-                        set: { value in Task { await model.setFanEnabled(value) } }
+                        get: { pendingEnabled ?? model.fan.enabled },
+                        set: { value in
+                            guard value != model.fan.enabled else { pendingEnabled = nil; return }
+                            pendingEnabled = value
+                            Task {
+                                await model.setFanEnabled(value)
+                                pendingEnabled = nil
+                            }
+                        }
                     ))
                     .labelsHidden()
                     .blueSwitch()
