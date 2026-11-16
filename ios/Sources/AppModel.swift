@@ -2476,6 +2476,18 @@ private struct NetVap {
                        hidden: band.hidden, enabled: on)
     }
 
+    /// `/etc/config/gl-client` 只有在**第一次**改设备名 / 归类的时候才会被建出来。
+    ///
+    /// GL 4.9.0 的出厂镜像里没有这个文件，官方自己的实现（
+    /// `/usr/lib/oui-httpd/rpc/clients`）是「先 `touch` 一个空文件再 `uci add`」。
+    /// 少了这一步，`uci add gl-client client` 返回 3（`uci: Entry not found`），
+    /// 而且**不会顺手把文件建出来**——于是改名、改类型全都在回读那一步失败，
+    /// 界面报「没写进去」。2026-11-17 用户报的「改不了名称 / 设备类型也改不了」
+    /// 就是这个（当时路由器的 `/etc/config/gl-client` 根本不存在）。
+    private var ensureGlClientConfig: String {
+        "[ -f /etc/config/gl-client ] || touch /etc/config/gl-client"
+    }
+
     /// 给一台设备改名（写 `gl-client` 的 `alias`，官方 App 显示的也是这一项）。
     /// 传空字符串等于清掉别名，界面退回 IP / MAC。
     @discardableResult
@@ -2487,6 +2499,8 @@ private struct NetVap {
         if alias.count > 32 { return "名称不能超过 32 个字符" }
 
         var lines: [String] = []
+        // 先把配置文件备好（旧固件上这个文件可能还不存在，见上面 `ensureGlClientConfig`）。
+        lines.append(ensureGlClientConfig)
         // 先按 MAC 找已有的段；没有就新建一段——GL 自己的客户端表也是这么存的。
         lines.append("S=$(uci -q show gl-client 2>/dev/null | grep -i \(shQuote(target)) | head -1 | cut -d. -f2)")
         lines.append("if [ -z \"$S\" ]; then uci -q add gl-client client >/dev/null; S=@client[-1]; uci -q set gl-client.$S.mac=\(shQuote(target)); fi")
@@ -2578,6 +2592,8 @@ private struct NetVap {
         // `@client[-1]` 里的方括号也一样要用双引号包住，否则 shell 当通配符。
         let pattern = "^gl-client\\.[^.]*\\.mac='" + target + "'$"
         var lines: [String] = []
+        // 老固件上还没有这个配置文件时先建出来，否则 `uci add` 直接失败（见 `ensureGlClientConfig`）。
+        lines.append(ensureGlClientConfig)
         lines.append("S=$(uci -q show gl-client 2>/dev/null | grep -i \(shQuote(pattern)) | cut -d. -f1,2 | head -1)")
         lines.append("[ -n \"$S\" ] && uci -q set \"$S.class=\(picked.rawValue)\"")
         lines.append("[ -z \"$S\" ] && uci -q add gl-client client && uci -q set \"gl-client.@client[-1].mac=\(target)\" && uci -q set \"gl-client.@client[-1].class=\(picked.rawValue)\"")
