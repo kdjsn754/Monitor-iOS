@@ -1586,6 +1586,16 @@ private struct NetVap {
             vaps.append(vap)
         }
 
+        // **Sub-1 GHz 不上屏**（用户 2026-11-16 22:53：「Sub-1 GHz 这个隐藏掉」）。
+        //
+        // 4.11.0 给 HaLow 外挂建了一条 `wifis1g0`（`band='s1g'`，SSID `GL-Dongle-…-S1G`），
+        // 它 `network=lan`，会以第三行的形式混进「主网络」。用户不要它。
+        // 这里按**频段**剔除，不按段名：`bandLabel` 已经把 `s1g` 认成 `S1G`，
+        // 采集照旧（数据都在），只是不进分组、也不占频段位。以后要放出来，删掉这一段即可。
+        vaps.removeAll { vap in
+            bandLabel(wifi["wireless.\(vap.radio).band"] ?? "") == "S1G"
+        }
+
         // 主 SSID 的接口：MTK 固定 ra0 / rai0 / rax0，优先按名字认；认不出来就取
         // 第一个「不是访客、不是中继」的 AP。访客 / IoT / MLO 全都挂在同一个 radio 上。
         func mainVap(radio: String, band: String) -> NetVap? {
@@ -1610,7 +1620,9 @@ private struct NetVap {
             // `bandLabel` 不认识就返回空串，于是频段名成了「无线」、排序还排在最前
             // （`"" < "2.4" < "5"`），拓扑 `prefix(2)` 取的是它和 2.4G，5G 那片叶子
             // 就此消失——用户截图里顶部只剩「无线 / 2.4 GHz」就是这么来的。
-            guard !bandCode.isEmpty else { continue }
+            //
+            // `S1G`（HaLow）现在也跳过：用户 2026-11-16 要求把它隐藏，见上面 `vaps.removeAll`。
+            guard !bandCode.isEmpty, bandCode != "S1G" else { continue }
             let radioOff = (wifi["wireless.\(radio).disabled"] ?? "0") == "1"
             let main = mainVap(radio: radio, band: bandCode)
 
@@ -4292,6 +4304,13 @@ private extension AppModel {
     /// 路径顺序照 gl-fanctrl README 的探测顺序来：先 `/proc/gl-hw-info/*`（GL 固件
     /// 自己维护的，最准），再退到标准 sysfs。整段没有单引号，能安全塞进
     /// `lowPriority` 的 `sh -c '...'` 里。
+    ///
+    /// **守护进程的判断必须用 `ps w`**（v3.1.1，2026-11-16 用户截图「一直显示守护未运行」）：
+    /// BusyBox 的 `ps` 在没有 tty 时按 **80 列**截断命令行，守护进程的
+    /// `/bin/sh /usr/sbin/gl-fanctrl-daemon` 正好被切在 `…-daemo`（少最后一个 `n`），
+    /// 于是 `grep gl-fanctrl-daemon` 永远不中，界面就一直报「守护进程未运行」——
+    /// 而 `ps` 第 11516 号进程明明还在跑（固件 4.11.0 实测）。
+    /// `ps w`（wide）不截断；后面那个不带 `w` 的再兜一层，防某些固件的 `ps` 不认这个参数。
     var fanStatusCommand: String {
         lowPriority("""
         echo @@FANCTRL
@@ -4317,7 +4336,7 @@ private extension AppModel {
           fi
         done
         echo @@FANSVC
-        if ps 2>/dev/null | grep -q "[g]l-fanctrl-daemon"; then echo plugin=1; else echo plugin=0; fi
+        if ps w 2>/dev/null | grep -q "[g]l-fanctrl-daemon" || ps 2>/dev/null | grep -q "[g]l-fanctrl-daemon"; then echo plugin=1; else echo plugin=0; fi
         true
         """)
     }
@@ -4348,7 +4367,7 @@ private extension AppModel {
           fi
         done
         echo @@FANSVC
-        if ps 2>/dev/null | grep -q "[g]l-fanctrl-daemon"; then echo plugin=1; else echo plugin=0; fi
+        if ps w 2>/dev/null | grep -q "[g]l-fanctrl-daemon" || ps 2>/dev/null | grep -q "[g]l-fanctrl-daemon"; then echo plugin=1; else echo plugin=0; fi
         true
         """)
     }
