@@ -3422,8 +3422,7 @@ private struct NetVap {
                 fan.pwmPercent = pwm
             }
             for line in (sections["FANSVC"] ?? "").split(separator: "\n") {
-                if line.hasPrefix("gl=") { fan.glDaemonRunning = line.hasSuffix("1") }
-                if line.hasPrefix("fc=") { fan.fcDaemonRunning = line.hasSuffix("1") }
+                if line.hasPrefix("plugin=") { fan.pluginRunning = line.hasSuffix("1") }
             }
         } catch {
             return
@@ -3506,11 +3505,9 @@ private struct NetVap {
         fanBusy = true
         defer { fanBusy = false }
         do {
-            let output = try await execute(
-                fanWriteCommand(assignments, plugin: fan.pluginPackage, init: fan.initScript)
-            )
+            let output = try await execute(fanWriteCommand(assignments))
             guard output.contains("committed") else {
-                presentError("风扇配置没有写进去：检查插件是否装好，或温度参数是否被插件校验拒绝")
+                presentError("风扇配置没有写进去：检查 gl-fanctrl 是否装好，或温度参数是否被插件校验拒绝")
                 return
             }
             // 给守护进程一点时间重新起风、把转速读出来，再回读状态。
@@ -3546,10 +3543,6 @@ private struct NetVap {
             case "max_percent": state.maxPercent = Int(Double(value) ?? 100)
             case "manual_percent": state.manualPercent = Int(Double(value) ?? 0)
             case "poll_interval": state.pollInterval = Int(Double(value) ?? 2)
-            // 后端身份：`gl_fanctrl`（GL 固件自带）或 `fanctrl`（ImmortalWrt 的 luci-app-fanctrl）。
-            // 写操作要用包名和 init 名，读一次记下来，后面照着写。
-            case "pkg": state.pluginPackage = value
-            case "init": state.initScript = value
             default: break
             }
         }
@@ -3570,8 +3563,7 @@ private struct NetVap {
         }
 
         for line in (sections["FANSVC"] ?? "").split(separator: "\n") {
-            if line.hasPrefix("gl=") { state.glDaemonRunning = line.hasSuffix("1") }
-            if line.hasPrefix("fc=") { state.fcDaemonRunning = line.hasSuffix("1") }
+            if line.hasPrefix("plugin=") { state.pluginRunning = line.hasSuffix("1") }
         }
         return state
     }
@@ -3579,15 +3571,6 @@ private struct NetVap {
     /// `type cur_state max_state` 一行一台 cooling_device，换算成百分比。
     /// 全量读和只读运行态两条路径共用，免得两处口径慢慢走偏。
     private func parseFanPWM(_ text: String) -> Int? {
-        // 优先 hwmon 的 `pwm1`（0~255，1% 步进）。ImmortalWrt 的 luci-app-fanctrl 写的就是它，
-        // 而那台机器的 cooling_device0 只有 0/1/2 三档（`max_state=2`），拿它换算只能得到
-        // 0/50/100——实测 73% 会被读成 50%。GL 固件两个来源本来就是同一个寄存器，读哪个都一致。
-        for line in text.split(separator: "\n") {
-            let trimmed = String(line).trimmingCharacters(in: .whitespaces)
-            guard trimmed.hasPrefix("pwm=") else { continue }
-            guard let raw = Int(trimmed.dropFirst(4)) else { continue }
-            return Int((Double(raw) / 255 * 100).rounded())
-        }
         var pwm: (current: Int, max: Int)?
         for line in text.split(separator: "\n") {
             let fields = line.split(separator: " ")
@@ -4333,121 +4316,86 @@ private extension AppModel {
         """)
     }
 
-    /// 风扇插件的探测段：这台机器装的是哪个后端、它的配置，以及两个守护进程谁在跑。
+    /// 风扇状态：一次取回插件配置、温度、转速、PWM 和两个服务的运行情况。
     ///
-    /// **两个后端可以共存，App 自己认**（用户 2026-11-17：「两个风扇控制能共存，软件自动识别是什么插件」）：
+    /// `/proc/gl-hw-info/temperature` 和 `/proc/gl-hw-info/fan` 里**装的是路径提示，
+    /// 不是数值**（4.11.0 实测分别是 `/sys/devices/…/thermal_zone0/temp` 和
+    /// `hwmon0 cooling_device0`）。原来直接把这两个文件 `cat` 进温度段/转速段，
+    /// 靠 `firstNumber` 跳过非数字行才没出错——这里改成**照着提示解出真文件再读**，
+    /// 顺便补上插件自己也会看的 `/proc/gl-hw-info/fan_speed`（有些 GL-MT 机型没有
+    /// hwmon 转速文件，只有这个）。
     ///
-    /// | | GL 固件自带 | ImmortalWrt 的 `luci-app-fanctrl` |
-    /// | --- | --- | --- |
-    /// | UCI 包 | `gl_fanctrl` | `fanctrl` |
-    /// | init | `/etc/init.d/gl_fanctrl` | `/etc/init.d/fanctrl` |
-    /// | 守护进程 | `/usr/sbin/gl-fanctrl-daemon` | `/usr/sbin/fanctrl-daemon` |
+    /// 还有一处坑：`/proc/gl-hw-info/fan` 提示的 `hwmon0` 在这台机器上是 cpu_thermal，
+    /// **根本没有 fan 输入**，真正的转速在 `hwmon3`（`pwmfan`）。所以转速这里只认
+    /// `hwmon*/fan*_input` 全扫，不照着提示取单个目录。
     ///
-    /// 两者的 UCI 结构完全一样（`config globals 'globals'` + 同样十个键），所以界面、
-    /// 解析、写操作全部共用一套，只把上面三处名字当变量。
-    /// 选择用打分：`配置文件在`(1) + `守护进程在跑`(1) + `enabled=1`(2)，分高的胜，
-    /// 平手取 GL（原生固件优先）。两个都装、只有一个 enabled=1 时，选的是 enabled 那个。
-    private var fanPluginScript: String {
-        """
+    /// **守护进程的判断必须用 `ps w`**（v3.1.1，2026-11-16 用户截图「一直显示守护未运行」）：
+    /// BusyBox 的 `ps` 在没有 tty 时按 **80 列**截断命令行，守护进程的
+    /// `/bin/sh /usr/sbin/gl-fanctrl-daemon` 正好被切在 `…-daemo`（少最后一个 `n`），
+    /// 于是 `grep gl-fanctrl-daemon` 永远不中，界面就一直报「守护进程未运行」——
+    /// 而 `ps` 第 11516 号进程明明还在跑（固件 4.11.0 实测）。
+    /// `ps w`（wide）不截断；后面那个不带 `w` 的再兜一层，防某些固件的 `ps` 不认这个参数。
+    var fanStatusCommand: String {
+        lowPriority("""
         echo @@FANCTRL
-        gl_on=$(uci -q get gl_fanctrl.globals.enabled 2>/dev/null)
-        fc_on=$(uci -q get fanctrl.globals.enabled 2>/dev/null)
-        gl_run=0; fc_run=0
-        ps w 2>/dev/null | grep -q "[/]usr/sbin/gl-fanctrl-daemon" && gl_run=1
-        ps w 2>/dev/null | grep -q "[/]usr/sbin/fanctrl-daemon" && fc_run=1
-        gl=0; fc=0
-        if [ -f /etc/config/gl_fanctrl ]; then
-          gl=1
-          [ "$gl_run" = 1 ] && gl=$((gl + 1))
-          [ "$gl_on" = 1 ] && gl=$((gl + 2))
-        fi
-        if [ -f /etc/config/fanctrl ]; then
-          fc=1
-          [ "$fc_run" = 1 ] && fc=$((fc + 1))
-          [ "$fc_on" = 1 ] && fc=$((fc + 2))
-        fi
-        if [ "$gl" = 0 ] && [ "$fc" = 0 ]; then
-          echo missing
-        else
-          echo installed
-          if [ "$fc" -gt "$gl" ]; then
-            echo pkg=fanctrl
-            echo init=fanctrl
-            uci -q show fanctrl 2>/dev/null
-          else
-            echo pkg=gl_fanctrl
-            echo init=gl_fanctrl
-            uci -q show gl_fanctrl 2>/dev/null
-          fi
-        fi
-        """
-    }
-
-    /// 风扇运行态：温度、转速、PWM、两个守护进程的存活。
-    ///
-    /// **`/proc/gl-hw-info/*` 里装的是路径提示，不是数值**（GL 4.11.0 实测）：
-    /// `temperature` 指向 `/sys/devices/…/thermal_zone0/temp`，`fan` 是 `hwmon0 cooling_device0`。
-    /// ImmortalWrt 上整个 `/proc/gl-hw-info` 都不存在，这时按温区 `type` 找 `cpu-thermal`
-    /// ——两套固件的风扇温控读的都是它，概览和风扇页才会是同一个数。
-    ///
-    /// **PWM 优先读 hwmon 的 `pwm1`**：ImmortalWrt 的 `luci-app-fanctrl` 直接写这个 0~255 的
-    /// 寄存器，而那台机器的 `cooling_device0` 只有 0/1/2 三档（`max_state=2`），
-    /// 拿它换算只能得到 0/50/100——实测 73% 会被读成 50%。
-    ///
-    /// **守护进程用 `ps w`**（v3.1.1 的教训）：BusyBox 的 `ps` 无 tty 时按 80 列截断，
-    /// 路径末尾会被切掉，`grep` 永远不中。路径前面那个 `[/]` 是为了不匹配到自己这条命令。
-    private var fanProbeScript: String {
-        """
+        if [ -f /etc/config/gl_fanctrl ]; then echo installed; else echo missing; fi
+        uci -q show gl_fanctrl 2>/dev/null
         echo @@FANTEMP
-        tp=$(sed -n 1p /proc/gl-hw-info/temperature 2>/dev/null)
-        if [ -z "$tp" ] || [ ! -r "$tp" ]; then
-          for z in /sys/class/thermal/thermal_zone*; do
-            case "$(cat "$z/type" 2>/dev/null)" in
-              cpu-thermal|soc-thermal) tp="$z/temp"; break ;;
-            esac
-          done
-        fi
-        if [ -z "$tp" ] || [ ! -r "$tp" ]; then
-          for z in /sys/class/thermal/thermal_zone*; do
-            if [ -r "$z/temp" ]; then tp="$z/temp"; break; fi
-          done
-        fi
-        if [ -n "$tp" ] && [ -r "$tp" ]; then read -r v < "$tp"; echo "$v"; fi
+        p=$(sed -n 1p /proc/gl-hw-info/temperature 2>/dev/null)
+        if [ -n "$p" ] && [ -r "$p" ]; then read -r v < "$p"; echo "$v"; fi
+        for f in /sys/class/thermal/thermal_zone*/temp; do
+          if [ -r "$f" ]; then read -r v < "$f"; echo "$v"; break; fi
+        done
         echo @@FANRPM
         if [ -r /proc/gl-hw-info/fan_speed ]; then read -r v < /proc/gl-hw-info/fan_speed; echo "$v"; fi
         for f in /sys/class/hwmon/hwmon*/fan*_input; do
           if [ -r "$f" ]; then read -r v < "$f"; echo "$v"; break; fi
         done
         echo @@FANPWM
-        for d in /sys/class/hwmon/hwmon*; do
-          if [ -r "$d/pwm1" ]; then read -r v < "$d/pwm1"; echo "pwm=$v"; break; fi
-        done
         for d in /sys/class/thermal/cooling_device*; do
           if [ -r "$d/cur_state" ]; then
-            ty=$(cat "$d/type" 2>/dev/null)
-            [ -n "$ty" ] || ty=unknown
+            t=$(cat "$d/type" 2>/dev/null)
             c=$(cat "$d/cur_state" 2>/dev/null)
             m=$(cat "$d/max_state" 2>/dev/null)
-            echo "$ty $c $m"
+            echo "$t $c $m"
           fi
         done
         echo @@FANSVC
-        if ps w 2>/dev/null | grep -q "[/]usr/sbin/gl-fanctrl-daemon"; then echo gl=1; else echo gl=0; fi
-        if ps w 2>/dev/null | grep -q "[/]usr/sbin/fanctrl-daemon"; then echo fc=1; else echo fc=0; fi
-        """
+        if ps w 2>/dev/null | grep -q "[g]l-fanctrl-daemon" || ps 2>/dev/null | grep -q "[g]l-fanctrl-daemon"; then echo plugin=1; else echo plugin=0; fi
+        true
+        """)
     }
 
-    /// 风扇状态：插件配置 + 运行态，一次取全。进页面、点刷新、每次写完回读都走这条。
-    var fanStatusCommand: String {
-        lowPriority(fanPluginScript + "\n" + fanProbeScript + "\ntrue")
-    }
-
-    /// 面板轮询用的轻量版：只有运行态，没有 `uci show`。
+    /// 面板轮询用的轻量版：只有温度、转速、PWM、守护进程，没有 `uci show`。
     ///
-    /// 配置一天也变不了一次，没必要每 2 秒搬十几行回来；
-    /// 探测段和 `fanStatusCommand` 是**同一段代码**，两个口子读数不会打架。
+    /// 配置那一段一天也变不了一次，没必要每 2 秒搬十几行回来；
+    /// 探测路径和 `fanStatusCommand` 保持一致，两个口子读数才不会打架。
     var fanRuntimeCommand: String {
-        lowPriority(fanProbeScript + "\ntrue")
+        lowPriority("""
+        echo @@FANTEMP
+        p=$(sed -n 1p /proc/gl-hw-info/temperature 2>/dev/null)
+        if [ -n "$p" ] && [ -r "$p" ]; then read -r v < "$p"; echo "$v"; fi
+        for f in /sys/class/thermal/thermal_zone*/temp; do
+          if [ -r "$f" ]; then read -r v < "$f"; echo "$v"; break; fi
+        done
+        echo @@FANRPM
+        if [ -r /proc/gl-hw-info/fan_speed ]; then read -r v < /proc/gl-hw-info/fan_speed; echo "$v"; fi
+        for f in /sys/class/hwmon/hwmon*/fan*_input; do
+          if [ -r "$f" ]; then read -r v < "$f"; echo "$v"; break; fi
+        done
+        echo @@FANPWM
+        for d in /sys/class/thermal/cooling_device*; do
+          if [ -r "$d/cur_state" ]; then
+            t=$(cat "$d/type" 2>/dev/null)
+            c=$(cat "$d/cur_state" 2>/dev/null)
+            m=$(cat "$d/max_state" 2>/dev/null)
+            echo "$t $c $m"
+          fi
+        done
+        echo @@FANSVC
+        if ps w 2>/dev/null | grep -q "[g]l-fanctrl-daemon" || ps 2>/dev/null | grep -q "[g]l-fanctrl-daemon"; then echo plugin=1; else echo plugin=0; fi
+        true
+        """)
     }
 
     /// 写风扇配置：定位段名 → 逐项 uci set → commit → 重启插件服务。
@@ -4458,19 +4406,17 @@ private extension AppModel {
     ///
     /// 这段**不能**套 `lowPriority`：里面用了 `$S` 变量和 awk 的单引号，
     /// 被再包一层 `sh -c '…'` 会全部失效。
-    func fanWriteCommand(_ assignments: [(String, String)],
-                         plugin pluginPackage: String,
-                         init initScript: String) -> String {
+    func fanWriteCommand(_ assignments: [(String, String)]) -> String {
         var lines: [String] = [
-            "S=$(uci -q show \(pluginPackage) 2>/dev/null | awk -F. '/[.]enabled=/ {print $2; exit}')",
-            "[ -n \"$S\" ] || S=$(uci -q show \(pluginPackage) 2>/dev/null | awk -F. 'NR==1{print $2}')",
-            "[ -n \"$S\" ] || S=globals"
+            "S=$(uci -q show gl_fanctrl 2>/dev/null | awk -F. '/[.]enabled=/ {print $2; exit}')",
+            "[ -n \"$S\" ] || S=$(uci -q show gl_fanctrl 2>/dev/null | awk -F. 'NR==1{print $2}')",
+            "[ -n \"$S\" ] || S='@fanctrl[0]'"
         ]
         for (key, value) in assignments {
-            lines.append("uci -q set \"\(pluginPackage).$S.\(key)=\(value)\"")
+            lines.append("uci -q set \"gl_fanctrl.$S.\(key)=\(value)\"")
         }
-        lines.append("uci -q commit \(pluginPackage) 2>/dev/null && echo committed")
-        lines.append("/etc/init.d/\(initScript) restart >/dev/null 2>&1 || { /etc/init.d/\(initScript) stop >/dev/null 2>&1; /etc/init.d/\(initScript) start >/dev/null 2>&1; }")
+        lines.append("uci -q commit gl_fanctrl 2>/dev/null && echo committed")
+        lines.append("/etc/init.d/gl_fanctrl restart >/dev/null 2>&1 || { /etc/init.d/gl_fanctrl stop >/dev/null 2>&1; /etc/init.d/gl_fanctrl start >/dev/null 2>&1; }")
         lines.append("sleep 1")
         lines.append("true")
         return lines.joined(separator: "; ")
@@ -4664,15 +4610,8 @@ private extension AppModel {
         case .sensors:
             return """
             echo @@TEMP
-            tp=$(sed -n 1p /proc/gl-hw-info/temperature 2>/dev/null)
-            if [ -z "$tp" ] || [ ! -r "$tp" ]; then
-              for z in /sys/class/thermal/thermal_zone*; do
-                case "$(cat "$z/type" 2>/dev/null)" in
-                  cpu-thermal|soc-thermal) tp="$z/temp"; break ;;
-                esac
-              done
-            fi
-            if [ -n "$tp" ] && [ -r "$tp" ]; then read -r v < "$tp"; echo "TC $v"; fi
+            p=$(sed -n 1p /proc/gl-hw-info/temperature 2>/dev/null)
+            if [ -n "$p" ] && [ -r "$p" ]; then read -r v < "$p"; echo "TC $v"; fi
             for f in /sys/class/thermal/thermal_zone*/temp /sys/class/hwmon/hwmon*/temp*_input; do
               if [ -r "$f" ]; then read -r v < "$f"; echo "T $v"; fi
             done
@@ -4682,9 +4621,6 @@ private extension AppModel {
               if [ -r "$f" ]; then read -r v < "$f"; echo "F $v"; fi
             done
             echo @@FANPWM
-            for d in /sys/class/hwmon/hwmon*; do
-              if [ -r "$d/pwm1" ]; then read -r v < "$d/pwm1"; echo "pwm=$v"; break; fi
-            done
             for d in /sys/class/thermal/cooling_device*; do
               if [ -r "$d/cur_state" ]; then
                 t=$(cat "$d/type" 2>/dev/null)
