@@ -232,6 +232,7 @@ private struct PanelWebView: UIViewRepresentable {
         webView.scrollView.backgroundColor = .white
         context.coordinator.webView = webView
         context.coordinator.observe()
+        context.coordinator.loadedURL = url
         webView.load(URLRequest(url: url))
         return webView
     }
@@ -293,10 +294,21 @@ private struct PanelWebView: UIViewRepresentable {
     })();
     """#
 
+    /// ⚠️ v3.1.8：这里**不能**用 `webView.url == nil` 来判断「还没开始加载」。
+    ///
+    /// 面板打不开（端口没响应、手机不在路由器网内）时，那次加载是**失败**的，
+    /// `webView.url` 会一直是 nil（见 `Coordinator.initialURL` 的注释）。而
+    /// `updateUIView` 每轮轮询都会被调一次——代理页的数据每 2 秒回来一次、
+    /// `openClash` 一变、整棵子树就更新一遍——于是每 2 秒重新 `load` 一次：
+    /// 白屏 → 报错 → 白屏，用户看到的就是「不可用的时候一直在闪」。
+    ///
+    /// 现在改成跟 `Coordinator.loadedURL`（上一次**发起**加载用的地址）比：
+    /// 同一个地址就不动它，只有面板地址真的变了（换端口 / 换 dashboard）才重载。
+    /// 网页自己跳路由（zashboard 是单页应用，`webView.url` 会变）也不会被这里打断。
     func updateUIView(_ webView: WKWebView, context: Context) {
-        if webView.url == nil {
-            webView.load(URLRequest(url: url))
-        }
+        guard context.coordinator.loadedURL != url else { return }
+        context.coordinator.loadedURL = url
+        webView.load(URLRequest(url: url))
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate {
@@ -315,6 +327,9 @@ private struct PanelWebView: UIViewRepresentable {
         private var hasLoadedOnce = false
         /// 首次请求的地址：网页加载失败时 `webView.url` 是 nil，清除后还得有处可回。
         private let initialURL: URL
+        /// 上一次**发起**加载用的地址（v3.1.8）。`webView.url` 不能当这个用：
+        /// 加载失败时它恒为 nil，单页应用跳路由时它又一直在变。
+        var loadedURL: URL?
 
         init(_ parent: PanelWebView) {
             self.progress = parent.$progress
@@ -330,9 +345,12 @@ private struct PanelWebView: UIViewRepresentable {
                 forName: .panelReload, object: nil, queue: .main
             ) { [weak self] _ in
                 self?.error.wrappedValue = nil
-                guard let self, let webView = self.webView,
-                      let url = webView.url else { return }
-                webView.load(URLRequest(url: url))
+                // 失败页上的「重试」走这里：那次加载失败时 `webView.url` 是 nil，
+                // 以前 `guard let url = webView.url` 直接返回——按了等于没按（v3.1.8 修）。
+                guard let self, let webView = self.webView else { return }
+                let target = webView.url ?? self.initialURL
+                self.loadedURL = target
+                webView.load(URLRequest(url: target))
             }
             clearObserver = NotificationCenter.default.addObserver(
                 forName: .panelClearData, object: nil, queue: .main
