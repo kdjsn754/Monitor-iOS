@@ -2457,25 +2457,60 @@ private struct NetVap {
     }
 
     /// 切到另一条已保存的中继网络（官方 App 的「切换网络」）。
+    ///
+    /// **v3.1.11：带 `band`，而且真的去核对「切成功了没有」。**
+    /// 2026-11-17 20:18 用户「我在这里切换连接5g的不起作用」：路由器上
+    /// `repeater.@main[0].lock_band='2g'`，目标是 5G 的 AP。当时 `selected='1'` 与
+    /// `bssid=…:53`（5G 那个）都写进去了、`repeater reload` 也确实跑了，但**频段选择
+    /// 压过锁定 BSSID**，于是照样连回 `…:54`（2.4G）。旧代码只核对 `selected=='1'`
+    /// 就报「已切换」——界面说成功、实际没换，用户看到的就是「点了没反应」。
+    /// 现在：给了 `band` 就连 `lock_band` 一起写；reload 之后读回真实的
+    /// `state_s` / `band` / `bssid`，对不上就如实报错，不再假装成功。
     @discardableResult
-    func switchRepeaterNetwork(ssid: String, bssid: String) async -> String? {
+    func switchRepeaterNetwork(ssid: String, bssid: String, band: String = "") async -> String? {
         guard connected else { return "还没连上路由器" }
         var lines: [String] = []
         // 按名字找出这条已保存网络的序号：逐段 `uci get` 比在整段文本里 grep 靠谱
         // （SSID 里可能有特殊字符）。
         lines.append("N=\"\"; for i in $(uci -q show repeater | grep -o 'repeater\\.@network\\[[0-9]*\\]\\.ssid' | grep -o '[0-9]\\+' | sort -u); do if [ \"$(uci -q get repeater.@network[$i].ssid)\" = \(shQuote(ssid)) ]; then N=$i; break; fi; done")
-        lines.append("if [ -n \"$N\" ]; then uci -q set repeater.@network[$N].selected='1'; \(bssid.isEmpty ? "" : "uci -q set repeater.@network[$N].bssid=\(shQuote(bssid));") uci -q commit repeater; else echo @@FAIL; fi")
+        lines.append("if [ -n \"$N\" ]; then uci -q set repeater.@network[$N].selected='1'; \(bssid.isEmpty ? "" : "uci -q set repeater.@network[$N].bssid=\(shQuote(bssid));") \(band.isEmpty ? "" : "uci -q set repeater.@main[0].lock_band=\(shQuote(band));") uci -q commit repeater; fi")
         lines.append("echo @@RB")
         lines.append("uci -q get repeater.@network[$N].selected")
-        lines.append("ubus call repeater reload >/dev/null 2>&1; sleep 4; ubus call repeater status 2>/dev/null | jsonfilter -e '@.state_s' -e '@.ssid' 2>/dev/null")
+        // reload 之后最多等 24 秒（这台机器换链路 15~20 秒才拿到地址），连上就立刻停。
+        lines.append("ubus call repeater reload >/dev/null 2>&1")
+        lines.append("k=0; while [ $k -lt 4 ]; do k=$((k+1)); sleep 6; [ \"$(ubus call repeater status 2>/dev/null | jsonfilter -e '@.state_s')\" = connected ] && break; done")
+        lines.append("S=$(ubus call repeater status 2>/dev/null)")
+        lines.append("echo @@ST; printf '%s' \"$S\" | jsonfilter -e '@.state_s' 2>/dev/null")
+        lines.append("echo @@SB; printf '%s' \"$S\" | jsonfilter -e '@.band' 2>/dev/null")
+        lines.append("echo @@SBS; printf '%s' \"$S\" | jsonfilter -e '@.bssid' 2>/dev/null")
         do {
             let sections = parseSections(try await execute(lines.joined(separator: "; "), timeout: 60))
-            if (sections["FAIL"] ?? "").contains("FAIL") { return "没找到这条已保存的网络" }
-            let selected = (sections["RB"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            guard selected == "1" else { return "没能切到这条网络" }
+            guard firstLine(sections["RB"]) == "1" else { return "没找到这条已保存的网络" }
+            let state = firstLine(sections["ST"])
+            guard state == "connected" else {
+                return "没能连上（状态：\(state.isEmpty ? "无响应" : state)）"
+            }
+            let realBand = firstLine(sections["SB"]).lowercased()
+            if !band.isEmpty, realBand != band {
+                return "路由器还停在 \(Self.bandName(realBand))——「频段选择」没跟着改过来"
+            }
+            let realBSSID = firstLine(sections["SBS"]).lowercased()
+            if !bssid.isEmpty, !realBSSID.isEmpty, realBSSID != bssid.lowercased() {
+                return "连上的是另一条同名网络（\(realBSSID.uppercased())）——多半是「频段选择」锁在了别的频段"
+            }
             return nil
         } catch {
             return describe(error)
+        }
+    }
+
+    /// `2g` / `5g` / `6g` / 空 → 界面上的说法。
+    static func bandName(_ code: String) -> String {
+        switch code.lowercased() {
+        case "2g": return "2.4G"
+        case "5g": return "5G"
+        case "6g": return "6G"
+        default: return "自动（没锁频段）"
         }
     }
 

@@ -429,15 +429,13 @@ struct UplinkSettingsView: View {
             ForEach(surveys) { item in
                 divider
                 Button {
-                    // 点一条：把名称 + BSSID 填进上面的表单（改不改、存不存由右上角「保存」决定），
-                    // 顺手收起扫描结果——不然一屏全是周边网络，表单被顶出视野。
-                    ssid = item.ssid
-                    bssid = item.bssid
-                    surveys = []
+                    // 点一条：**直接连它**（v3.1.11，见 `connect(to:)`）。
+                    Task { await connect(to: item) }
                 } label: {
                     surveyRow(item)
                 }
                 .buttonStyle(.plain)
+                .disabled(busy)
             }
         }
     }
@@ -881,6 +879,52 @@ struct UplinkSettingsView: View {
         busy = false
         guard let problem else {
             model.notice = Notice(kind: .ok, title: "已切换", detail: item.ssid)
+            await model.manualRefresh()
+            return
+        }
+        errorText = problem
+    }
+
+    /// 点「其他网络」里扫到的一条：**直接连它**（v3.1.11）。
+    ///
+    /// 以前只是把名称 / BSSID 填进上面的表单、什么都不说——表单在屏幕外，
+    /// 用户点完只看到列表收起来，于是就是「点了不起作用」（2026-11-17 20:18）。
+    ///
+    /// 现在分两种：
+    /// - 同名网络**已经存过**（说明本机留着密码）→ 立刻切过去。频段也要一起切：
+    ///   路由器上 `repeater.@main[0].lock_band` 是「只连这个频段」，它**压过**锁定的
+    ///   BSSID。用户点 5G 那条而 `lock_band='2g'` 时，光写 BSSID 会连回 2.4G，
+    ///   并且旧代码还会报「已切换」——这就是用户说的「切换不起作用」。
+    /// - 没存过 → 把名称 / BSSID / **频段**都填进表单，提示去填密码后保存。
+    private func connect(to item: RepeaterSurvey) async {
+        guard !busy else { return }
+        let saved = rep.saved.first { $0.ssid == item.ssid && !$0.key.isEmpty }
+        ssid = item.ssid
+        bssid = item.bssid
+        if !item.band.isEmpty { lockBand = item.band }
+        if let saved { key = saved.key }
+        surveys = []
+
+        guard let saved else {
+            model.notice = Notice(kind: .info, title: "已填入", detail: "填密码后点右上角保存")
+            return
+        }
+        // 已经连着这条（同一 BSSID、同一频段）就什么都不用发。
+        if rep.connected,
+           rep.currentBSSID.caseInsensitiveCompare(item.bssid) == .orderedSame,
+           item.band.isEmpty || rep.band == item.band {
+            model.notice = Notice(kind: .info, title: "已经在用", detail: item.ssid)
+            return
+        }
+
+        busy = true
+        errorText = nil
+        let problem = await model.switchRepeaterNetwork(ssid: item.ssid, bssid: item.bssid,
+                                                        band: item.band)
+        busy = false
+        guard let problem else {
+            let detail = item.bandLabel.isEmpty ? item.ssid : "\(item.ssid) · \(item.bandLabel)"
+            model.notice = Notice(kind: .ok, title: "已切换", detail: detail)
             await model.manualRefresh()
             return
         }
