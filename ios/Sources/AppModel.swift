@@ -988,6 +988,10 @@ final class AppModel {
 
     /// 连接后的首次填充：先取当前页面的数据（界面立刻有数字），再补静态信息。
     private func bootstrapRefresh() async {
+        // 先扔掉路由器上那份「配置面快照」（v3.1.6，见 `.network` 脚本里的慢档缓存）。
+        // 这条路径只在「刚连上 / 用户点了刷新 / 写完配置」时走，多一次 exec 无所谓；
+        // 不扔的话，改完信道或 SSID 可能要等十几秒界面才对。失败就拿旧快照，不影响功能。
+        _ = try? await execute("rm -f /tmp/.opwrt-mon-cfg /tmp/.opwrt-mon-n", timeout: 10)
         do {
             try await runItems(activeItems)
             lastTickAt = Date()
@@ -1385,17 +1389,19 @@ private struct NetVap {
                     if let channel = rest.split(separator: " ").first.map(String.init), !channel.isEmpty {
                         info.upstreamChannel = "CH \(channel)"
                     }
-                    if let ht = line.range(of: "HT Mode: ") {
-                        info.upstreamWidth = widthDigits(String(line[ht.upperBound...]))
-                    }
+                }
+                // 频宽单独认一行（v3.1.6）：`iwinfo` 是把 `Channel:` 和 `HT Mode:` 印在
+                // 同一行上的，所以原来这段嵌在 Channel 的判断里；换成 `iw` 之后由 shell
+                // 拆成两行输出，嵌套判断就永远进不去了（频宽会一直空着）。
+                if let ht = line.range(of: "HT Mode: ") {
+                    info.upstreamWidth = widthDigits(String(line[ht.upperBound...]))
                 }
             }
 
-            // 信号：固件 4.11.0（OpenWrt 25.12 基线 + MTK 新驱动）里 `iwinfo apclii0 info`
-            // 的 `Signal` 恒为 `0 dBm`——`iwinfo` 这支工具没从 nl80211 取到 BSS 信号，
-            // 实测值只在 `iw dev apclii0 station dump` 的 `signal: -68 [...] dBm` 里。
-            // 所以 0 就当成「没读到」，用 `@@UPSTA` 这一档补上；旧固件那两行本来就是
-            // 非 0，这段不会覆盖它。
+            // 信号：`iwinfo apclii0 info` 在新驱动上（4.11.0）恒报 `0 dBm`，
+            // 真值只在 `iw dev apclii0 station dump` 里。v3.1.6 起脚本直接用 `iw`
+            // 取信号（UPWIFI 里就有 `Signal:`），所以正常不会走到这里；
+            // 这一段留着给旧快照 / 旧固件兜底，读到 0 就用 `@@UPSTA` 补。
             if info.upstreamSignal == 0 {
                 let raw = (sections["UPSTA"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 let head = raw.split(separator: " ").first.map(String.init) ?? ""
@@ -4705,6 +4711,15 @@ private extension AppModel {
 
     /// 每个数据项对应一段脚本。同一档里的项用换行拼成一条命令，交给同一个 shell 跑完，
     /// 所以“项多了”只是脚本变长，不会多 fork 进程。
+    /// 慢档（配置面 / 网口 carrier / 关联台数 / 中继状态 / AP 实测值）隔几拍重算一次。
+    ///
+    /// 目标是「大约 15 秒刷一遍」：2 秒轮询 → 8 拍；用户把间隔调到 7 秒 → 2 拍；
+    /// 调到 15 秒及以上 → 1（等于不缓存，反正本来就是 15 秒才跑一次）。
+    /// 写成 `max(1, ...)` 是因为 `n % 0` 在 shell 里是除零错误。
+    private var slowTierMod: Int {
+        max(1, Int((15 / max(pollSeconds, 1)).rounded()))
+    }
+
     func script(for item: PollItem) -> String {
         switch item {
         case .core:
@@ -4713,9 +4728,14 @@ private extension AppModel {
 
             """
         case .sensors:
+            // 全用 shell 内建（`read`）取数，**一个 fork 都不产生**（v3.1.6）。
+            // 原来 `sed -n 1p` 一次、三个 `cat` 每台 cooling_device 各一次，一台机器
+            // 2 台 cooling_device + 1 次 sed = 7 次 fork；这颗 MT7987 上 fork 一次约
+            // 2~6 ms，2 秒一拍就是 45 ms 的纯开销（实测）。换成 `read -r v < 文件` 后
+            // 同一段脚本降到 11 ms。sysfs 里都是一个值一行，`read` 取首行等价于 cat。
             return """
             echo @@TEMP
-            p=$(sed -n 1p /proc/gl-hw-info/temperature 2>/dev/null)
+            read -r p < /proc/gl-hw-info/temperature 2>/dev/null
             if [ -n "$p" ] && [ -r "$p" ]; then read -r v < "$p"; echo "TC $v"; fi
             for f in /sys/class/thermal/thermal_zone*/temp /sys/class/hwmon/hwmon*/temp*_input; do
               if [ -r "$f" ]; then read -r v < "$f"; echo "T $v"; fi
@@ -4728,10 +4748,10 @@ private extension AppModel {
             echo @@FANPWM
             for d in /sys/class/thermal/cooling_device*; do
               if [ -r "$d/cur_state" ]; then
-                t=$(cat "$d/type" 2>/dev/null)
+                read -r t < "$d/type" 2>/dev/null
                 [ -n "$t" ] || t=unknown
-                c=$(cat "$d/cur_state" 2>/dev/null)
-                m=$(cat "$d/max_state" 2>/dev/null)
+                read -r c < "$d/cur_state" 2>/dev/null
+                read -r m < "$d/max_state" 2>/dev/null
                 echo "$t $c $m"
               fi
             done
@@ -4791,18 +4811,36 @@ private extension AppModel {
             // 状态面 `ubus call repeater status` 给信号、频段、信道、BSSID、来自中继的 DNS。
             // 蜂窝看 `cellular.modem status` 的 `modems`：为空就是没插 Modem。
             //
-            // 无线仍然是 UCI（配置面）+ iwinfo（实测面）两路：MTK 私有驱动下
-            // iwinfo 读不到 SSID 的 VAP 很常见（主 SSID 被 `disabled=1` 关掉时就是这样），
-            // 所以 SSID / 加密 / 开关一律以 UCI 为准，iwinfo 只补信道和频宽。
+            // 无线仍然是 UCI（配置面）+ `iw`（实测面）两路：MTK 私有驱动下
+            // 读不到 SSID 的 VAP 很常见（主 SSID 被 `disabled=1` 关掉时就是这样），
+            // 所以 SSID / 加密 / 开关一律以 UCI 为准，`iw` 只补信道、频宽、功率。
+            //
+            // **`iwinfo` 全部换成 `iw`（v3.1.6，这条是本页最值钱的一次优化）**：
+            // 实机测同一件事 —— `iwinfo rai0 info` 单次 **183~191 ms**，`iw dev rai0 info`
+            // 只要 **11~12 ms**，差 16 倍（`iwinfo` 会去问驱动的 VAP/HW mode 一大堆东西，
+            // `iw` 只读一份 nl80211 快照）。原来这一页每拍跑 3 个 AP + 1 个上游 =
+            // 4 次 `iwinfo` ≈ **560 ms**，纯属白烧。`iw` 的输出顺序和字段不同，所以在
+            // shell 里用 awk 把它**改写成老格式**（`Channel:` / `HT Mode: HT80` /
+            // `Tx-Power:` / `ESSID:` / `Signal:` / `Bit Rate:`），Swift 侧一个字没改。
+            // 拿不到的行就不输出，`band.width` / `band.channel` 会自然退回 UCI 的配置值。
+            //
+            // **配置面按「慢档」缓存（v3.1.6）**：`uci show *`、端口 carrier、关联台数、
+            // 中继状态、AP 实测值这些**用户不动就不会变**的东西，每拍都重算一次能占到
+            // 整条脚本的四成。现在它们整段跑完写进 `/tmp/.opwrt-mon-cfg`，之后
+            // `slowTierMod` 拍里只 `cat` 回放（约 2 ms），到点（约 15 秒）才重算一次。
+            // 回放出来的是**同样的 `@@` 分段文本**，所以解析侧完全无感。
+            // 写完配置（改信道 / 改 SSID / 改名…）时 App 会先删掉这份快照（见
+            // `bootstrapRefresh`），下一拍立刻重算，不会看到 15 秒前的旧值。
             //
             // **物理网口的 carrier / 速率走 ubus，不读 sysfs**（v2.9.2）：这台机器
             // （MTK `15100000.ethernet`）的 `cat /sys/class/net/eth0/carrier` 直接报
             // "Invalid argument"，以前被兜成 0，WAN 口插没插线永远读不出。
             // `ubus call network.device status` 是 netifd 自己的数据，给 `carrier`
             // （true/false）与 `speed`（"1000F" = 1000 兆全双工、"0H" = 断开）。
-            // ⚠️ 那段 JSON 必须用单引号拼变量（`'{"name":"'"$n"'"}'`）：写成
-            // `"{\"name\":\"$n\"}"` 的话 Swift 的 `\"` 先被吃成 `"`，shell 拿到的是
-            // `"{"name":"$n"}"`，引号在第二个 `"` 处就闭合了，拼出来少引号、ubus 直接报错。
+            // ⚠️ 那段 JSON 必须用单引号拼变量（`'{"name":"'"$n2"'"}'`）：写成
+            // `"{\"name\":\"$n2\"}"` 的话 Swift 的 `\"` 先被吃成 `"`，shell 拿到的是
+            // `"{"name":"$n2"}"`，引号在第二个 `"` 处就闭合了，拼出来少引号、ubus 直接报错。
+            // （v3.1.6 起这一段的循环变量叫 `n2`：`n` 已经给慢档的拍数计数器用了。）
             //
             // ⚠️⚠️ **这段脚本的注释绝不写进 shell**（v2.9.3 的血债）：SSH 的 exec 命令串
             // 是**整条**送过去的，dropbear 的 `MAX_STRING_LEN` 正好 9000 字节，超了不发数据、
@@ -4810,8 +4848,9 @@ private extension AppModel {
             // 一个字 3 字节），光注释就 1126 B，概览页 core+sensors+flash+network 拼到 9389 B
             // ——整个界面一条数据都没有。要写说明就写在这儿（Swift 注释不上线）。
             return """
+            D=$(ip route 2>/dev/null | awk '/^default/{print $5; exit}')
             echo @@DEFDEV
-            ip route 2>/dev/null | awk '/^default/{print $5; exit}'
+            echo "$D"
             echo @@WANST
             ubus call network.interface.wan status 2>/dev/null
             echo @@WWANST
@@ -4821,7 +4860,6 @@ private extension AppModel {
             echo @@WANSPD
             ubus call gl-clients get_wan_speed 2>/dev/null
             echo @@TRAFFIC
-            D=$(ip route 2>/dev/null | awk '/^default/{print $5; exit}')
             cat "/sys/class/net/$D/statistics/rx_bytes" "/sys/class/net/$D/statistics/tx_bytes" 2>/dev/null
             echo @@CONN
             wc -l < /proc/net/nf_conntrack 2>/dev/null
@@ -4834,29 +4872,40 @@ private extension AppModel {
             uci show gl-client 2>/dev/null | grep -E '\\.(mac|alias|class)='
             echo @@LEASES
             cat /tmp/dhcp.leases 2>/dev/null
-            echo @@UPWIFI
-            iwinfo apclii0 info 2>/dev/null || iwinfo apcli0 info 2>/dev/null
-            echo @@UPSTA
-            for i in apclii0 apcli0; do
-              [ -d "/sys/class/net/$i" ] || continue
-              S=$(iw dev "$i" station dump 2>/dev/null | sed -n 's/^[[:space:]]*signal:[[:space:]]*//p' | head -n 1)
-              [ -n "$S" ] && { echo "$S"; break; }
-            done
             echo @@LEASEN
             wc -l < /tmp/dhcp.leases 2>/dev/null
-            echo @@NETCFG
-            uci show network 2>/dev/null
-            echo @@DHCPCFG
-            uci show dhcp 2>/dev/null
-            echo @@WLCFG
-            uci show wireless 2>/dev/null | grep -E '\\.(band|channel|htmode|s1g_chanbw|txpower|disabled|ssid|ifname|iface|mldgroup|network|mode|device|encryption|guest|iot|multi_ap|key|hidden)='
-            echo @@WLSTA
-            for i in $(uci show wireless 2>/dev/null | sed -n "s/^wireless\\.[^.=]*\\.ifname='\\(.*\\)'/\\1/p"); do
+            echo @@UPWIFI
+            for i in apclii0 apcli0; do
               [ -d "/sys/class/net/$i" ] || continue
-              echo "$i $(iw dev "$i" station dump 2>/dev/null | grep -c '^Station')"
+              iw dev "$i" info 2>/dev/null | awk '/^[[:space:]]*ssid /{sub(/^[[:space:]]*ssid /,""); print "ESSID: " $0} /^[[:space:]]*channel /{ch=""; w=""; for(k=1;k<=NF;k++){if($k=="channel")ch=$(k+1); if($k=="width:")w=$(k+1)} if(ch!="")print "Channel: " ch; if(w!="")print "HT Mode: HT" w}'
+              iw dev "$i" station dump 2>/dev/null | head -n 14 | awk '/^[[:space:]]*signal:/{print "Signal: " $2 " dBm"} /^[[:space:]]*tx bitrate:/{print "Bit Rate: " $3 " " $4}'
+              break
             done
-            echo @@BLACK
-            uci show gl-black_white_list 2>/dev/null | grep -E '\\.(mac|mode|enable)='
+            C=/tmp/.opwrt-mon-cfg
+            N=/tmp/.opwrt-mon-n
+            n=$(cat $N 2>/dev/null)
+            [ -n "$n" ] || n=0
+            n=$((n+1))
+            [ $n -gt 100000 ] && n=1
+            echo $n > $N 2>/dev/null
+            if [ -s $C ] && [ $((n % \(slowTierMod))) -ne 0 ]; then
+              cat $C 2>/dev/null
+            else
+              {
+                echo @@NETCFG
+                uci show network 2>/dev/null
+                echo @@DHCPCFG
+                uci show dhcp 2>/dev/null
+                WC=$(uci show wireless 2>/dev/null)
+                echo @@WLCFG
+                echo "$WC" | grep -E '\\.(band|channel|htmode|s1g_chanbw|txpower|disabled|ssid|ifname|iface|mldgroup|network|mode|device|encryption|guest|iot|multi_ap|key|hidden)='
+                echo @@WLSTA
+                for i in $(echo "$WC" | sed -n "s/^wireless\\.[^.=]*\\.ifname='\\(.*\\)'/\\1/p"); do
+                  [ -d "/sys/class/net/$i" ] || continue
+                  echo "$i $(iw dev "$i" station dump 2>/dev/null | grep -c '^Station')"
+                done
+                echo @@BLACK
+                uci show gl-black_white_list 2>/dev/null | grep -E '\\.(mac|mode|enable)='
             echo @@REPEATER
             uci show repeater 2>/dev/null
             echo @@REPSTAT
@@ -4864,10 +4913,10 @@ private extension AppModel {
             echo @@MODEM
             ubus call cellular.modem status 2>/dev/null
             for d in /sys/class/net/*; do
-              n=${d##*/}
-              case "$n" in lo|br-*|*.*|ppp*|apcli*|ra*|rai*|rax*|wlan*|sit*|gre*|tun*|tap*|bond*|veth*|docker*|ifb*) continue;; esac
+              n2=${d##*/}
+              case "$n2" in lo|br-*|*.*|ppp*|apcli*|ra*|rai*|rax*|wlan*|sit*|gre*|tun*|tap*|bond*|veth*|docker*|ifb*) continue;; esac
               [ -e "$d/device" ] || continue
-              st=$(ubus call network.device status '{"name":"'"$n"'"}' 2>/dev/null)
+              st=$(ubus call network.device status '{"name":"'"$n2"'"}' 2>/dev/null)
               c=$(printf '%s' "$st" | jsonfilter -e '@.carrier' 2>/dev/null)
               if [ -n "$c" ]; then
                 case "$c" in true) c=1;; *) c=0;; esac
@@ -4881,14 +4930,18 @@ private extension AppModel {
                 s=$(cat "$d/speed" 2>/dev/null); [ "$s" = "-1" ] && s=0; [ -n "$s" ] || s=0
                 x=$(cat "$d/duplex" 2>/dev/null)
               fi
-              echo "@@PORT $n"
+              echo "@@PORT $n2"
               echo "$c $s $x"
             done
-            for n in ra0 rai0 rax0; do
-              [ -d "/sys/class/net/$n" ] || continue
-              echo "@@AP $n"
-              iwinfo "$n" info 2>/dev/null
+            for a in ra0 rai0 rax0; do
+              [ -d "/sys/class/net/$a" ] || continue
+              echo "@@AP $a"
+              iw dev "$a" info 2>/dev/null | awk '/^[[:space:]]*channel /{ch=""; w=""; for(k=1;k<=NF;k++){if($k=="channel")ch=$(k+1); if($k=="width:")w=$(k+1)} if(ch!="")print "Channel: " ch; if(w!="")print "HT Mode: HT" w} /^[[:space:]]*txpower /{print "Tx-Power: " int($2)}'
             done
+              } > $C.tmp 2>/dev/null
+              [ -s $C.tmp ] && mv $C.tmp $C
+              cat $C 2>/dev/null
+            fi
             true
 
             """
