@@ -3,7 +3,8 @@ import UIKit
 import PhotosUI
 
 /// 设置页：顶部一张「路由器」卡把当前连接、切换、新建、编辑、网页后台全收进去，
-/// 采集频率只留一行摘要，细项进二级页。
+/// 下面依次是外观、背景、关于、断开。
+/// （v3.1.7：「采集与刷新」整张卡与它的二级页都删了，刷新间隔固定 2 秒。）
 struct SettingsView: View {
     @Environment(AppModel.self) private var model: AppModel
     // v1.28.26：默认值从 "system" 改成 "light"——「跟随系统」这个选项已经删了，
@@ -36,7 +37,6 @@ struct SettingsView: View {
                         }
                     appearanceCard
                     BackgroundCard()
-                    pollingCard
                     aboutCard
                     dangerCard
                 }
@@ -68,7 +68,8 @@ struct SettingsView: View {
             .background { AppBackground() }
             // v2.3.3：同概览页，标题和刷新钮搬进导航栏，导航栏常驻（详见 Glass.swift 的 `pageChrome`）。
             // v2.3.14：刷新钮删掉（用户要求）。这一页没有会过期的数据——连接由轮询维护，
-            // 间隔在「刷新频率」卡里改，退出登录是独立按钮；那颗刷新键按下去只是白跑一轮采集。
+            // 退出登录是独立按钮；那颗刷新键按下去只是白跑一轮采集。
+            // （v3.1.7 起「刷新频率」那张卡也没了，节奏固定在 2 秒。）
             .pageChrome("设置")
             .sheet(item: $editorRoute) { route in
                 ConnectionEditorView(profile: route.profile)
@@ -361,34 +362,9 @@ struct SettingsView: View {
     /// 卡片本体搬到文件末尾的 `BackgroundCard`：它要自己托管系统相册选择器，
     /// 留在这一层会被本页任何一次重新求值牵连（选择器被重建 = 相册跳回顶部）。
 
-    // MARK: - 采集与刷新（摘要，细则进二级页）
-
-    private var pollingCard: some View {
-        SectionCard("采集与刷新", icon: "clock.arrow.circlepath") {
-            NavigationLink {
-                PollSettingsView()
-            } label: {
-                HStack(spacing: 10) {
-                    Text("每 \(Int(model.pollSeconds.rounded())) 秒")
-                        .font(.subheadline.weight(.semibold))
-                        .monospacedDigit()
-                    Text("·")
-                        .foregroundStyle(.secondary)
-                    Text("\(PollItem.allCases.count) 项数据，只采当前页面")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.85)
-                    Spacer(minLength: 4)
-                    Image(systemName: "chevron.right")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.tertiary)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-        }
-    }
+    // MARK: - 采集与刷新
+    // v3.1.7：整张卡连同二级页（PollSettingsView）一起删掉。刷新节奏固定 2 秒，
+    // 没有可调项，留一行「每 2 秒」只会占地方。
 
     // 「设备列表」那张卡（自动清理 / 离线时长 / 已隐藏 + 恢复）v2.0.3 已整张搬出设置页，
     // v2.0.4 起在「连接设备」面板右上角齿轮打开的 OfflineSettingsView 里。

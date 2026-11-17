@@ -176,16 +176,14 @@ final class AppModel {
     var currentProfileID: UUID?
     var moduleOrder: [OverviewModule] = OverviewModule.allCases
     var hiddenModules: Set<OverviewModule> = []
-    /// 采集配置：现在只有一个全局刷新间隔，改完立即生效。
-    var pollConfig: PollConfiguration = PollConfiguration() {
-        didSet {
-            // @Observable 下 didSet 可能被调用两次（已知问题），这里用 oldValue 挡住，
-            // 否则会重复 startPolling()，白白多发一轮 SSH 采集。
-            guard pollConfig != oldValue else { return }
-            pollConfig.save()
-            if connected { startPolling() }
-        }
-    }
+    /// 采集节奏：固定 2 秒（v3.1.7）。
+    ///
+    /// 以前这里是 `pollConfig`，能在设置页里 1～15 秒之间调、存进 UserDefaults。
+    /// 那个二级页整页删掉之后就没有入口了，再留着一个可变值只会变成「看得见
+    /// 却改不了」的隐藏状态（老用户存过 5 秒就永远是 5 秒），索性固定下来；
+    /// 老键在 `init` 里清掉。
+    let pollSeconds: Double = 2
+
     /// 当前在看的标签页。采集只跟着它走：切到设置页就完全停下。
     private(set) var activePage: AppPage = .overview
 
@@ -238,7 +236,9 @@ final class AppModel {
         autoRemoveOffline = UserDefaults.standard.bool(forKey: Self.autoRemoveKey)
         let storedMinutes = UserDefaults.standard.integer(forKey: Self.offlineMinutesKey)
         offlineRemoveMinutes = storedMinutes > 0 ? storedMinutes : 60
-        pollConfig = PollConfiguration.load()
+        // v3.1.7：刷新间隔改成固定 2 秒，「采集与刷新」页已删。老版本存下的
+        // 秒数（可能是 1～15 任意值）再留着就成了没人能改的隐藏状态，顺手清掉。
+        UserDefaults.standard.removeObject(forKey: "pollConfiguration")
         loadProfiles()
         loadModules()
         loadDeviceAliases()
@@ -880,20 +880,12 @@ final class AppModel {
 
     /// 当前页面要采集的数据项。
     var activeItems: [PollItem] {
-        pollConfig.items(on: activePage)
+        PollConfiguration().items(on: activePage)
     }
 
     /// 当前页面上会反复采集的项（OpenClash 配置只在进页面时取一次）。
     private var periodicItems: [PollItem] {
         activeItems.filter(\.isPeriodic)
-    }
-
-    var pollSeconds: Double { pollConfig.clampedSeconds }
-
-    func setPollSeconds(_ value: Double) {
-        var config = pollConfig
-        config.setSeconds(value)
-        pollConfig = config
     }
 
     /// 切换标签页：立刻为这一页取一次数据，然后按新的一组项继续轮询。
@@ -4713,9 +4705,9 @@ private extension AppModel {
     /// 所以“项多了”只是脚本变长，不会多 fork 进程。
     /// 慢档（配置面 / 网口 carrier / 关联台数 / 中继状态 / AP 实测值）隔几拍重算一次。
     ///
-    /// 目标是「大约 15 秒刷一遍」：2 秒轮询 → 8 拍；用户把间隔调到 7 秒 → 2 拍；
-    /// 调到 15 秒及以上 → 1（等于不缓存，反正本来就是 15 秒才跑一次）。
-    /// 写成 `max(1, ...)` 是因为 `n % 0` 在 shell 里是除零错误。
+    /// 目标是「大约 15 秒刷一遍」：固定 2 秒一拍 → 8 拍。
+    /// 写成 `max(1, ...)` 是因为 `n % 0` 在 shell 里是除零错误
+    /// （v3.1.7 起间隔不再可调，这个除法其实恒等于 8，留着是防以后又调回可变）。
     private var slowTierMod: Int {
         max(1, Int((15 / max(pollSeconds, 1)).rounded()))
     }

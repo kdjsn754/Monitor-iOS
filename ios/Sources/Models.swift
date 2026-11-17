@@ -1174,16 +1174,12 @@ enum PollItem: String, CaseIterable, Identifiable, Codable {
     var isPeriodic: Bool { self != .clashState }
 }
 
-/// 存进 UserDefaults 的采集配置：现在只有一个全局刷新间隔。
-struct PollConfiguration: Codable, Equatable {
-    var seconds: Double = 2
-
-    static let range: ClosedRange<Double> = 1...15
-
-    var clampedSeconds: Double {
-        min(max(seconds.rounded(), Self.range.lowerBound), Self.range.upperBound)
-    }
-
+/// 采集计划：哪一页该采哪些项。
+///
+/// v3.1.7 起设置页里的「采集与刷新」整页删掉了，刷新节奏固定成 2 秒
+/// （见 `AppModel.pollSeconds`）。所以这里只剩「哪一页采哪些项」，
+/// 不再有秒数、也不再去 UserDefaults 读写（老键在 `AppModel.init` 里顺手清掉）。
+struct PollConfiguration {
     func items(on page: AppPage) -> [PollItem] {
         // v2.8.2：概览页的「连接设备」卡改读官方客户端列表（`network`），所以概览也要
         // 采这一项；反过来 `devices`（租约 + ARP 那套旧名单）已经没有界面在用，停采。
@@ -1193,33 +1189,6 @@ struct PollConfiguration: Codable, Equatable {
             case .devices: return false
             default: return item.page == page
             }
-        }
-    }
-
-    mutating func setSeconds(_ value: Double) {
-        seconds = min(max(value.rounded(), Self.range.lowerBound), Self.range.upperBound)
-    }
-
-    init() {}
-
-    /// 老版本的配置里存的是三档秒数，没有 seconds，这里回落默认值。
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let value = try container.decodeIfPresent(Double.self, forKey: .seconds) ?? 2
-        seconds = min(max(value.rounded(), Self.range.lowerBound), Self.range.upperBound)
-    }
-
-    static func load() -> PollConfiguration {
-        guard let data = UserDefaults.standard.data(forKey: "pollConfiguration"),
-              let decoded = try? JSONDecoder().decode(PollConfiguration.self, from: data) else {
-            return PollConfiguration()
-        }
-        return decoded
-    }
-
-    func save() {
-        if let data = try? JSONEncoder().encode(self) {
-            UserDefaults.standard.set(data, forKey: "pollConfiguration")
         }
     }
 }
