@@ -760,7 +760,14 @@ struct NetPortInfo: Identifiable, Equatable {
     }
 }
 
-struct OpenClashInfo {
+/// OpenClash 的运行状态与面板信息。
+///
+/// **v3.1.9：加了 `Equatable`，用来挡住「值没变也照写一遍」。**
+/// 这份结构每 2 秒被重新拼一次（指标脚本里自带 pidof / 端口 / 密钥），
+/// 旧代码无条件 `openClash = info`，等于每拍都通知一遍所有观察者：
+/// 代理页整页重算，其中「控制面板」那张卡里的按钮也跟着重建 → 闪。
+/// 现在只有真变了才赋值（见 `AppModel.applyClashPresence`）。
+struct OpenClashInfo: Equatable {
     var installed = false
     var running = false
     var mode = "rule"

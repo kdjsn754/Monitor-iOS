@@ -108,6 +108,13 @@ final class AppModel {
     /// `ocMetrics.apiReachable` 的默认值是 false，光看它分不清「面板真的不通」和
     /// 「第一拍还没回来」。控制面板徽标要靠这个区分，否则进页面会先闪一下「未运行」再变绿。
     private(set) var ocMetricsLoaded = false
+    /// 「面板这条路通不通」的单值快照：只在**翻转**的时候才赋值。
+    ///
+    /// **v3.1.9**：以前界面直接读 `ocMetrics.apiReachable`，而这个结构里还装着
+    /// 秒变的流量数字——于是「控制面板」那张卡每 2 秒都被判定为「依赖变了、要重算」，
+    /// 卡里那颗按钮跟着闪。拆出这个只装 bool 的字段后，同样的结论取一次、只在
+    /// true/false 真的换边时通知界面，卡就和 2 秒那条节奏脱钩了。
+    private(set) var ocPanelReachable = false
     /// 路由器上的订阅列表（UCI `config_subscribe`）。只在打开配置弹窗时读一次，
     /// 不跟着轮询：订阅是低频数据，改一次才动一次。
     var subscriptions: [ProxySubscription] = []
@@ -516,6 +523,7 @@ final class AppModel {
         ocStateLoading = false
         ocMetrics = OpenClashMetrics()
         ocMetricsLoaded = false
+        ocPanelReachable = false
         history = []
         await bootstrapRefresh()
         startPolling()
@@ -733,6 +741,7 @@ final class AppModel {
         ocStateLoaded = false
         ocStateLoading = false
         ocMetricsLoaded = false
+        ocPanelReachable = false
         if !keepPassword, let profile = currentProfile {
             KeychainStore.deletePassword(account: KeychainStore.passwordAccount(for: profile))
         }
@@ -1065,7 +1074,8 @@ final class AppModel {
         if items.contains(.devices) { updateDevices(sections) }
         if items.contains(.network) { applyNetwork(sections) }
         if items.contains(.clashState) {
-            openClash = parseOpenClashInfo(sections, current: openClash)
+            let info = parseOpenClashInfo(sections, current: openClash)
+            if info != openClash { openClash = info }
         }
         if items.contains(.clashTraffic) || items.contains(.clashConnections) {
             applyClashPresence(sections)
@@ -1091,7 +1101,9 @@ final class AppModel {
             info.secret = firstLine(sections["OCSECRET"])
         }
         info.panelURL = buildPanelURL(info)
-        openClash = info
+        // 每 2 秒都会走到这里，但「内核还停着、端口没变、地址没变」是常态：
+        // 值一样就不赋值，省掉一次无谓的界面重算（见 `OpenClashInfo` 的注释）。
+        if info != openClash { openClash = info }
     }
 
     private func applyCore(_ sections: [String: String]) {
@@ -2843,6 +2855,9 @@ private struct NetVap {
         value.apiReachable = reachable
         ocMetrics = value
         ocMetricsLoaded = true
+        // 只在换边时写（见 `ocPanelReachable` 的注释）：面板卡读的是这一个 bool，
+        // 不是每 2 秒都在变的 `ocMetrics`。
+        if ocPanelReachable != reachable { ocPanelReachable = reachable }
     }
 
     /// JSONSerialization 出来的数字都是 NSNumber，统一走这里取，整数也能取到。
@@ -2875,7 +2890,8 @@ private struct NetVap {
     func refreshOpenClash() async {
         do {
             let sections = parseSections(try await execute(command(for: [.clashState])))
-            openClash = parseOpenClashInfo(sections, current: openClash)
+            let info = parseOpenClashInfo(sections, current: openClash)
+            if info != openClash { openClash = info }
         } catch {
             presentError(describe(error))
         }
@@ -3716,6 +3732,7 @@ private struct NetVap {
         info.running = state == "running"
         if !info.running {
             ocMetrics = OpenClashMetrics()
+            ocPanelReachable = false
             lastOcUploadTotal = nil
             lastOcDownloadTotal = nil
             lastOcTotalDate = nil

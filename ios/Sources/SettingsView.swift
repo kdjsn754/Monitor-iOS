@@ -465,28 +465,36 @@ struct SettingsView: View {
 
 // MARK: - 卡片容器
 
-struct SectionCard<Content: View>: View {
+struct SectionCard<Content: View, Accessory: View>: View {
     let title: String
     let icon: String
     /// 标题行右侧的「小挂件」：状态胶囊、开关之类。
-    /// 和 `SheetSectionCard` 一样用 AnyView 装——多加一个泛型参数的话，
-    /// 每个已有的调用点都要跟着改签名，而它们都不传这个。
-    let accessory: AnyView?
+    ///
+    /// **v3.1.9：这里原来是 `AnyView?`，别再改回去。**
+    /// `AnyView` 会把视图的静态类型抹掉，SwiftUI 因此没法比较「这一次和上一次是不是同一个
+    /// 东西」，只能每次父视图刷新就把整棵子树拆掉重建。代理页的数据每 2 秒回来一批，
+    /// 「控制面板」那张卡（`ProxyView.panelCard`）就是这个写法，于是卡里那颗整宽按钮
+    /// 每 2 秒被重新建一次——用户看到的就是按钮自己在闪（2026-11-17 17:09 反馈）。
+    ///
+    /// 换成泛型参数后视图身份稳定：值没变，SwiftUI 连 body 都不会重新算。
+    /// 不传挂件的调用点由下面 `where Accessory == EmptyView` 的重载兜住，调用处一个字不用改。
+    let accessory: Accessory
     let content: Content
 
-    init(_ title: String, icon: String, @ViewBuilder content: () -> Content) {
+    init(_ title: String, icon: String,
+         @ViewBuilder content: () -> Content) where Accessory == EmptyView {
         self.title = title
         self.icon = icon
-        self.accessory = nil
+        self.accessory = EmptyView()
         self.content = content()
     }
 
-    init<Trailing: View>(_ title: String, icon: String,
-                         @ViewBuilder accessory: () -> Trailing,
-                         @ViewBuilder content: () -> Content) {
+    init(_ title: String, icon: String,
+         @ViewBuilder accessory: () -> Accessory,
+         @ViewBuilder content: () -> Content) {
         self.title = title
         self.icon = icon
-        self.accessory = AnyView(accessory())
+        self.accessory = accessory()
         self.content = content()
     }
 
@@ -499,7 +507,7 @@ struct SectionCard<Content: View>: View {
                 Text(title)
                     .font(.subheadline.weight(.semibold))
                 Spacer(minLength: 6)
-                if let accessory { accessory }
+                accessory
             }
             content
         }

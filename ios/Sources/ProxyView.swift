@@ -54,7 +54,7 @@ struct ProxyView: View {
                     // 现在未探测完先按「连接中」渲染（`panelBadge` 本来就有这一态），
                     // 和 heroCard 里「未探测完就先把两排按钮灰着画出来」是同一个思路：
                     // 先占住位置，别让布局跳。
-                    if oc.installed || !model.ocStateLoaded { panelCard }
+                    if oc.installed || !model.ocStateLoaded { ProxyPanelCard(showPanel: $showPanel) }
                     configCard
                     accessCard
                 }
@@ -243,110 +243,6 @@ struct ProxyView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassCard()
-    }
-
-    // MARK: - 控制面板
-
-    /// 控制面板独立成卡，紧跟「实时状态」。
-    ///
-    /// 它本来自己占一张卡，后来并进「状态与操作」当卡内下半段（理由是两边标题、图标、
-    /// 状态几乎是重复的）。并进去之后那张卡同时管三件事——模式切换、启停重启、面板入口，
-    /// 上下两半各自带按钮，读起来像两张卡被一条细线粘在一起；而且面板入口和
-    /// 「实时状态 / 代理配置 / 访问检查」一样是在回答「东西在哪儿看」，跟启停不是一类动作。
-    /// 所以再拆出来：标题行交给 `SectionCard`（`accessory` 挂「可打开 / 未运行」），
-    /// 卡里只剩地址和一枚整宽主按钮。
-    private var panelCard: some View {
-        SectionCard("控制面板", icon: "rectangle.on.rectangle",
-                    accessory: { panelBadge }) {
-            VStack(alignment: .leading, spacing: 10) {
-                Text(panelAddress)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-
-                // 面板不通时把原因写在这里（v2.3.9，从「实时状态」卡搬过来）：
-                // 右上角那枚「未运行」只说结论，这里补一句是端口没响应还是密码不对，
-                // 顺带点明页面上的数字为什么停着不动。
-                if showsPanelWarning {
-                    Label("面板端口 \(oc.panelPort) 无响应，或面板密码不一致，数字停在旧值。",
-                          systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-
-                Button {
-                    showPanel = true
-                } label: {
-                    HStack(spacing: 7) {
-                        Image(systemName: "safari.fill")
-                            .font(.system(size: 13, weight: .semibold))
-                        Text("打开控制面板")
-                            .font(.subheadline.weight(.semibold))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-                    .background(
-                        canOpenPanel ? Color.blue : Color.blue.opacity(0.14),
-                        in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    )
-                    .foregroundStyle(canOpenPanel ? Color.white : Color.secondary)
-                    .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .disabled(!canOpenPanel)
-            }
-        }
-    }
-
-    /// 右上角那枚徽标：面板这条路现在走到哪一步。
-    ///
-    /// 四种显示（v2.3.11，用户指定）——「连接中」负责两段等待，「未运行」负责两段确定：
-    /// · 状态还没读到 —— 「连接中」（灰点）：还在读，先别说结论；
-    /// · 内核没在跑 —— 「未运行」（橙点）：这是确定的事实；
-    /// · 在跑、但面板指标第一拍还没回来 —— 「连接中」（灰点）：正在探端口；
-    /// · 指标读过、端口也应了 —— 「可打开」（绿点）。
-    /// 兜底（在跑、指标也读过、端口就是不应）—— 「未运行」（橙点）。
-    ///
-    /// 两种「连接中」都只是过渡态，不会停在那儿；灰点而不是橙点，是不想让人误以为已经坏了。
-    /// 样式跟上面「状态与操作」卡右边那枚运行中徽标是同一套——小圆点 + 灰字 + 白底胶囊，
-    /// 两个徽标在同一条竖线上，看上去是同一类信息。
-    @ViewBuilder
-    private var panelBadge: some View {
-        if !model.ocStateLoaded {
-            panelBadgeLabel("连接中", tone: .gray)
-        } else if !oc.running {
-            panelBadgeLabel("未运行", tone: .orange)
-        } else if !model.ocMetricsLoaded {
-            panelBadgeLabel("连接中", tone: .gray)
-        } else if canOpenPanel, metrics.apiReachable {
-            panelBadgeLabel("可打开", tone: .green)
-        } else {
-            panelBadgeLabel("未运行", tone: .orange)
-        }
-    }
-
-    /// 和 `statusPill` 同款：圆点表状态 + 灰字。
-    ///
-    /// v2.3.13：底和边一起去掉（用户「不要底色，不要让它看起来像个按钮」）。
-    /// 它只是「一行状态说明」，不是能点的东西；之前套着胶囊，深色下像颗按钮。
-    private func panelBadgeLabel(_ title: String, tone: Color) -> some View {
-        HStack(spacing: 5) {
-            Circle()
-                .fill(tone)
-                .frame(width: 7, height: 7)
-            Text(title)
-                .font(.caption2.weight(.medium))
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    /// 「未运行」底下那句解释，只在「内核在跑、只是面板这条路不通」时给。
-    /// 内核本来就停着的话，上面那张状态卡已经写了「已停止」，再解释一遍是重复。
-    private var showsPanelWarning: Bool {
-        oc.running && model.ocMetricsLoaded && !metrics.apiReachable
     }
 
     /// 状态徽标：圆点 + 文字，不套底、不套边（v2.3.13，和控制面板那枚同一套）。
@@ -764,16 +660,6 @@ struct ProxyView: View {
         return text
     }
 
-    private var canOpenPanel: Bool {
-        oc.running && oc.panelURL != nil
-    }
-
-    private var panelAddress: String {
-        guard let host = model.currentProfile?.host else { return "未获取到地址" }
-        let base = "\(host):\(oc.panelPort)"
-        return oc.dashboard.isEmpty ? base : "\(base) · \(oc.dashboard)"
-    }
-
     // MARK: - 访问检查
 
     private var accessCard: some View {
@@ -926,6 +812,139 @@ struct ProxyView: View {
 /// 现在这一页只有一件事——选一份配置并应用；订阅在右上角的按钮里。
 /// 分段、`TabView(.page)`、`Tab` 枚举、`sectionTitle` 全部删掉：拿掉横向分页之后，
 /// 页面结构比上一版简单，也不必再为翻页手避让行内手势。
+// MARK: - 控制面板卡
+
+/// 控制面板独立成卡，紧跟「实时状态」。
+///
+/// 它本来自己占一张卡，后来并进「状态与操作」当卡内下半段（理由是两边标题、图标、
+/// 状态几乎是重复的）。并进去之后那张卡同时管三件事——模式切换、启停重启、面板入口，
+/// 上下两半各自带按钮，读起来像两张卡被一条细线粘在一起；而且面板入口和
+/// 「实时状态 / 代理配置 / 访问检查」一样是在回答「东西在哪儿看」，跟启停不是一类动作。
+/// 所以再拆出来：标题行交给 `SectionCard`（`accessory` 挂「可打开 / 未运行」），
+/// 卡里只剩地址和一枚整宽主按钮。
+///
+/// **v3.1.9：从 `ProxyView` 的计算属性改成独立 struct，别再搬回去。**
+/// 写成计算属性的那些行属于 `ProxyView.body`，而这一页的数据每 2 秒回来一批——
+/// body 一跑，卡里那颗整宽按钮就跟着重建一次。用户看到的正是「按钮自己在闪」
+/// （2026-11-17 17:09）。提成独立视图后它有了自己的依赖集：只读
+/// `openClash`（值没变就不通知，见 `applyClashPresence`）、`ocPanelReachable`
+/// （只在 true/false 换边时变）、`ocStateLoaded` / `ocMetricsLoaded`（只翻一次），
+/// 和 2 秒那条节奏彻底脱钩。
+private struct ProxyPanelCard: View {
+    @Environment(AppModel.self) private var model
+    @Binding var showPanel: Bool
+
+    private var oc: OpenClashInfo { model.openClash }
+
+    /// 面板这条路现在能不能真的打开：内核在跑、地址拼得出来。
+    private var canOpenPanel: Bool { oc.running && oc.panelURL != nil }
+
+    private var panelAddress: String {
+        guard let host = model.currentProfile?.host else { return "未获取到地址" }
+        let base = "\(host):\(oc.panelPort)"
+        return oc.dashboard.isEmpty ? base : "\(base) · \(oc.dashboard)"
+    }
+
+    /// 「面板不通」那句解释，只在「内核在跑、只是面板这条路不通」时给。
+    /// 内核本来就停着的话，上面那张状态卡已经写了「已停止」，再解释一遍是重复。
+    private var showsPanelWarning: Bool {
+        oc.running && model.ocMetricsLoaded && !model.ocPanelReachable
+    }
+
+    var body: some View {
+        SectionCard("控制面板", icon: "rectangle.on.rectangle",
+                    accessory: { panelBadge }) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(panelAddress)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                Button {
+                    showPanel = true
+                } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: "safari.fill")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text("打开控制面板")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(
+                        canOpenPanel ? Color.blue : Color.blue.opacity(0.14),
+                        in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    )
+                    .foregroundStyle(canOpenPanel ? Color.white : Color.secondary)
+                    .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .disabled(!canOpenPanel)
+
+                // 面板不通时把原因写在这里（v2.3.9，从「实时状态」卡搬过来）：
+                // 右上角那枚「未运行」只说结论，这里补一句是端口没响应还是密码不对，
+                // 顺带点明页面上的数字为什么停着不动。
+                //
+                // **v3.1.9：挪到按钮下面了。** 原来是夹在地址和按钮中间，而这一行是
+                // 会出现/消失的（端口时通时不通就会换边），一换边按钮就上下跳十几点
+                //——和「按钮自己在闪」是同一个观感。放在底下，按钮的位置只由上面
+                // 两行固定内容决定。
+                if showsPanelWarning {
+                    Label("面板端口 \(oc.panelPort) 无响应，或面板密码不一致，数字停在旧值。",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+    }
+
+    /// 右上角那枚徽标：面板这条路现在走到哪一步。
+    ///
+    /// 四种显示（v2.3.11，用户指定）——「连接中」负责两段等待，「未运行」负责两段确定：
+    /// · 状态还没读到 —— 「连接中」（灰点）：还在读，先别说结论；
+    /// · 内核没在跑 —— 「未运行」（橙点）：这是确定的事实；
+    /// · 在跑、但面板指标第一拍还没回来 —— 「连接中」（灰点）：正在探端口；
+    /// · 指标读过、端口也应了 —— 「可打开」（绿点）。
+    /// 兜底（在跑、指标也读过、端口就是不应）—— 「未运行」（橙点）。
+    ///
+    /// 两种「连接中」都只是过渡态，不会停在那儿；灰点而不是橙点，是不想让人误以为已经坏了。
+    /// 样式跟「状态与操作」卡右边那枚运行中徽标是同一套——小圆点 + 灰字 + 白底胶囊，
+    /// 两个徽标在同一条竖线上，看上去是同一类信息。
+    @ViewBuilder
+    private var panelBadge: some View {
+        if !model.ocStateLoaded {
+            panelBadgeLabel("连接中", tone: .gray)
+        } else if !oc.running {
+            panelBadgeLabel("未运行", tone: .orange)
+        } else if !model.ocMetricsLoaded {
+            panelBadgeLabel("连接中", tone: .gray)
+        } else if canOpenPanel, model.ocPanelReachable {
+            panelBadgeLabel("可打开", tone: .green)
+        } else {
+            panelBadgeLabel("未运行", tone: .orange)
+        }
+    }
+
+    /// 和 `statusPill` 同款：圆点表状态 + 灰字。
+    ///
+    /// v2.3.13：底和边一起去掉（用户「不要底色，不要让它看起来像个按钮」）。
+    /// 它只是「一行状态说明」，不是能点的东西；之前套着胶囊，深色下像颗按钮。
+    private func panelBadgeLabel(_ title: String, tone: Color) -> some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(tone)
+                .frame(width: 7, height: 7)
+            Text(title)
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
 private struct ProxyConfigView: View {
     @State private var configs: [String]
     private let applied: String
