@@ -4851,6 +4851,17 @@ private extension AppModel {
             // `"{"name":"$n2"}"`，引号在第二个 `"` 处就闭合了，拼出来少引号、ubus 直接报错。
             // （v3.1.6 起这一段的循环变量叫 `n2`：`n` 已经给慢档的拍数计数器用了。）
             //
+            // **上级无线按「哪条真连上了」挑接口，不是按「哪条存在」（v3.1.10）**：
+            // 这台机器挂了两条中继虚接口——`apclii0` 是 5G，`apcli0` 是 2.4G。
+            // 原来写的是 `for i in apclii0 apcli0` + 见到目录就 `break`，只要
+            // `/sys/class/net/apclii0` 存在就停在它上面。用户把上级换成 2.4G 的
+            // `@Ruijie-s0051` 之后，`apclii0` 还在（未连接、没有 ssid、station dump 空），
+            // 于是整段什么都没输出 → 界面「信号 —」「协商速率 —」（2026-11-17 20:02）。
+            // 现在先 `iw dev "$i" link`，输出里有 `Not connected` 或为空就跳过；
+            // 真正连上的那条才取 SSID / 信号 / 速率 / 信道 / 频宽，取完 `break`。
+            // `link` 的输出和 `station dump` 字段名一致（`SSID:` / `signal:` / `tx bitrate:`），
+            // 少两趟 awk，也更直接。
+            //
             // ⚠️⚠️ **这段脚本的注释绝不写进 shell**（v2.9.3 的血债）：SSH 的 exec 命令串
             // 是**整条**送过去的，dropbear 的 `MAX_STRING_LEN` 正好 9000 字节，超了不发数据、
             // 直接 `Exit: String too long` 断连。v2.9.2 把上面这段说明写成 shell 注释（中文
@@ -4884,10 +4895,12 @@ private extension AppModel {
             echo @@LEASEN
             wc -l < /tmp/dhcp.leases 2>/dev/null
             echo @@UPWIFI
-            for i in apclii0 apcli0; do
+            for i in apclii0 apcli0 apcli1 apclii1 apcli2 apclii2; do
               [ -d "/sys/class/net/$i" ] || continue
-              iw dev "$i" info 2>/dev/null | awk '/^[[:space:]]*ssid /{sub(/^[[:space:]]*ssid /,""); print "ESSID: " $0} /^[[:space:]]*channel /{ch=""; w=""; for(k=1;k<=NF;k++){if($k=="channel")ch=$(k+1); if($k=="width:")w=$(k+1)} if(ch!="")print "Channel: " ch; if(w!="")print "HT Mode: HT" w}'
-              iw dev "$i" station dump 2>/dev/null | head -n 14 | awk '/^[[:space:]]*signal:/{print "Signal: " $2 " dBm"} /^[[:space:]]*tx bitrate:/{print "Bit Rate: " $3 " " $4}'
+              L=$(iw dev "$i" link 2>/dev/null)
+              case "$L" in *"Not connected"*|'') continue;; esac
+              echo "$L" | awk '/^[[:space:]]*SSID:/{sub(/^[[:space:]]*SSID:[[:space:]]*/,""); print "ESSID: " $0} /^[[:space:]]*signal:/{print "Signal: " $2 " dBm"} /^[[:space:]]*tx bitrate:/{print "Bit Rate: " $3 " " $4}'
+              iw dev "$i" info 2>/dev/null | awk '/^[[:space:]]*channel /{ch=""; w=""; for(k=1;k<=NF;k++){if($k=="channel")ch=$(k+1); if($k=="width:")w=$(k+1)} if(ch!="")print "Channel: " ch; if(w!="")print "HT Mode: HT" w}'
               break
             done
             C=/tmp/.opwrt-mon-cfg
