@@ -593,7 +593,7 @@ struct SheetOverlay<Content: View>: View {
             // 都看不清了，原话是「我是要弹窗高斯模糊，不是整个页面模糊」。
             // 模糊该只发生在卡片内部（材质自带实时模糊，见下面的 Card），
             // 页面本身要留得住：知道弹窗盖在什么上面，才知道自己在确认什么。
-            Color.black.opacity(scheme == .dark ? 0.42 : 0.16)
+            Color.black.opacity(scheme == .dark ? 0.38 : 0.12)
                 .ignoresSafeArea()
                 .contentShape(Rectangle())
                 .onTapGesture { onDismiss() }
@@ -607,11 +607,16 @@ struct SheetOverlay<Content: View>: View {
 
 /// 浮层中间那张卡片：20 内边距、26 圆角、一层毛玻璃 + 顶部一道高光细边。
 ///
-/// **高斯模糊只发生在这里**（v3.2.6）：`.thinMaterial` 是系统的实时材质，
-/// 卡片把身后那层页面模糊后透进来，才算一块真的磨砂玻璃。
-/// v3.2.5 用的是 `.regularMaterial`——浅色下它几乎不透（约九成白），
-/// 实机看仍是一张白卡片，用户没看出模糊；而遮罩铺了材质把整页糊掉了，
-/// 正好看反。现在遮罩去掉了模糊，模糊全部由这张卡片承担。
+/// **高斯模糊只发生在这里**（v3.2.6 起）：材质是系统的实时模糊，卡片把身后那层页面
+/// 模糊后透进来，才算一块真的磨砂玻璃。
+///
+/// 材质厚度调过三次，别再来回试：
+///   - v3.2.5 `.regularMaterial`：浅色下约九成白，实机看着就是一张白板（用户否掉）；
+///   - v3.2.6 `.thinMaterial`：透了一点，用户 2026-11-18 仍说「不够透，多透点」；
+///   - v3.2.7 `.ultraThinMaterial` + 遮罩降到 12%（深色 38%）：背后页面的色块
+///     明显透出来，深色下也不会糊成一片。
+/// 再往上就没有更透的系统材质了，只能自己叠色（`Color.white.opacity(...)`），
+/// 但那样字会开始飘，不建议。
 ///
 /// 末尾那个空手势是为了把卡片范围内的点击吃掉，
 /// 否则会穿透到后面的遮罩上，被当成「点了外面」而误关。
@@ -625,7 +630,7 @@ struct SheetOverlayCard<Content: View>: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background {
                 RoundedRectangle(cornerRadius: 26, style: .continuous)
-                    .fill(.thinMaterial)
+                    .fill(.ultraThinMaterial)
             }
             .overlay {
                 // 一道白高光把玻璃的边立起来；没有它，薄材质在浅色页面会糊成一片。

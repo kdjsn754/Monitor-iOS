@@ -30,12 +30,13 @@ struct NetworkView: View {
     @Environment(AppModel.self) private var model: AppModel
     @State private var refreshing = false
     @State private var clearingOffline = false
+    /// 长按离线设备后要删的那一条（v3.2.7）。非 nil 就是确认浮层开着。
+    @State private var pendingDeleteClient: NetClient?
+    @State private var deletingClient = false
     @State private var editingBand: WifiBandInfo?
     @State private var editingClient: NetClient?
     /// 无线分组编辑页（v3.0.0）。
     @State private var editingGroup: WifiNetGroup?
-    /// 「添加网络」要建的组（访客 / IoT）。
-    @State private var creatingKind: WifiNetGroup.Kind?
     /// 正在切开关的组，切的过程中把开关按住，避免连点写出两次相反的值。
     @State private var busyGroups: Set<String> = []
     /// 局域网二级页（点拓扑中间那个路由器、或有线那片叶子进来）。
@@ -95,13 +96,6 @@ struct NetworkView: View {
                 WifiGroupEditorSheet(group: group)
                     .presentationBackground(Color.clear)
             }
-            .sheet(isPresented: Binding(get: { creatingKind != nil },
-                                        set: { if !$0 { creatingKind = nil } })) {
-                if let kind = creatingKind {
-                    WifiGroupCreateSheet(kind: kind)
-                        .presentationBackground(Color.clear)
-                }
-            }
             .navigationDestination(isPresented: $showLan) {
                 LanSettingsView()
             }
@@ -118,6 +112,29 @@ struct NetworkView: View {
             // 见 `ButtonStyles.swift`。推上来的「上网 / 局域网」和两个编辑页
             // 各自带 `primaryButtons()`，开关各自带 `blueSwitch()`。
             .primaryButtons()
+            // 删单条离线记录的确认（v3.2.7）。和全 App 一样用自绘浮层——
+            // 系统 `alert` / `confirmationDialog` 在 iOS 26 上会贴到页面上方。
+            .overlay {
+                if let victim = pendingDeleteClient {
+                    SheetOverlay(onDismiss: { pendingDeleteClient = nil }) {
+                        SheetOverlayCard {
+                            Text("删除这条离线记录？")
+                                .font(.system(size: 17, weight: .semibold))
+                            Text("只删路由器上留下的这条记录，不影响这台设备；它再连上来会重新出现。")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            HStack(spacing: 10) {
+                                SheetOverlayButton(title: "取消") { pendingDeleteClient = nil }
+                                SheetOverlayButton(title: "删除", tint: .red) {
+                                    Task { await deleteOffline(victim) }
+                                }
+                            }
+                            .padding(.top, 2)
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -525,201 +542,204 @@ struct NetworkView: View {
 
     // MARK: - 无线（v3.0.0）
 
-    /// 无线四组：主网络 / 访客网络 / IoT 网络 / 多链路，做成**一块块瓦片**摆在
-    /// 同一张「无线」卡里。
+    /// 无线四组：主网络 / 访客网络 / IoT 网络 / 多链路。
     ///
-    /// 走过的四版，别退回去：
-    /// - v3.0.0 每组一张卡，四块白底各带标题铺满一屏（用户：「不要全散落在这个界面」）；
-    /// - v3.0.1 合成一张但压成「60pt 灰组名列 + 灰 SSID + 开关」的密表格，
-    ///   两层灰叠在一起没层次，主网络第二行还空出一截（用户：「太丑了」）；
-    /// - v3.0.2 用 `LazyVGrid` + `.gridCellColumns(2)` 想让主网络占整行——**这个修饰符
-    ///   只对 `Grid` 生效，`LazyVGrid` 没有跨列这回事**。结果四块全成半宽：主网络被挤成
-    ///   「2.4 GHz …」、SSID 一个字都看不见，右边还空出半块（用户 2026-11-16：
-    ///   「实际是这样的很乱」）；
-    /// - **v3.0.3 现在这版**：不用网格，直接 VStack 排——主网络整行、访客与 IoT 并排、
-    ///   多链路整行。宽度是写死的，不靠网格猜跨列。瓦片底色仍用
-    ///   `tertiarySystemGroupedBackground`，比卡片浅一档。
+    /// **v3.2.7 换成一行一个网络的列表**（用户 2026-11-18：「重新设计无线模块的布局，
+    /// 要考虑好能遇到什么情况，怎么布局才能展示好必要的信息」）。旧版是瓦片网格：
+    /// 主网络整行、访客与 IoT 并排各占半宽 —— 半宽那两块里 SSID 一定被截、
+    /// 频段只能缩成 11pt 小字，而真正决定布局的其实是「同一行要放几块」这件事。
+    /// 现在全部整行：
+    ///
+    /// ```
+    /// 5 GHz    OpenWrt_5G              [开关]
+    ///          CH 56 · 3 台
+    /// IoT      IoT-5G · 5G             [开关]
+    /// ```
+    ///
+    /// 覆盖到的情形：
+    ///   - 主网络按**频段**出行，一行一个开关（这台机器常年「5G 开、2.4G 关」，
+    ///     整组一个开关表达不了）；关着的频段不出行，但底部那行小字会点明；
+    ///   - 访客 / IoT / 多链路整组一行，第二行是「频段短名 · 台数」——
+    ///     这几个组的 2.4G 与 5G 共用一个 SSID，不写频段就看不出开了哪几段；
+    ///   - 一个都没开：一行「无线已关闭」+「去开启」，不是空白卡；
+    ///   - SSID 超长：中间省略，不让它把开关挤出去；
+    ///   - 0 台设备：不写「0 台」，省掉噪音；
+    ///   - 有藏着的东西（关掉的频段 / 关掉的组）：底部一行 12pt 小字
+    ///     「2.4 GHz 未开启 · 访客已关闭」，点它进二级页——v3.2.5 把这些全藏了，
+    ///     结果卡上连「2.4G 关着」都看不出来，也没法在卡上把它打开。
     ///
     /// 分组本身照 GL 官方 App（用户 2026-11-15「全量对齐」），但**不搬它那些灰色
     /// 说明文字**——2026-10-31 定的规矩：页面上不放解释性小字。
-    ///
-    /// **v3.2.5 起只列开着的网络**（用户 2026-11-18：「只显示已经开启的，没开启的不显示」）。
-    /// 关掉的访客 / IoT / 多链路、关着的频段都不再占一行 —— 以前四块瓦片里常有两块写着
-    /// 「未启用」，既没有信息量、又把真正在用的挤小。要开要关、要改名称密码，点右上角
-    /// 「更多」进 `WifiSettingsView`（无线二级页）。
-    ///
-    /// 主网络按频段各给一个开关：这台机器常见「5G 开、2.4G 关」，整组一个开关表达不了。
-    /// 访客 / IoT / 多链路是整组一个开关，因为它们的 2.4G 与 5G 本来就是同一个名字。
     private var wifiCard: some View {
         let groups = info.wifiGroups
         let total = groups.reduce(0) { $0 + $1.clients }
-        let main = groups.first { $0.kind == .main }
-        let onBands = (main?.members ?? []).filter { $0.ssidOn }
-        let sides = groups.filter { ($0.kind == .guest || $0.kind == .iot) && $0.isOn }
-        let mlo = groups.first { $0.kind == .mlo && $0.isOn }
-        let nothingOn = onBands.isEmpty && sides.isEmpty && mlo == nil
+        let rows = wifiRows(groups)
+        let hidden = wifiHiddenSummary(groups)
         return card("无线",
                     trailing: total > 0 ? "\(total) 台 · 更多" : "更多",
                     trailingAction: { showWifi = true }) {
-            VStack(spacing: 8) {
-                if nothingOn {
-                    HStack {
+            VStack(spacing: 0) {
+                if rows.isEmpty {
+                    HStack(spacing: 8) {
                         Text("无线已关闭")
                             .font(.system(size: 14))
                             .foregroundStyle(.secondary)
                         Spacer(minLength: 0)
+                        Button("去开启") { showWifi = true }
+                            .font(.system(size: 13))
+                            .foregroundStyle(Color.accentColor)
+                            .buttonStyle(.plain)
                     }
-                    .padding(.vertical, 8)
+                    .padding(.vertical, 10)
                 } else {
-                    if !onBands.isEmpty, let main = main {
-                        wifiTile(main, bands: onBands)
-                    }
-                    if !sides.isEmpty {
-                        HStack(alignment: .top, spacing: 8) {
-                            ForEach(sides) { group in
-                                wifiTile(group)
-                            }
-                        }
-                    }
-                    if let mlo = mlo {
-                        wifiTile(mlo)
+                    ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                        if index > 0 { divider }
+                        wifiRowView(row)
                     }
                 }
+
+                if !hidden.isEmpty {
+                    divider
+                    Button { showWifi = true } label: {
+                        HStack(spacing: 6) {
+                            Text(hidden)
+                                .font(.system(size: 12))
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                            Spacer(minLength: 0)
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.tertiary)
+                        }
+                        .padding(.vertical, 9)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
             }
-            .padding(.top, 6)
+            .padding(.top, 4)
             .padding(.bottom, 2)
         }
     }
 
-    /// 一块瓦片：组名在第一行，开关跟在组名右边（主网络例外——它一行一个开关）。
-    ///
-    /// 非主网络那张瓦片第二行原本只写 SSID，v3.2.6 起下面再挂一行频段短名
-    /// （`2.4G · 5G`）：访客 / IoT / 多链路几个频段共用同一个名字，
-    /// 不写出来就不知道它到底开了哪几段。频段行只列开着的。
-    @ViewBuilder
-    private func wifiTile(_ group: WifiNetGroup, bands: [WifiBandInfo]? = nil) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Text(group.kind.title)
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                Spacer(minLength: 2)
+    /// 卡上的一行。`member` 有值的是主网络的某个频段（开关写那一条 `wifi-iface`），
+    /// 为 nil 的是整组（一个开关管整组）。
+    private struct WifiRow: Identifiable {
+        let id: String
+        let label: String
+        let ssid: String
+        let detail: String
+        let group: WifiNetGroup
+        let member: WifiBandInfo?
+    }
 
-                // 主网络的开关在下面每个频段上，头行只留组名。
-                // 台数不在这里重复一遍——卡片标题右上角已经有总数了（v3.0.2 两处都写，
-                // 同一个数字讲两遍，看着更乱）。
-                if group.kind != .main && !group.members.isEmpty {
-                    groupToggle(group)
-                }
-            }
-
-            if group.members.isEmpty {
-                Button {
-                    creatingKind = group.kind
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "plus.circle.fill")
-                            .font(.system(size: 12))
-                        Text("添加网络")
-                            .font(.system(size: 13))
-                        Spacer(minLength: 2)
-                    }
-                    .foregroundStyle(Color.accentColor)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            } else if group.kind == .main {
-                // 只画开着的频段（v3.2.5）：关掉的那一条连 SSID 都没有，列出来只是噪音。
-                ForEach(bands ?? group.members) { member in
-                    tileBandRow(member, group: group)
+    private func wifiRows(_ groups: [WifiNetGroup]) -> [WifiRow] {
+        var rows: [WifiRow] = []
+        for group in groups where group.isOn {
+            if group.kind == .main {
+                for member in group.members where member.ssidOn && !member.radioOff {
+                    var parts: [String] = []
+                    if member.channel > 0 { parts.append("CH \(member.channel)") }
+                    if member.clients > 0 { parts.append("\(member.clients) 台") }
+                    rows.append(WifiRow(id: member.id,
+                                        label: member.bandName,
+                                        ssid: member.ssid,
+                                        detail: parts.joined(separator: " · "),
+                                        group: group,
+                                        member: member))
                 }
             } else {
-                Button {
-                    editingGroup = group
-                } label: {
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 6) {
-                            Text(group.isOn ? group.ssid : "未启用")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                            Spacer(minLength: 2)
-                        }
-                        // 频段短名（v3.2.6）：访客 / IoT / 多链路的 2.4G 与 5G 用的是
-                        // **同一个 SSID**，光看名字没人知道它占了哪几段。主网络那几行
-                        // 自带频段名，不需要这一行；这里只列开着的频段。
-                        if group.isOn, !group.onBandShort.isEmpty {
-                            Text(group.onBandShort)
-                                .font(.system(size: 11))
-                                .foregroundStyle(.tertiary)
-                                .lineLimit(1)
-                        }
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .disabled(!group.editable)
+                var parts: [String] = []
+                let bands = group.onBandShort
+                if !bands.isEmpty { parts.append(bands) }
+                if group.clients > 0 { parts.append("\(group.clients) 台") }
+                rows.append(WifiRow(id: group.id,
+                                    label: shortKindLabel(group.kind),
+                                    ssid: group.ssid,
+                                    detail: parts.joined(separator: " · "),
+                                    group: group,
+                                    member: nil))
             }
         }
-        .padding(.horizontal, 11)
-        .padding(.vertical, 9)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        // 瓦片底色比卡片浅一档：卡是 `secondarySystemGroupedBackground`，
-        // 瓦片用 `tertiary`，浅色下是淡灰块、深色下是稍亮的一块。
-        .background {
-            AdaptiveFill(shape: RoundedRectangle(cornerRadius: 13, style: .continuous),
-                         color: Color(.tertiarySystemGroupedBackground))
-        }
-        .overlay {
-            AdaptiveBorder(shape: RoundedRectangle(cornerRadius: 13, style: .continuous),
-                           width: 0.5, strength: 0.3)
+        return rows
+    }
+
+    /// 组在卡上的短名。主网络不出现在这里（它的行用频段名当标签）。
+    private func shortKindLabel(_ kind: WifiNetGroup.Kind) -> String {
+        switch kind {
+        case .main: return "主网络"
+        case .guest: return "访客"
+        case .iot: return "IoT"
+        case .mlo: return "多链路"
         }
     }
 
-    /// 主网络瓦片里的一个频段：频段名 + SSID + 独立开关。
-    ///
-    /// 频段名以前是 `.tertiary` + 46pt 死宽，半宽瓦片里连「2.4 GHz」都放不下、
-    /// 名字又淡得快要看不见（v3.0.2 实机截图）。现在改成 `.secondary`、`fixedSize`
-    /// 保住频段名不被压，宽度交给 SSID——主网络整行了，SSID 有地方站。
-    private func tileBandRow(_ member: WifiBandInfo, group: WifiNetGroup) -> some View {
-        HStack(spacing: 8) {
+    /// 卡上「看不见的那些」收成一行小字：关掉的频段、关掉的组。
+    /// 只写状态，不带解释（用户 2026-10-31 的规矩），点它进二级页去开。
+    private func wifiHiddenSummary(_ groups: [WifiNetGroup]) -> String {
+        var parts: [String] = []
+        if let main = groups.first(where: { $0.kind == .main }) {
+            let off = main.members.filter { !$0.ssidOn || $0.radioOff }
+            if !off.isEmpty {
+                parts.append(off.map(\.bandName).joined(separator: " / ") + " 未开启")
+            }
+        }
+        for group in groups where group.kind != .main && !group.members.isEmpty && !group.isOn {
+            parts.append(shortKindLabel(group.kind) + "已关闭")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private func wifiRowView(_ row: WifiRow) -> some View {
+        HStack(spacing: 10) {
             Button {
-                editingGroup = group
+                editingGroup = row.group
             } label: {
-                HStack(spacing: 8) {
-                    Text(member.bandName)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                        .fixedSize()
-                        .frame(minWidth: 44, alignment: .leading)
-                    Text(member.ssid.isEmpty ? "—" : member.ssid)
-                        .font(.system(size: 13))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .layoutPriority(1)
-                    Spacer(minLength: 2)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 7) {
+                        Text(row.label)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .fixedSize()
+                        Text(row.ssid.isEmpty ? "—" : row.ssid)
+                            .font(.system(size: 15))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .layoutPriority(1)
+                        Spacer(minLength: 2)
+                    }
+                    if !row.detail.isEmpty {
+                        Text(row.detail)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .disabled(!group.editable)
+            .disabled(!row.group.editable)
 
             // 写入期间把开关换成转圈：重启无线要 6~8 秒（见 `reloadWireless`），
             // 只把开关置灰的话看着就是「点了没反应」。
-            if busyGroups.contains(member.id) {
-                ProgressView()
-                    .controlSize(.small)
-                    .frame(width: 51, height: 31)
+            if let member = row.member {
+                if busyGroups.contains(member.id) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(width: 51, height: 31)
+                } else {
+                    Toggle("", isOn: memberBinding(member))
+                        .labelsHidden()
+                        .blueSwitch()
+                        .disabled(!member.editable)
+                }
             } else {
-                Toggle("", isOn: memberBinding(member))
-                    .labelsHidden()
-                    .blueSwitch()
-                    .disabled(!member.editable)
+                groupToggle(row.group)
             }
         }
+        .padding(.vertical, 9)
     }
 
     private func groupToggle(_ group: WifiNetGroup) -> some View {
@@ -790,6 +810,17 @@ struct NetworkView: View {
                         clientRow(client)
                     }
                     .buttonStyle(.plain)
+                    // 单条删除（v3.2.7）：只给离线设备挂，在线的那台删了也会被下一轮
+                    // 扫描写回来。长按是快捷入口，编辑页底部还有一个同样的。
+                    .contextMenu {
+                        if !client.online {
+                            Button(role: .destructive) {
+                                pendingDeleteClient = client
+                            } label: {
+                                Label("删除这条记录", systemImage: "trash")
+                            }
+                        }
+                    }
                 }
                 if !offline.isEmpty {
                     divider
@@ -823,8 +854,28 @@ struct NetworkView: View {
         }
     }
 
-    private func clientRow(_ client: NetClient) -> some View {
-        // 名字下面只留「地址 · 接入」两段，设备类型交给左边那个图标
+    /// 删一条离线记录。长按菜单和编辑页底部两个入口都走这里。
+    ///
+    /// 后端会把 `gl_clients_update` 杀掉让 procd 重启（见 `deleteOfflineClient`），
+    /// 所以删完要等它起来再采——立刻采会拿到一份空的客户端列表。
+    private func deleteOffline(_ client: NetClient) async {
+        guard !deletingClient else { return }
+        pendingDeleteClient = nil
+        deletingClient = true
+        let problem = await model.deleteOfflineClient(mac: client.mac)
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        await model.manualRefresh()
+        deletingClient = false
+        if let problem {
+            model.presentError(problem)
+        } else {
+            model.notice = Notice(kind: .ok,
+                                  title: "记录已删除",
+                                  detail: client.displayName)
+        }
+    }
+
+    private func clientRow(_ client: NetClient) -> some View {        // 名字下面只留「地址 · 接入」两段，设备类型交给左边那个图标
         // （`ClientBadgeIcon` 按 `gl-client.class` 画图标，再写一遍纯占长度）。
         // 右侧两行数字走 `ClientMetricColumn`，和概览的「连接设备」是同一个视图；
         // 它 `.fixedSize()`，宁可让名字截断也不让数字折行。
@@ -1181,6 +1232,8 @@ private struct ClientEditorSheet: View {
     @State private var classValue: String
     @State private var pickingClass = false
     @State private var savingClass = false
+    /// 删除这条记录前的自绘确认浮层（v3.2.7）。
+    @State private var confirmingDelete = false
 
     private let originalName: String
 
@@ -1317,6 +1370,27 @@ private struct ClientEditorSheet: View {
                     .adaptiveRowBackground()
                 }
 
+                // 单条删除（v3.2.7）：只给离线设备。在线的删了也会被下一轮扫描写回来，
+                // 与其点了没用，不如不显示。
+                if !client.online {
+                    Section {
+                        Button {
+                            confirmingDelete = true
+                        } label: {
+                            HStack {
+                                Spacer(minLength: 0)
+                                Text("删除这条记录")
+                                    .foregroundStyle(Color(red: 0.85, green: 0.25, blue: 0.22))
+                                Spacer(minLength: 0)
+                            }
+                        }
+                        .disabled(busy)
+                        .adaptiveRowBackground()
+                    } footer: {
+                        Text("只删路由器上留下的这条记录，不影响这台设备；它再连上来会重新出现。")
+                    }
+                }
+
                 if let errorText {
                     Section {
                         Text(errorText)
@@ -1343,6 +1417,28 @@ private struct ClientEditorSheet: View {
                         Button("保存") { Task { await save() } }
                             .fontWeight(.semibold)
                             .navBarTint()
+                    }
+                }
+            }
+        }
+        // 删除确认：自绘浮层（系统 alert 在 iOS 26 会贴到页面上方，见 Glass.swift 第 576 行）。
+        .overlay {
+            if confirmingDelete {
+                SheetOverlay(onDismiss: { confirmingDelete = false }) {
+                    SheetOverlayCard {
+                        Text("删除这条离线记录？")
+                            .font(.system(size: 17, weight: .semibold))
+                        Text("只删路由器上留下的这条记录，不影响这台设备；它再连上来会重新出现。")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack(spacing: 10) {
+                            SheetOverlayButton(title: "取消") { confirmingDelete = false }
+                            SheetOverlayButton(title: "删除", tint: .red) {
+                                Task { await removeRecord() }
+                            }
+                        }
+                        .padding(.top, 2)
                     }
                 }
             }
@@ -1381,6 +1477,27 @@ private struct ClientEditorSheet: View {
         } else {
             await model.manualRefresh()
         }
+    }
+
+    /// 删掉这条记录（v3.2.7）。后端会顺手把 `gl_clients_update` 重启，
+    /// 所以要等它起来再刷新，否则客户端列表会空一拍。
+    private func removeRecord() async {
+        guard !busy else { return }
+        confirmingDelete = false
+        busy = true
+        errorText = nil
+        let problem = await model.deleteOfflineClient(mac: client.mac)
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        busy = false
+        if let problem {
+            errorText = problem
+            return
+        }
+        model.notice = Notice(kind: .ok,
+                              title: "记录已删除",
+                              detail: client.displayName)
+        dismiss()
+        await model.manualRefresh()
     }
 
     private func save() async {

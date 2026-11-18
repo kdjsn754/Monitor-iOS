@@ -3081,6 +3081,67 @@ private struct NetVap {
         }
     }
 
+    /// 删掉**一条**离线设备的记录（v3.2.7。用户 2026-11-18：「设备模块能够单独删除
+    /// 某条离线记录，而不是现在只能点最下面的清除按钮」）。
+    ///
+    /// **官方没有现成的口子**：`ubus -v list gl-clients` 只有 list / sync / remove_offline /
+    /// clean_traffic / modify_cache_offline / notify / status / get_speed / get_wan_speed。
+    /// `modify_cache_offline` 在真机上拿真离线 MAC 试过 mac_list / deleted / clients / mac
+    /// 四种参数形状，列表一条都没少——它不是按 MAC 删记录的口子（更像是内部同步标记用的）。
+    ///
+    /// 真机上逐层试出来能用的路径是**三处一起**（2026-11-18 全部验证过）：
+    ///   1. `/etc/oui-tertf/client.db` 的 `client` 表（SQLite，mac 是主键）——记录本体；
+    ///   2. `/tmp/dhcp.leases` 里那一行——**只删 DB 记录会复活**：`gl_clients_update`
+    ///      把租约表里的 MAC 也当「见过的设备」，重启后又建回列表（实测只删 DB →
+    ///      kill 服务 → 它照样在 list 里，DB 里却没有）；
+    ///   3. `kill -9` 掉 `gl_clients_update`，procd 自动拉起，启动时重读 DB 与租约。
+    /// 三件一起做完，list 里立刻消失，70 秒后也没回来。
+    ///
+    /// **别用 `/etc/init.d/gl_clients restart`**：它的 `stop_service` 会先
+    /// `ubus call gl-clients sync` 把内存写回 DB，刚删的那条会跟着回去。
+    ///
+    /// 只允许删离线设备：在线的那台删了也会被下一轮扫描立刻重建，不如不给按。
+    @discardableResult
+    func deleteOfflineClient(mac: String) async -> String? {
+        guard connected else { return "还没连上路由器" }
+        let target = mac.uppercased()
+        guard target.count == 17, target.filter({ $0 == ":" }).count == 5 else {
+            return "这台设备没有可用的 MAC"
+        }
+        guard let client = network.clients.first(where: { $0.mac.uppercased() == target }) else {
+            return "列表里已经找不到这台设备"
+        }
+        guard !client.online else { return "这台设备正在线，它的记录删不掉（下一轮扫描又会写回来）" }
+
+        let db = "/etc/oui-tertf/client.db"
+        let lines = [
+            "sqlite3 \(db) \"DELETE FROM client WHERE mac='\(target)'\" 2>/dev/null",
+            // 租约行形如 `1795038874 26:c6:43:6d:6e:31 192.168.8.139 * 01:26:...`，第 2 列是 MAC。
+            // 过滤完用 `cat` **写回同一个 inode**：`sed -i` 会换 inode，dnsmasq 手里那个
+            // 文件描述符就指向被删掉的旧文件了。
+            "if [ -f /tmp/dhcp.leases ]; then awk -v m=\(shQuote(target.lowercased())) 'tolower($2)!=m' /tmp/dhcp.leases > /tmp/.gl-lease; cat /tmp/.gl-lease > /tmp/dhcp.leases; rm -f /tmp/.gl-lease; fi",
+            "P=$(ps w 2>/dev/null | grep gl_clients_update | grep -v grep | awk '{print $1}')",
+            "[ -n \"$P\" ] && kill -9 $P",
+            "sleep 4",
+            // kill 没落地（或这台固件没有 `ps w`）时补一次手动启动。
+            "ps w 2>/dev/null | grep -q gl_clients_update || /etc/init.d/gl_clients start >/dev/null 2>&1",
+            "sleep 1",
+            "echo @@LEFT; sqlite3 \(db) \"select count(*) from client where mac='\(target)'\" 2>/dev/null",
+            "echo @@PID; ps w 2>/dev/null | grep gl_clients_update | grep -v grep | awk '{print $1}'"
+        ]
+        do {
+            let sections = parseSections(try await execute(lines.joined(separator: "; "), timeout: 45))
+            let left = Int(firstLine(sections["LEFT"])) ?? -1
+            if left != 0 { return "记录没删掉（库里还剩 \(left) 行）" }
+            if firstLine(sections["PID"]).isEmpty {
+                return "记录已删，但客户端服务没起来；重启路由器就恢复"
+            }
+            return nil
+        } catch {
+            return describe(error)
+        }
+    }
+
     /// 重新连接出口。中继先让 repeater 重连一次，再重启 netifd 接口把地址要回来。
     /// 断网几十秒是正常的（中继要重新握手），界面会等这里跑完再刷新。
     @discardableResult
