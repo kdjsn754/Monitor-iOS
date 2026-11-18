@@ -4432,11 +4432,21 @@ private struct NetVap {
 private extension AppModel {
     /// 让路由器以最低调度优先级执行这段脚本。监控不该跟转发、防火墙、
     /// OpenClash 抢 CPU；万一固件里没有 nice，就退回普通执行，不影响功能。
+    ///
+    /// **正文只能出现一次（v3.1.12）**。以前写成
+    /// `if …; then nice -n 19 sh -c '<body>'; else sh -c '<body>'; fi`
+    /// ——同一段脚本在 then/else 里各嵌一遍，送到路由器上的字节数直接翻倍。
+    /// 单引号转义还会让每个 `'` 变 4 B，于是 network 那段 3924 B 的正文膨胀成
+    /// **8177 B**，离 dropbear 的 9000 只剩 800 出头：那一页再多一个字段就是
+    /// 整页空白（v2.9.2 的死法）。现在把 nice 前缀放进变量，正文只写一次，
+    /// 同一条命令降到约 4120 B，余量回到 4800。
+    /// 变量必须用 `${N:-}` 而不是 `$N`：没 nice 时 N 是空的，`${N:-}` 让整句
+    /// 退化成 `sh -c '…'`，而 `$N sh -c` 会报错。
     func lowPriority(_ script: String) -> String {
         let body = script
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "'", with: "'\\''")
-        return "if command -v nice >/dev/null 2>&1; then nice -n 19 sh -c '\(body)'; else sh -c '\(body)'; fi"
+        return "command -v nice >/dev/null 2>&1 && N='nice -n 19'; ${N:-} sh -c '\(body)'"
     }
 
     /// 连接后取一次静态信息。
@@ -5103,13 +5113,17 @@ private extension AppModel {
     /// 9000 能过、9100 直接 EOF）。超了服务器一条输出都不回，客户端只能看到
     /// `Exit (root): String too long`，界面表现就是「什么数据都不显示」——v2.9.2
     /// 概览页拼到 9389 B 正是这个下场。这里留 1000 B 余量。
+    ///
+    /// 实际占用（v3.1.12 修掉外壳重复后，`tmp/selftest.cmd` 每次出包前现算）：
+    /// 概览 5225 / 网络 4114 / 代理 2913，最宽的一条离 9000 还有 3775。
     static let commandBudget = 8000
 
     /// 按项切成若干条命令，保证每条都不超过 [`commandBudget`]。
     ///
     /// 原来一条命令装一整页的项，脚本一长就整页没数据、还看不出原因。切块后最多多花
     /// 一次 exec（几十毫秒），换来的是「脚本再长也只会慢一点，不会全空」。
-    /// 正常情况下概览页 4 项拼起来 ~7 KB，仍然是一条命令，不增加开销。
+    /// 修掉 `lowPriority` 里正文写两遍之后，概览页 4 项拼起来是 ~5.2 KB、**一条就够**；
+    /// 以前是 2295 + 8175 两条，白多一次 exec。
     func commands(for items: [PollItem]) -> [String] {
         var result: [String] = []
         var batch: [PollItem] = []
