@@ -471,7 +471,8 @@ struct NetworkView: View {
     /// 现在：**两列网格 + 整行项**。两列各占一半宽，标签 12pt、值 15pt，
     /// 一个字号到底；放不下的（DNS、累计流量）单独占一整行。
     private var uplinkCard: some View {
-        card("上网", trailing: info.uplink == .none ? "未联网" : info.protoLabel) {
+        card("上网", icon: "network",
+             trailing: info.uplink == .none ? "未联网" : info.protoLabel) {
             metricGrid([
                 [("方式", info.uplink.title, nil),
                  ("上级网络", upstreamName, nil)],
@@ -577,7 +578,7 @@ struct NetworkView: View {
         let groups = info.wifiGroups
         let total = groups.reduce(0) { $0 + $1.clients }
         let rows = wifiRows(groups)
-        return card("无线",
+        return card("无线", icon: "wifi",
                     trailing: total > 0 ? "\(total) 台" : "更多",
                     trailingAction: { showWifi = true }) {
             VStack(spacing: 0) {
@@ -752,7 +753,8 @@ struct NetworkView: View {
     private var clientsCard: some View {
         let online = info.onlineClients
         let offline = info.offlineClients
-        return card("设备", trailing: clientsSummary(online: online.count, offline: offline.count)) {
+        return card("设备", icon: "desktopcomputer",
+                    trailing: clientsSummary(online: online.count, offline: offline.count)) {
             if info.clients.isEmpty {
                 emptyLine
             } else {
@@ -880,10 +882,11 @@ struct NetworkView: View {
     /// 以前这里 radius 18、水平 16、上 14、下 8，而概览是 22、设置/代理是 18 + 16，
     /// 同一个 App 四套数值。现在四个根页共用 `UI` 那一份（见 DesignSystem.swift）。
     private func card<Content: View>(_ title: String,
+                                     icon: String = "",
                                      trailing: String = "",
                                      trailingAction: (() -> Void)? = nil,
                                      @ViewBuilder content: () -> Content) -> some View {
-        CardPanel(title, trailing: trailing, action: trailingAction) {
+        CardPanel(title, icon: icon, trailing: trailing, action: trailingAction) {
             content()
         }
     }

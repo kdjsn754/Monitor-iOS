@@ -18,19 +18,26 @@ import SwiftUI
 /// 30 bold      页面标题（导航栏，见 pageChrome）
 /// 22 semibold  卡片里的主数字：速率、台数
 /// 17 semibold  卡片头部的大名字：路由器名、OpenClash
+/// 16 semibold  **卡片标题**（主色 + 15pt 蓝色图标；用户 2026-11-19 明确要回来）
 /// 15           行标题 / 值（行标题 semibold，值 regular）
-/// 13 semibold  卡片标题（一律次要色，不带图标）
+/// 13 semibold  **瓦片标题**（主色，不再 11pt 灰字）
 /// 12           标签、次行、右上角数字
 /// 11           胶囊、徽标、脚注
 /// 10 semibold  角标（已拦截、偏高、当前…）
 /// ```
 /// 块面：圆角 20、页边距 18、卡间距 14、行上下各 10。
+///
+/// **v3.3.1 纠错**（用户 2026-11-19：「把我各模块标题图标全弄没了，各瓦片的标题
+/// 不应该最首要吗现在又小又灰」）：v3.3.0 那次统一把四页卡头一律压成 13pt 灰字、
+/// 还丢掉了 `icon` 形参不渲染，主次颠倒。现在卡头统一为**图标 + 16 半粗主色字**，
+/// 瓦片标题也不再是 11pt 灰字，而是 13 半粗主色字。统一的是尺子，不是把信息抹平。
 enum UI {
     // 字号
     static let heroSize: CGFloat = 22
     static let titleSize: CGFloat = 17
     static let rowSize: CGFloat = 15
-    static let cardTitleSize: CGFloat = 13
+    static let tileTitleSize: CGFloat = 13
+    static let cardTitleSize: CGFloat = 16
     static let labelSize: CGFloat = 12
     static let microSize: CGFloat = 11
     static let badgeSize: CGFloat = 10
@@ -52,6 +59,10 @@ enum UI {
 
     static func row(_ weight: Font.Weight = .regular) -> Font {
         .system(size: rowSize, weight: weight)
+    }
+
+    static func tileTitle(_ weight: Font.Weight = .semibold) -> Font {
+        .system(size: tileTitleSize, weight: weight)
     }
 
     static func cardTitle() -> Font {
@@ -87,23 +98,44 @@ struct CardRule: View {
     }
 }
 
-/// 卡片标题行：左边 13pt 半粗灰字，右边挂一句 12pt 的结论或一颗「更多 ›」。
+/// 卡片标题本身：**图标 + 16pt 半粗主色字**。
 ///
-/// **不再带图标**（v3.3.0）。概览用 `Label(title, systemImage:)` 17pt 黑，
-/// 设置与代理用蓝图标 + 15pt 黑，网络用 13pt 灰——同一层级三种长相。
-/// 图标在卡片标题这一层只是装饰：卡片里的内容本来就已经说明这是哪一块。
-/// 去掉之后四页的卡片头完全一样，视线只落在内容上。
+/// 标题是每张卡最该先被看见的东西（用户 2026-11-19 原话）。图标固定 18pt 宽、
+/// 蓝色半粗，标题超长中间省略，不许把右侧的开关/结论挤掉。
+/// `CardHead` 与设置/代理的 `SectionCard` 共用这一个，四页卡头才真的一致。
+struct CardTitle: View {
+    let title: String
+    var icon: String = ""
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            if !icon.isEmpty {
+                Image(systemName: icon)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.blue)
+                    .frame(width: 18, alignment: .leading)
+            }
+            Text(title)
+                .font(UI.cardTitle())
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .minimumScaleFactor(0.85)
+        }
+    }
+}
+
+/// 卡片标题行：左边 `CardTitle`，右边挂一句 12pt 的结论或一颗「更多 ›」。
 struct CardHead: View {
     let title: String
+    var icon: String = ""
     var trailing: String = ""
     /// 传了动作就是一颗「更多 ›」；不传就是纯文字结论（不加箭头）。
     var action: (() -> Void)? = nil
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(title)
-                .font(UI.cardTitle())
-                .foregroundStyle(.secondary)
+            CardTitle(title: title, icon: icon)
 
             Spacer(minLength: 8)
 
@@ -137,15 +169,18 @@ struct CardHead: View {
 /// 四个根页的卡片全部走这一个容器，不要再自己拼 padding 和背景。
 struct CardPanel<Content: View>: View {
     private let title: String
+    private let icon: String
     private let trailing: String
     private let action: (() -> Void)?
     private let content: Content
 
     init(_ title: String,
+         icon: String = "",
          trailing: String = "",
          action: (() -> Void)? = nil,
          @ViewBuilder content: () -> Content) {
         self.title = title
+        self.icon = icon
         self.trailing = trailing
         self.action = action
         self.content = content()
@@ -153,7 +188,7 @@ struct CardPanel<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            CardHead(title: title, trailing: trailing, action: action)
+            CardHead(title: title, icon: icon, trailing: trailing, action: action)
                 .padding(.bottom, 8)
             content
         }

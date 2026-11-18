@@ -130,16 +130,17 @@ struct OverviewView: View {
         }
     }
 
-    /// 卡片：和另外三个根页共用 `CardPanel`（v3.3.0）。
+    /// 卡片：和另外三个根页共用 `CardPanel`（v3.3.0，v3.3.1 找回图标与主色标题）。
     ///
     /// 原来是 `Label(module.title, systemImage:)` 17pt 黑字 + 图标、圆角 22、内边距 14，
     /// 设置/代理是 15pt + 蓝图标 + 圆角 18，网络是 13pt 灰字——四页四套。
-    /// 现在标题统一成 13pt 半粗灰字、不带图标（见 `CardHead` 的注释）。
+    /// v3.3.0 统一时把图标丢了、标题压成 13pt 灰字（用户 2026-11-19 指出主次颠倒），
+    /// v3.3.1 起改走共用的 16pt 半粗主色标题 + 蓝图标（`CardTitle`），圆角/间距仍统一。
     private func moduleCard<Content: View>(
         _ module: OverviewModule,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        CardPanel(module.title) { content() }
+        CardPanel(module.title, icon: module.icon) { content() }
     }
 
     private var speedContent: some View {
@@ -167,7 +168,7 @@ struct OverviewView: View {
     private func speedValue(_ label: String, value: String, color: Color, icon: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Label(label, systemImage: icon)
-                .font(.system(size: 12))
+                .font(UI.tileTitle())
                 .foregroundStyle(color)
             Text(value)
                 .font(.system(size: UI.heroSize, weight: .semibold).monospacedDigit())
@@ -413,12 +414,17 @@ struct OverviewView: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
+                    // v3.3.1：瓦片标题是这块格子最该先被看见的东西（用户 2026-11-19：
+                    // 「各瓦片的标题不应该最首要吗现在又小又灰」），从 11pt 灰字
+                    // 升到 13pt 半粗主色字；下面的数值仍是 15pt 半粗，两者同为主色。
                     Text(title)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+                        .font(UI.tileTitle())
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                     if let badge {
                         Text(badge)
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(UI.badge())
                             .foregroundStyle(color)
                     }
                 }

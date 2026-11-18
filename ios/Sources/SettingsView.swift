@@ -498,14 +498,12 @@ struct SectionCard<Content: View, Accessory: View>: View {
     }
 
     var body: some View {
-        // v3.3.0：标题行换成全 App 共用的 `CardHead`（13 半粗灰字、不带图标），
-        // 卡片底换成 `cardSurface()`，和网络 / 概览 / 代理完全一致。
-        // `icon` 形参留着只是为了不动十几个调用点，**不再渲染**。
+        // v3.3.1：卡头恢复图标 + 16 半粗主色字（用户 2026-11-19 指出 v3.3.0
+        // 把标题压成灰字、图标全丢了）。`icon` 形参本来就在，这里重新渲染出来；
+        // 标题走共用的 `CardTitle`，和概览 / 网络 / 代理完全同一套。
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(title)
-                    .font(UI.cardTitle())
-                    .foregroundStyle(.secondary)
+                CardTitle(title: title, icon: icon)
                 Spacer(minLength: 8)
                 accessory
             }
