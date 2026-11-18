@@ -119,22 +119,57 @@ struct UplinkSettingsView: View {
             }
         }
         .onAppear(perform: seed)
-        .confirmationDialog(
-            "切换上网方式",
-            isPresented: Binding(get: { pendingMode != nil },
-                                 set: { if !$0 { pendingMode = nil } }),
-            titleVisibility: .visible
-        ) {
+        // 两个确认框都自绘（v3.2.4）。系统的 `confirmationDialog` 在 iOS 26 会被锚到
+        // 页面上方，看着像贴歪的气泡、底下那行按钮还露在外面——设置页的「断开并清除密码」
+        // v2.4.18 就是这么改的，`Glass.swift` 里那条「任何页面都不用系统 alert /
+        // confirmationDialog」没有例外，这页以前漏了。自绘之后位置永远在这一屏正中。
+        .overlay {
             if let target = pendingMode {
-                Button(target == .repeater ? "切到中继" : "切到以太网") {
-                    Task { await applyMode(target) }
+                SheetOverlay(onDismiss: { pendingMode = nil }) {
+                    SheetOverlayCard {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("切换上网方式")
+                                .font(.headline)
+                            Text(target == .repeater
+                                 ? "中继会重新连接上游网络，断开十几秒。"
+                                 : "有线口没插网线时切过去，路由器就没有网络了。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+
+                        HStack(spacing: 10) {
+                            SheetOverlayButton(title: "取消") { pendingMode = nil }
+                            SheetOverlayButton(title: target == .repeater ? "切到中继" : "切到以太网",
+                                               tint: .blue) {
+                                Task { await applyMode(target) }
+                            }
+                        }
+                    }
                 }
             }
-            Button("取消", role: .cancel) { pendingMode = nil }
-        } message: {
-            Text(pendingMode == .repeater
-                 ? "中继会重新连接上游网络，断开十几秒。"
-                 : "有线口没插网线时切过去，路由器就没有网络了。")
+
+            if pendingTetherOff {
+                SheetOverlay(onDismiss: { pendingTetherOff = false }) {
+                    SheetOverlayCard {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("断开热点共享")
+                                .font(.headline)
+                            Text("断开后手机的网络不再分给路由器；数据线不用拔，随时能再连。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+
+                        HStack(spacing: 10) {
+                            SheetOverlayButton(title: "取消") { pendingTetherOff = false }
+                            SheetOverlayButton(title: "断开", tint: .red) {
+                                Task { await disconnectTether() }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -612,17 +647,6 @@ struct UplinkSettingsView: View {
                     }
                 }
             }
-        }
-        .confirmationDialog(
-            "断开热点共享",
-            isPresented: Binding(get: { pendingTetherOff },
-                                 set: { if !$0 { pendingTetherOff = false } }),
-            titleVisibility: .visible
-        ) {
-            Button("断开", role: .destructive) { Task { await disconnectTether() } }
-            Button("取消", role: .cancel) { pendingTetherOff = false }
-        } message: {
-            Text("断开后手机的网络不再分给路由器；数据线不用拔，随时能再连。")
         }
     }
 
