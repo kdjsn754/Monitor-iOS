@@ -53,7 +53,7 @@ struct NetworkView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 16) {
+                VStack(spacing: UI.cardSpacing) {
                     // 拓扑里的节点：出口进「上网」二级页，频段进编辑页，
                     // 路由器与有线进局域网二级页。
                     topology(openLan: { showLan = true },
@@ -62,8 +62,8 @@ struct NetworkView: View {
                     uplinkCard
                     clientsCard
                 }
-                .padding(.horizontal, 18)
-                .padding(.top, 6)
+                .padding(.horizontal, UI.pagePadding)
+                .padding(.top, 12)
                 .padding(.bottom, 30)
                 // 滚动手感与另外三个根页一致（见 ScrollTuning.swift 与 7.1）：
                 // 长页正常回弹、短页拉不动，都不碰下拉刷新。
@@ -222,7 +222,7 @@ struct NetworkView: View {
                 Image(systemName: uplinkNodeIcon)
                     .font(.system(size: 12, weight: .semibold))
                 Text(info.uplinkLabel)
-                    .font(.system(size: 13.5, weight: .medium))
+                    .font(.system(size: 15, weight: .medium))
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                 Text(info.uplink == .none ? "—" : info.protoLabel)
@@ -305,12 +305,12 @@ struct NetworkView: View {
             }
             .padding(.bottom, 3)
             Text(deviceName)
-                .font(.system(size: 15.5, weight: .semibold))
+                .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(Color.primary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
             Text(info.lanIP.isEmpty ? "—" : info.lanIP)
-                .font(.system(size: 11.5))
+                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
             HStack(spacing: 8) {
@@ -334,7 +334,7 @@ struct NetworkView: View {
                 .monospacedDigit()
                 .contentTransition(.numericText())
             Text(parts.unit)
-                .font(.system(size: 9, weight: .medium))
+                .font(.system(size: 10, weight: .medium))
         }
         .foregroundStyle(color)
         .lineLimit(1)
@@ -412,7 +412,7 @@ struct NetworkView: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                 Text(leaf.value)
-                    .font(.system(size: 10.5))
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.65)
@@ -542,31 +542,34 @@ struct NetworkView: View {
 
     // MARK: - 无线（v3.0.0）
 
-    /// 无线四组：主网络 / 访客网络 / IoT 网络 / 多链路。
+    /// 无线：一行一个网络，开着关着都在卡上。
     ///
-    /// **v3.2.7 换成一行一个网络的列表**（用户 2026-11-18：「重新设计无线模块的布局，
-    /// 要考虑好能遇到什么情况，怎么布局才能展示好必要的信息」）。旧版是瓦片网格：
-    /// 主网络整行、访客与 IoT 并排各占半宽 —— 半宽那两块里 SSID 一定被截、
-    /// 频段只能缩成 11pt 小字，而真正决定布局的其实是「同一行要放几块」这件事。
-    /// 现在全部整行：
+    /// **v3.3.0 重排**（用户 2026-11-18 22:02：「都丑……网络页各模块的布局都重做一下」）。
+    /// 上一版把频段名挤在 SSID 左边当小灰字、详情又挂在频段名底下，三行字的左边缘
+    /// 各在不同位置，扫下来全是断的；关掉的网络收成卡底一行 12pt 灰字，
+    /// 像一句被丢掉的话。现在：
     ///
     /// ```
-    /// 5 GHz    OpenWrt_5G              [开关]
-    ///          CH 56 · 3 台
-    /// IoT      IoT-5G · 5G             [开关]
+    /// 无线                                     1 台 ›
+    /// ─────────────────────────────────────────────
+    /// Catmint                                   [开关]
+    /// 5 GHz · CH 56 · 3 台
+    /// ─────────────────────────────────────────────
+    /// Catmint                                   [开关]
+    /// 2.4 GHz · 未开启
     /// ```
     ///
-    /// 覆盖到的情形：
-    ///   - 主网络按**频段**出行，一行一个开关（这台机器常年「5G 开、2.4G 关」，
-    ///     整组一个开关表达不了）；关着的频段不出行，但底部那行小字会点明；
-    ///   - 访客 / IoT / 多链路整组一行，第二行是「频段短名 · 台数」——
-    ///     这几个组的 2.4G 与 5G 共用一个 SSID，不写频段就看不出开了哪几段；
-    ///   - 一个都没开：一行「无线已关闭」+「去开启」，不是空白卡；
-    ///   - SSID 超长：中间省略，不让它把开关挤出去；
-    ///   - 0 台设备：不写「0 台」，省掉噪音；
-    ///   - 有藏着的东西（关掉的频段 / 关掉的组）：底部一行 12pt 小字
-    ///     「2.4 GHz 未开启 · 访客已关闭」，点它进二级页——v3.2.5 把这些全藏了，
-    ///     结果卡上连「2.4G 关着」都看不出来，也没法在卡上把它打开。
+    /// 规则：
+    ///   - **卡上只列开着的**（用户 2026-11-18 22:14 定：「关掉的不显示」）。
+    ///     关掉的频段 / 网络整行不出现，底部也不留灰字提示；要开就点「更多」进二级页，
+    ///     那里有全部开关；
+    ///   - 主网络按频段一行（这台常年 5G 开、2.4G 关，整组一个开关表达不了），
+    ///     只列 `ssidOn && !radioOff` 的频段；
+    ///   - 访客 / IoT / 多链路整组一行，只列开着的、且配置过（有 interface）的组；
+    ///   - 第一行永远是 SSID（15 半粗），第二行永远是「频段 · 详情」（12 灰）——
+    ///     和「设备」卡的名字 + 副标题是同一套语法，两页读起来才像一家人；
+    ///   - SSID 超长中间省略，不让它把开关挤出去；
+    ///   - 一个都没开：一行「无线已关闭」+「去开启」，不是空白卡。
     ///
     /// 分组本身照 GL 官方 App（用户 2026-11-15「全量对齐」），但**不搬它那些灰色
     /// 说明文字**——2026-10-31 定的规矩：页面上不放解释性小字。
@@ -574,52 +577,29 @@ struct NetworkView: View {
         let groups = info.wifiGroups
         let total = groups.reduce(0) { $0 + $1.clients }
         let rows = wifiRows(groups)
-        let hidden = wifiHiddenSummary(groups)
         return card("无线",
-                    trailing: total > 0 ? "\(total) 台 · 更多" : "更多",
+                    trailing: total > 0 ? "\(total) 台" : "更多",
                     trailingAction: { showWifi = true }) {
             VStack(spacing: 0) {
                 if rows.isEmpty {
                     HStack(spacing: 8) {
                         Text("无线已关闭")
-                            .font(.system(size: 14))
+                            .font(UI.row())
                             .foregroundStyle(.secondary)
                         Spacer(minLength: 0)
                         Button("去开启") { showWifi = true }
-                            .font(.system(size: 13))
-                            .foregroundStyle(Color.accentColor)
+                            .font(UI.row(.medium))
+                            .foregroundStyle(.blue)
                             .buttonStyle(.plain)
                     }
                     .padding(.vertical, 10)
                 } else {
                     ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
-                        if index > 0 { divider }
+                        if index > 0 { CardRule() }
                         wifiRowView(row)
                     }
                 }
-
-                if !hidden.isEmpty {
-                    divider
-                    Button { showWifi = true } label: {
-                        HStack(spacing: 6) {
-                            Text(hidden)
-                                .font(.system(size: 12))
-                                .foregroundStyle(.tertiary)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                            Spacer(minLength: 0)
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(.tertiary)
-                        }
-                        .padding(.vertical, 9)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                }
             }
-            .padding(.top, 4)
-            .padding(.bottom, 2)
         }
     }
 
@@ -627,35 +607,34 @@ struct NetworkView: View {
     /// 为 nil 的是整组（一个开关管整组）。
     private struct WifiRow: Identifiable {
         let id: String
-        let label: String
         let ssid: String
         let detail: String
         let group: WifiNetGroup
         let member: WifiBandInfo?
     }
 
+    /// 只挑开着的出行。关掉的一律不进列表——卡面干净，开启统一去二级页。
     private func wifiRows(_ groups: [WifiNetGroup]) -> [WifiRow] {
         var rows: [WifiRow] = []
-        for group in groups where group.isOn {
+        for group in groups {
             if group.kind == .main {
                 for member in group.members where member.ssidOn && !member.radioOff {
-                    var parts: [String] = []
+                    var parts: [String] = [member.bandName]
                     if member.channel > 0 { parts.append("CH \(member.channel)") }
                     if member.clients > 0 { parts.append("\(member.clients) 台") }
                     rows.append(WifiRow(id: member.id,
-                                        label: member.bandName,
                                         ssid: member.ssid,
                                         detail: parts.joined(separator: " · "),
                                         group: group,
                                         member: member))
                 }
-            } else {
-                var parts: [String] = []
+            } else if group.isOn && !group.members.isEmpty {
+                // 组：几个频段共用一个 SSID，所以频段短名要跟在第二行里说清楚。
+                var parts: [String] = [shortKindLabel(group.kind)]
                 let bands = group.onBandShort
                 if !bands.isEmpty { parts.append(bands) }
                 if group.clients > 0 { parts.append("\(group.clients) 台") }
                 rows.append(WifiRow(id: group.id,
-                                    label: shortKindLabel(group.kind),
                                     ssid: group.ssid,
                                     detail: parts.joined(separator: " · "),
                                     group: group,
@@ -665,7 +644,7 @@ struct NetworkView: View {
         return rows
     }
 
-    /// 组在卡上的短名。主网络不出现在这里（它的行用频段名当标签）。
+    /// 组在卡上的短名。主网络不出现在这里（它的行用频段名）。
     private func shortKindLabel(_ kind: WifiNetGroup.Kind) -> String {
         switch kind {
         case .main: return "主网络"
@@ -675,48 +654,23 @@ struct NetworkView: View {
         }
     }
 
-    /// 卡上「看不见的那些」收成一行小字：关掉的频段、关掉的组。
-    /// 只写状态，不带解释（用户 2026-10-31 的规矩），点它进二级页去开。
-    private func wifiHiddenSummary(_ groups: [WifiNetGroup]) -> String {
-        var parts: [String] = []
-        if let main = groups.first(where: { $0.kind == .main }) {
-            let off = main.members.filter { !$0.ssidOn || $0.radioOff }
-            if !off.isEmpty {
-                parts.append(off.map(\.bandName).joined(separator: " / ") + " 未开启")
-            }
-        }
-        for group in groups where group.kind != .main && !group.members.isEmpty && !group.isOn {
-            parts.append(shortKindLabel(group.kind) + "已关闭")
-        }
-        return parts.joined(separator: " · ")
-    }
-
     private func wifiRowView(_ row: WifiRow) -> some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 12) {
             Button {
                 editingGroup = row.group
             } label: {
                 VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 7) {
-                        Text(row.label)
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                            .fixedSize()
-                        Text(row.ssid.isEmpty ? "—" : row.ssid)
-                            .font(.system(size: 15))
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .layoutPriority(1)
-                        Spacer(minLength: 2)
-                    }
-                    if !row.detail.isEmpty {
-                        Text(row.detail)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
-                    }
+                    Text(row.ssid.isEmpty ? "—" : row.ssid)
+                        .font(UI.row(.semibold))
+                        .foregroundStyle(Color.primary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(row.detail)
+                        .font(UI.label())
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -739,7 +693,7 @@ struct NetworkView: View {
                 groupToggle(row.group)
             }
         }
-        .padding(.vertical, 9)
+        .padding(.vertical, UI.rowPadding)
     }
 
     private func groupToggle(_ group: WifiNetGroup) -> some View {
@@ -921,58 +875,16 @@ struct NetworkView: View {
 
     // MARK: - 小组件
 
-    /// 卡片：白底 + 一条 0.6pt 细边，没有阴影。靠留白分层，不靠色块。
+    /// 卡片：外壳统一走 `CardPanel`（v3.3.0），这一页不再自己拼圆角和内边距。
+    ///
+    /// 以前这里 radius 18、水平 16、上 14、下 8，而概览是 22、设置/代理是 18 + 16，
+    /// 同一个 App 四套数值。现在四个根页共用 `UI` 那一份（见 DesignSystem.swift）。
     private func card<Content: View>(_ title: String,
                                      trailing: String = "",
                                      trailingAction: (() -> Void)? = nil,
                                      @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(title)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 8)
-                if !trailing.isEmpty {
-                    // 传了动作就是一颗按钮（「更多 ›」）。其余卡片的右上角仍然是纯文字，
-                    // 不加箭头——那里本来就没得点。
-                    if let trailingAction {
-                        Button(action: trailingAction) {
-                            HStack(spacing: 2) {
-                                Text(trailing)
-                                    .monospacedDigit()
-                                Image(systemName: "chevron.right")
-                                    .font(.system(size: 10, weight: .semibold))
-                            }
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                    } else {
-                        Text(trailing)
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                    }
-                }
-            }
-            .padding(.bottom, 4)
+        CardPanel(title, trailing: trailing, action: trailingAction) {
             content()
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 14)
-        .padding(.bottom, 8)
-        // v2.9.6：底色和细边改走 `AdaptiveFill` / `AdaptiveBorder`，跟设置页的
-        // 「卡片透明度」滑块一起变透。以前这里是死白
-        // `Color(.secondarySystemGroupedBackground)`，壁纸透上来时整页只有这一页的
-        // 卡片还实心（用户 2026-11-15：「网络页和他的二级页没有跟着透明度」）。
-        .background {
-            AdaptiveFill(shape: RoundedRectangle(cornerRadius: 18, style: .continuous),
-                         color: Color(.secondarySystemGroupedBackground))
-        }
-        .overlay {
-            AdaptiveBorder(shape: RoundedRectangle(cornerRadius: 18, style: .continuous),
-                           width: 0.6, strength: 0.45)
         }
     }
 
@@ -1026,7 +938,7 @@ struct NetworkView: View {
                         .font(.system(size: 13, weight: .medium))
                 }
                 Text(title)
-                    .font(.system(size: 14))
+                    .font(UI.row())
                 Spacer(minLength: 8)
             }
             .foregroundStyle(NetPalette.wan)
@@ -1037,11 +949,8 @@ struct NetworkView: View {
         .disabled(busy)
     }
 
-    private var divider: some View {
-        Rectangle()
-            .fill(Color(.separator).opacity(0.45))
-            .frame(height: 0.5)
-    }
+    /// 卡里的分隔线统一走 `CardRule`（v3.3.0），别再手搓 0.5pt 的 Rectangle。
+    private var divider: some View { CardRule() }
 
     private var emptyLine: some View {
         Text("—")
@@ -1599,7 +1508,7 @@ private struct ClientClassSheet: View {
                         .foregroundStyle(on ? Color.white : Color(.systemGray))
                 }
                 Text(item.title)
-                    .font(.system(size: 11.5, weight: on ? .medium : .regular))
+                    .font(.system(size: 12, weight: on ? .medium : .regular))
                     .foregroundStyle(on ? Color.primary : Color.secondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)

@@ -1116,25 +1116,6 @@ struct UplinkSettingsView: View {
 
 // MARK: - 卡面
 
-/// 页面里所有卡片共用的底：18 圆角 + 分组底色 + 一根细描边。
-///
-/// 和网络页的 `card(...)` 完全同一套值（18 / separator 0.45 / 0.6pt），
-/// 两页并排看不出来是两个人写的。
-private struct UplinkCardSurface: ViewModifier {
-    func body(content: Content) -> some View {
-        content
-            .padding(16)
-            .background {
-                AdaptiveFill(shape: RoundedRectangle(cornerRadius: 18, style: .continuous),
-                             color: Color(.secondarySystemGroupedBackground))
-            }
-            .overlay {
-                AdaptiveBorder(shape: RoundedRectangle(cornerRadius: 18, style: .continuous),
-                               width: 0.6, strength: 0.45)
-            }
-    }
-}
-
-private extension View {
-    func cardSurface() -> some View { modifier(UplinkCardSurface()) }
-}
+// v3.3.0：这里原来自己写了一份 18 圆角 / 四边 16 的卡面和一个**同名**的
+// `cardSurface()` 私有扩展。本文件内它会把 `DesignSystem.swift` 的全局版本遮蔽掉，
+// 于是无论别处怎么统一，这一页永远停在旧尺子上。整套删掉，直接吃全局那一份。

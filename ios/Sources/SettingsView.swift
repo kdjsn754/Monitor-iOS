@@ -21,7 +21,7 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 14) {
+                VStack(spacing: UI.cardSpacing) {
                     routerCard
                         // 三个弹窗挂在同一个视图上容易互相抢，网页后台这张挂到卡片上。
                         // fullScreenCover（v2.3.5，用户要求全屏）：和代理页控制面板一致。
@@ -40,11 +40,10 @@ struct SettingsView: View {
                     aboutCard
                     dangerCard
                 }
-                .padding(.horizontal, 16)
-                // v2.3.3：标题和刷新钮搬进导航栏（见 `pageChrome`），内容从栏下面开始，
-                // 这里 14 让第一张卡回到原来的 117pt。
-                .padding(.top, 14)
-                .padding(.bottom, 32)
+                .padding(.horizontal, UI.pagePadding)
+                // v2.3.3：标题和刷新钮搬进导航栏（见 `pageChrome`），内容从栏下面开始。
+                .padding(.top, 12)
+                .padding(.bottom, 28)
                 // 滚动手感（见 ScrollTuning.swift，v2.1.18 起）：保留橡皮筋回弹，
                 // 只把「内容不到一屏也允许下拉」关掉——那正是「一下弹回去」的来源。
                 // 挂在 VStack 的 background 上，不占布局，父链能直接找到滚动视图。
@@ -93,9 +92,9 @@ struct SettingsView: View {
                         SheetOverlayCard {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("断开并清除密码？")
-                                    .font(.headline)
+                                    .font(.system(size: 17, weight: .semibold))
                                 Text("退出后需要重新输入密码才能连接，保存的监控设置不会丢。")
-                                    .font(.caption)
+                                    .font(.system(size: 12))
                                     .foregroundStyle(.secondary)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
@@ -152,11 +151,11 @@ struct SettingsView: View {
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(routerTitle)
-                        .font(.system(size: 20, weight: .bold))
+                        .font(.system(size: 17, weight: .semibold))
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
                     Text(routerSubtitle)
-                        .font(.footnote)
+                        .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
@@ -187,9 +186,9 @@ struct SettingsView: View {
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "globe")
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(.system(size: 15, weight: .semibold))
                     Text("打开路由器网页后台")
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(.system(size: 15, weight: .semibold))
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 15)
@@ -211,7 +210,7 @@ struct SettingsView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassCard()
+        .cardSurface()
     }
 
     private var canOpenWeb: Bool {
@@ -315,7 +314,7 @@ struct SettingsView: View {
                             themeMode = option.id
                         } label: {
                             Label(option.title, systemImage: option.icon)
-                                .font(.subheadline.weight(themeMode == option.id ? .semibold : .regular))
+                                .font(UI.row(themeMode == option.id ? .semibold : .regular))
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 12)
                                 .background(
@@ -340,14 +339,14 @@ struct SettingsView: View {
                             .foregroundStyle(.blue)
                             .frame(width: 20)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("概览模块").font(.subheadline)
+                            Text("概览模块").font(.system(size: 15))
                             Text("显示或隐藏卡片、拖动排序")
-                                .font(.caption2)
+                                .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
                         }
                         Spacer(minLength: 6)
                         Image(systemName: "chevron.right")
-                            .font(.caption.weight(.semibold))
+                            .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(.tertiary)
                     }
                     .contentShape(Rectangle())
@@ -385,11 +384,11 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         infoRow("显示适配", "未铺满", color: .orange)
                         Text(note)
-                            .font(.caption2)
+                            .font(.system(size: 11))
                             .foregroundStyle(Color(.tertiaryLabel))
                             .frame(maxWidth: .infinity, alignment: .leading)
                         Text("系统按打包用的 SDK 决定窗口档位，用 Xcode 27（iOS 27 SDK）重新打包即可铺满。")
-                            .font(.caption2)
+                            .font(.system(size: 11))
                             .foregroundStyle(Color(.tertiaryLabel))
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -429,10 +428,10 @@ struct SettingsView: View {
                          color: Color = .secondary) -> some View {
         HStack {
             Text(title)
-                .font(.subheadline)
+                .font(.system(size: 15))
             Spacer(minLength: 8)
             Text(value)
-                .font(.subheadline)
+                .font(.system(size: 15))
                 .foregroundStyle(color)
                 .monospacedDigit()
                 .lineLimit(1)
@@ -446,7 +445,7 @@ struct SettingsView: View {
                 confirmLogout = true
             } label: {
                 Text("断开并清除密码")
-                    .font(.subheadline.weight(.semibold))
+                    .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(.red)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)
@@ -455,7 +454,7 @@ struct SettingsView: View {
             .buttonStyle(.plain)
 
             Text("清空后需要重新输入密码才能连接，保存的监控设置不会丢。")
-                .font(.caption2)
+                .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
@@ -499,19 +498,22 @@ struct SectionCard<Content: View, Accessory: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 7) {
-                Image(systemName: icon)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.blue)
+        // v3.3.0：标题行换成全 App 共用的 `CardHead`（13 半粗灰字、不带图标），
+        // 卡片底换成 `cardSurface()`，和网络 / 概览 / 代理完全一致。
+        // `icon` 形参留着只是为了不动十几个调用点，**不再渲染**。
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(title)
-                    .font(.subheadline.weight(.semibold))
-                Spacer(minLength: 6)
+                    .font(UI.cardTitle())
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 8)
                 accessory
             }
+            .padding(.bottom, 8)
             content
         }
-        .glassCard()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .cardSurface()
     }
 }
 
@@ -580,9 +582,9 @@ private struct RouterSwitcherSheet: View {
                 .font(.system(size: 26))
                 .foregroundStyle(.tertiary)
             Text("还没有保存过连接")
-                .font(.subheadline.weight(.medium))
+                .font(.system(size: 15, weight: .medium))
             Text("回到设置页点「新建连接」，填好路由器地址和密码即可")
-                .font(.caption)
+                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
@@ -607,7 +609,7 @@ private struct RouterSwitcherSheet: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(model.connectionName(for: profile))
-                        .font(.subheadline.weight(isCurrent ? .semibold : .regular))
+                        .font(UI.row(isCurrent ? .semibold : .regular))
                         .lineLimit(1)
                     if isCurrent {
                         Text("当前")
@@ -676,12 +678,12 @@ private struct RouterSwitcherSheet: View {
                 SheetOverlayCard {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("删除「\(model.connectionName(for: profile))」？")
-                            .font(.headline)
+                            .font(.system(size: 17, weight: .semibold))
                             .lineLimit(2)
                         Text(profile.id == model.currentProfileID
                              ? "这是当前正在使用的连接，删除后会立即断开，需要重新填写密码。"
                              : "密码会一起从钥匙串里删除，重新添加时要再输一次。")
-                            .font(.caption)
+                            .font(.system(size: 12))
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -779,14 +781,14 @@ private struct BackgroundCard: View {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.mini)
                         Text("正在读取原图…")
-                            .font(.caption2)
+                            .font(.system(size: 11))
                     }
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 if let pickError {
                     Text(pickError)
-                        .font(.caption2)
+                        .font(.system(size: 11))
                         .foregroundStyle(.orange)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -838,11 +840,11 @@ private struct BackgroundCard: View {
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(store.isOn ? "自定义背景" : "默认背景")
-                    .font(.subheadline.weight(.medium))
+                    .font(.system(size: 15, weight: .medium))
                 Text(store.isOn
                      ? "已按整屏比例裁好，壁纸原图铺满"
                      : "选一张照片铺在页面最底下，可以自己裁")
-                    .font(.caption2)
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -855,14 +857,14 @@ private struct BackgroundCard: View {
     private var opacityRow: some View {
         HStack(spacing: 10) {
             Text("卡片透明度")
-                .font(.subheadline)
+                .font(.system(size: 15))
                 .fixedSize()
             // v2.4.5：系统 Slider 拖到两端会露出轨道断头，换成自绘。
             // `setOpacity` 每帧写 UserDefaults，背景和卡片因此保持实时跟着动。
             OpacitySlider(value: Binding(get: { store.opacity },
                                          set: { store.setOpacity($0) }))
             Text("\(Int((store.opacity * 100).rounded()))%")
-                .font(.caption.monospacedDigit())
+                .font(.system(size: 12).monospacedDigit())
                 .foregroundStyle(.secondary)
                 .frame(width: 40, alignment: .trailing)
         }
@@ -907,7 +909,7 @@ private struct BackgroundCard: View {
                     Image(systemName: "photo.on.rectangle")
                         .font(.system(size: 13, weight: .semibold))
                     Text("选择图片")
-                        .font(.subheadline.weight(.semibold))
+                        .font(.system(size: 15, weight: .semibold))
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 11)
@@ -931,7 +933,7 @@ private struct BackgroundCard: View {
             Image(systemName: icon)
                 .font(.system(size: 12, weight: .semibold))
             Text(title)
-                .font(.subheadline.weight(.semibold))
+                .font(.system(size: 15, weight: .semibold))
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 11)

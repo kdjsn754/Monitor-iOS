@@ -17,16 +17,15 @@ struct OverviewView: View {
                 // 这里原来是 LazyVStack。卡片一共就 7 张，懒加载省不下什么，
                 // 但滑到底部继续往上拖时，LazyVStack 会按估算高度补内容、松手再按真实高度
                 // 收回，于是「松手跳一下」。换成 VStack 后高度一次算清，不会再跳。
-                VStack(spacing: 14) {
+                VStack(spacing: UI.cardSpacing) {
                     header
                     ForEach(model.visibleModules) { module in
                         moduleView(module)
                     }
                 }
-                .padding(.horizontal, 16)
+                .padding(.horizontal, UI.pagePadding)
                 // v2.3.3：标题和刷新钮搬进导航栏（见 `pageChrome`），内容从栏下面开始。
-                // 原来标题在内容里占到 103pt、第一张卡在 117pt，这里 14 把它顶回原处。
-                .padding(.top, 14)
+                .padding(.top, 12)
                 .padding(.bottom, 28)
                 // 滚动手感（见 ScrollTuning.swift，v2.1.18 起）：保留橡皮筋回弹，
                 // 只把「内容不到一屏也允许下拉」关掉——那正是「一下弹回去」的来源。
@@ -98,12 +97,12 @@ struct OverviewView: View {
             RouterGlyph(size: 36)
             VStack(alignment: .leading, spacing: 3) {
                 Text(model.routerInfo.model.isEmpty ? "OpenWrt" : model.routerInfo.model)
-                    .font(.headline)
+                    .font(.system(size: 17, weight: .semibold))
                 HStack(spacing: 5) {
                     Circle().fill(model.connected ? .green : .orange)
                         .frame(width: 7, height: 7)
                     Text(model.status)
-                        .font(.caption)
+                        .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                     // v2.3.14：这里原来还会跟一段「· apclii0」（WAN 设备名）。
                     // 用户要删掉：这行是「连上没有」的结论，后面挂个网口名既不是给
@@ -131,18 +130,16 @@ struct OverviewView: View {
         }
     }
 
+    /// 卡片：和另外三个根页共用 `CardPanel`（v3.3.0）。
+    ///
+    /// 原来是 `Label(module.title, systemImage:)` 17pt 黑字 + 图标、圆角 22、内边距 14，
+    /// 设置/代理是 15pt + 蓝图标 + 圆角 18，网络是 13pt 灰字——四页四套。
+    /// 现在标题统一成 13pt 半粗灰字、不带图标（见 `CardHead` 的注释）。
     private func moduleCard<Content: View>(
         _ module: OverviewModule,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label(module.title, systemImage: module.icon)
-                .font(.headline)
-                .foregroundStyle(.primary)
-            content()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .cardStyle()
+        CardPanel(module.title) { content() }
     }
 
     private var speedContent: some View {
@@ -150,7 +147,9 @@ struct OverviewView: View {
             HStack {
                 speedValue("下载", value: formatSpeed(model.stats.download),
                            color: .blue, icon: "arrow.down.circle.fill")
-                Divider().frame(height: 34)
+                Rectangle()
+                    .fill(Color(.separator).opacity(0.45))
+                    .frame(width: 0.5, height: 34)
                 speedValue("上传", value: formatSpeed(model.stats.upload),
                            color: .purple, icon: "arrow.up.circle.fill")
             }
@@ -160,7 +159,7 @@ struct OverviewView: View {
                 Spacer()
                 Text("↑ \(formatBytes(model.stats.sessionUpload))")
             }
-            .font(.caption2)
+            .font(.system(size: 11))
             .foregroundStyle(.secondary)
         }
     }
@@ -168,10 +167,10 @@ struct OverviewView: View {
     private func speedValue(_ label: String, value: String, color: Color, icon: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Label(label, systemImage: icon)
-                .font(.caption)
+                .font(.system(size: 12))
                 .foregroundStyle(color)
             Text(value)
-                .font(.title3.bold().monospacedDigit())
+                .font(.system(size: UI.heroSize, weight: .semibold).monospacedDigit())
                 .foregroundStyle(color)
                 .lineLimit(1)
                 .minimumScaleFactor(0.65)
@@ -205,11 +204,11 @@ struct OverviewView: View {
                             Divider().opacity(0.5)
                             HStack(spacing: 6) {
                                 Text("总容量")
-                                    .font(.caption2)
+                                    .font(.system(size: 11))
                                     .foregroundStyle(.secondary)
                                 Spacer(minLength: 4)
                                 Text(formatFlashBytes(info.total))
-                                    .font(.caption.weight(.medium))
+                                    .font(.system(size: 12, weight: .medium))
                                     .monospacedDigit()
                             }
                         }
@@ -222,7 +221,7 @@ struct OverviewView: View {
                             Text(info.usedFraction >= 0.97
                                  ? "闪存已接近写满，建议清理日志或卸载不用的插件"
                                  : "闪存空间偏紧，建议清理日志或卸载不用的插件")
-                                .font(.caption2)
+                                .font(.system(size: 11))
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                         .foregroundStyle(flashTone(info.usedFraction))
@@ -231,7 +230,7 @@ struct OverviewView: View {
                 }
             } else {
                 Text("正在读取闪存信息…")
-                    .font(.caption)
+                    .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 6)
@@ -251,13 +250,13 @@ struct OverviewView: View {
                 .frame(width: 8, height: 8)
 
             Text(title)
-                .font(.caption)
+                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
 
             Spacer(minLength: 6)
 
             Text(formatFlashBytes(bytes))
-                .font(.system(size: 17, weight: .semibold, design: .rounded))
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
@@ -415,16 +414,16 @@ struct OverviewView: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
                     Text(title)
-                        .font(.caption2)
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                     if let badge {
                         Text(badge)
-                            .font(.system(size: 9, weight: .semibold))
+                            .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(color)
                     }
                 }
                 Text(value)
-                    .font(.subheadline.weight(.semibold))
+                    .font(.system(size: 15, weight: .semibold))
                     .monospacedDigit()
                     .lineLimit(1)
                     .minimumScaleFactor(0.75)
@@ -466,7 +465,7 @@ struct OverviewView: View {
                 HStack(alignment: .center, spacing: 6) {
                     HStack(alignment: .firstTextBaseline, spacing: 4) {
                         Text("\(online.count)")
-                            .font(.system(size: 28, weight: .semibold, design: .rounded))
+                            .font(.system(size: 22, weight: .semibold, design: .rounded))
                             .monospacedDigit()
                             .foregroundStyle(.primary)
                         Text("台在线")
@@ -476,7 +475,7 @@ struct OverviewView: View {
 
                     if offline > 0 {
                         Text("\(offline) 台离线")
-                            .font(.system(size: 10.5, weight: .medium))
+                            .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
@@ -547,7 +546,7 @@ struct OverviewView: View {
                 .fill(color)
                 .frame(width: 5, height: 5)
             Text("\(title) \(count)")
-                .font(.system(size: 10.5, weight: .medium))
+                .font(.system(size: 11, weight: .medium))
                 .monospacedDigit()
         }
         .foregroundStyle(color)
@@ -610,11 +609,11 @@ struct InfoRow: View {
     var body: some View {
         HStack {
             Text(label)
-                .font(.subheadline)
+                .font(.system(size: 15))
                 .foregroundStyle(.secondary)
             Spacer()
             Text(value)
-                .font(.subheadline)
+                .font(.system(size: 15))
                 .foregroundStyle(color)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
@@ -715,7 +714,7 @@ private struct HardwareGauge: View {
                 }
 
                 Text(title)
-                    .font(.caption.weight(.medium))
+                    .font(.system(size: 12, weight: .medium))
                     .lineLimit(1)
 
                 Spacer(minLength: 4)
@@ -787,7 +786,7 @@ private struct RingGauge: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.75)
                 Text(caption)
-                    .font(.caption2)
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
         }
@@ -795,8 +794,5 @@ private struct RingGauge: View {
     }
 }
 
-extension View {
-    func cardStyle() -> some View {
-        glassCard(padding: 14, cornerRadius: 22)
-    }
-}
+// v3.3.0：旧的 `cardStyle()` 别名已无人调用，随统一卡面一起删掉。
+// 卡片一律走 `CardPanel` / `cardSurface()`（见 DesignSystem.swift）。

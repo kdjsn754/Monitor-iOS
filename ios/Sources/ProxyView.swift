@@ -44,7 +44,7 @@ struct ProxyView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 14) {
+                VStack(spacing: UI.cardSpacing) {
                     heroCard
                     liveCard
                     // 没装插件就不出现这张卡：它只会给一个必然打不开的入口。
@@ -58,10 +58,9 @@ struct ProxyView: View {
                     configCard
                     accessCard
                 }
-                .padding(.horizontal, 16)
-                // v2.3.3：标题和刷新钮搬进导航栏（见 `pageChrome`），内容从栏下面开始，
-                // 这里 14 让第一张卡回到原来的 117pt。
-                .padding(.top, 14)
+                .padding(.horizontal, UI.pagePadding)
+                // v3.3.0：四页统一页边距 18 / 顶部 12（见 `DesignSystem.swift`）。
+                .padding(.top, 12)
                 .padding(.bottom, 28)
                 // 滚动手感（见 ScrollTuning.swift，v2.1.18 起）：保留橡皮筋回弹，
                 // 只把「内容不到一屏也允许下拉」关掉——那正是「一下弹回去」的来源。
@@ -179,15 +178,15 @@ struct ProxyView: View {
                         .fill(accent.opacity(0.12))
                         .frame(width: 46, height: 46)
                     Image(systemName: "shield.lefthalf.filled")
-                        .font(.system(size: 19, weight: .semibold))
+                        .font(UI.title())
                         .foregroundStyle(accent)
                 }
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text("OpenClash")
-                        .font(.headline)
+                        .font(.system(size: 17, weight: .semibold))
                     Text(statusDetail)
-                        .font(.caption)
+                        .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
@@ -236,13 +235,13 @@ struct ProxyView: View {
                 // 确认没装才说话。这一分支会把卡片变矮——那是对的，
                 // 这几排按钮本来就不该出现在没装插件的机器上。
                 Text("确认路由器已安装 OpenClash 插件，且 SSH 账号有权限读取 /etc/config/openclash。")
-                    .font(.caption2)
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassCard()
+        .cardSurface()
     }
 
     /// 状态徽标：圆点 + 文字，不套底、不套边（v2.3.13，和控制面板那枚同一套）。
@@ -252,7 +251,7 @@ struct ProxyView: View {
                 .fill(accent)
                 .frame(width: 7, height: 7)
             Text(statusText)
-                .font(.caption2.weight(.medium))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
         }
     }
@@ -266,7 +265,7 @@ struct ProxyView: View {
             }
         } label: {
             Text(title)
-                .font(.subheadline.weight(selected ? .semibold : .regular))
+                .font(UI.row(selected ? .semibold : .regular))
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 8)
                 .background(
@@ -294,7 +293,7 @@ struct ProxyView: View {
                 Image(systemName: icon)
                     .font(.system(size: 11, weight: .semibold))
                 Text(title)
-                    .font(.caption.weight(.medium))
+                    .font(.system(size: 12, weight: .medium))
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 9)
@@ -354,16 +353,16 @@ struct ProxyView: View {
                             icon: String, color: Color) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Label(label, systemImage: icon)
-                .font(.caption)
+                .font(.system(size: 12))
                 .foregroundStyle(color)
             Text(value)
-                .font(.system(size: 23, weight: .bold))
+                .font(.system(size: 22, weight: .semibold))
                 .monospacedDigit()
                 .foregroundStyle(color)
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
             Text("累计 \(total)")
-                .font(.caption2)
+                .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
@@ -411,7 +410,7 @@ struct ProxyView: View {
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(label)
-                    .font(.caption2)
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 Text(value)
                     .font(.system(size: 15, weight: .semibold))
@@ -449,12 +448,12 @@ struct ProxyView: View {
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
                         Text(configTitle)
-                            .font(.subheadline.weight(.semibold))
+                            .font(.system(size: 15, weight: .semibold))
                             .lineLimit(1)
                             .truncationMode(.middle)
                             .foregroundStyle(.primary)
                         Text(configDetail)
-                            .font(.caption2)
+                            .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
@@ -563,14 +562,14 @@ struct ProxyView: View {
             HStack(spacing: 6) {
                 if let usage {
                     Text(usage.amountText + (usage.percentText.map { "（\($0)）" } ?? ""))
-                        .font(.caption2)
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
                     Spacer(minLength: 4)
                     if let expire = usage.shortExpireText {
                         Text(expire)
-                            .font(.caption2)
+                            .font(.system(size: 11))
                             .foregroundStyle(usage.expireColor)
                             .lineLimit(1)
                             .layoutPriority(1)
@@ -580,21 +579,21 @@ struct ProxyView: View {
                     // 而且这时候 `subUsageError` 里的东西还不可信（可能刚被上一次
                     // 「配置不是来自订阅」写脏），所以这一条排在错误之前。
                     Text("正在读取流量…")
-                        .font(.caption2)
+                        .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
                     Spacer(minLength: 4)
                 } else if let error = model.subUsageError {
                     // 诊断文案最长也就「订阅没有返回 subscription-userinfo」这一档，
                     // 一行挤不下就缩一点，不再允许占两行——两行就把骨架撑高了。
                     Text(error)
-                        .font(.caption2)
+                        .font(.system(size: 11))
                         .foregroundStyle(.orange)
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
                     Spacer(minLength: 4)
                 } else {
                     Text("流量信息还没读到，点右上角可重试")
-                        .font(.caption2)
+                        .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
@@ -605,7 +604,7 @@ struct ProxyView: View {
             // 剩余行常驻。不限量套餐（`total=0`）本来就没有「剩余」，但位置得留着——
             // 否则换配置时从「有剩余」切到「无剩余」，卡片又会矮一行。
             Text(usage?.remainingText ?? "剩余 0 B")
-                .font(.caption2)
+                .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
@@ -627,7 +626,7 @@ struct ProxyView: View {
                 Image(systemName: icon)
                     .font(.system(size: 12, weight: .semibold))
                 Text(title)
-                    .font(.subheadline.weight(.semibold))
+                    .font(.system(size: 15, weight: .semibold))
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 11)
@@ -667,12 +666,12 @@ struct ProxyView: View {
             VStack(spacing: 12) {
                 HStack(spacing: 6) {
                     Text(lastCheckText)
-                        .font(.caption2)
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                     Spacer(minLength: 6)
                     if testedCount > 0 {
                         Text("\(okCount)/\(testedCount) 可达")
-                            .font(.caption2.weight(.semibold))
+                            .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(okCount == testedCount ? Color.green : Color.orange)
                     }
                 }
@@ -701,7 +700,7 @@ struct ProxyView: View {
                                 .font(.system(size: 11, weight: .semibold))
                         }
                         Text(isChecking ? "检测中…" : "重新检测")
-                            .font(.caption.weight(.medium))
+                            .font(.system(size: 12, weight: .medium))
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 10)
@@ -743,7 +742,7 @@ struct ProxyView: View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 6) {
                 Text(check.site.title)
-                    .font(.caption2)
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.85)
@@ -752,7 +751,7 @@ struct ProxyView: View {
             }
 
             Text(latencyText(check))
-                .font(.system(size: 17, weight: .semibold, design: .rounded))
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .foregroundStyle(latencyColor(check))
                 .lineLimit(1)
@@ -856,7 +855,7 @@ private struct ProxyPanelCard: View {
                     accessory: { panelBadge }) {
             VStack(alignment: .leading, spacing: 10) {
                 Text(panelAddress)
-                    .font(.caption2)
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -868,7 +867,7 @@ private struct ProxyPanelCard: View {
                         Image(systemName: "safari.fill")
                             .font(.system(size: 13, weight: .semibold))
                         Text("打开控制面板")
-                            .font(.subheadline.weight(.semibold))
+                            .font(.system(size: 15, weight: .semibold))
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)
@@ -893,7 +892,7 @@ private struct ProxyPanelCard: View {
                 if showsPanelWarning {
                     Label("面板端口 \(oc.panelPort) 无响应，或面板密码不一致，数字停在旧值。",
                           systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption2)
+                        .font(.system(size: 11))
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -939,7 +938,7 @@ private struct ProxyPanelCard: View {
                 .fill(tone)
                 .frame(width: 7, height: 7)
             Text(title)
-                .font(.caption2.weight(.medium))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
         }
     }
@@ -1031,7 +1030,7 @@ private struct ProxyConfigView: View {
                 apply()
             } label: {
                 Text(actionTitle)
-                    .font(.subheadline.weight(.semibold))
+                    .font(.system(size: 15, weight: .semibold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                     .frame(maxWidth: .infinity)
@@ -1048,7 +1047,7 @@ private struct ProxyConfigView: View {
         let isApplied = name == liveApplied
         return HStack(spacing: 10) {
             Text(name)
-                .font(.body)
+                .font(.system(size: 15))
                 .lineLimit(1)
                 .truncationMode(.middle)
 
@@ -1208,11 +1207,11 @@ private struct SubscriptionListView: View {
             if model.subscriptions.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(model.subsLoaded ? "还没有订阅" : "正在读取订阅…")
-                        .font(.subheadline)
+                        .font(.system(size: 15))
                         .foregroundStyle(.secondary)
                     if model.subsLoaded {
                         Text("要新建，点右上角「添加」。")
-                            .font(.caption2)
+                            .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -1245,12 +1244,12 @@ private struct SubscriptionListView: View {
             } label: {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(sub.name)
-                        .font(.body)
+                        .font(.system(size: 15))
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .foregroundStyle(Color(uiColor: .label))
                     Text(sub.detail)
-                        .font(.caption2)
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -1313,14 +1312,14 @@ private struct SubscriptionListView: View {
                     .padding(.top, 3)
                 HStack(spacing: 6) {
                     Text(usage.amountText + (usage.percentText.map { "（\($0)）" } ?? ""))
-                        .font(.caption2)
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.85)
                     Spacer(minLength: 4)
                     if let expire = usage.expireText {
                         Text(expire)
-                            .font(.caption2)
+                            .font(.system(size: 11))
                             .foregroundStyle(usage.expireColor)
                             .lineLimit(1)
                             .layoutPriority(1)
@@ -1329,7 +1328,7 @@ private struct SubscriptionListView: View {
                 // v2.4.24：和配置卡一样补一行剩余流量。
                 if let remaining = usage.remainingText {
                     Text(remaining)
-                        .font(.caption2)
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.85)
@@ -1343,7 +1342,7 @@ private struct SubscriptionListView: View {
                     .frame(height: 5)
                     .padding(.top, 3)
                 Text("正在读取流量…")
-                    .font(.caption2)
+                    .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
             }
         }
@@ -1360,7 +1359,7 @@ private struct SubscriptionListView: View {
                         ProgressView().controlSize(.mini)
                     }
                     Text(model.subsBusy == nil ? "全部更新" : "正在更新…")
-                        .font(.subheadline.weight(.semibold))
+                        .font(.system(size: 15, weight: .semibold))
                     Spacer()
                 }
                 .padding(.vertical, 4)
@@ -1391,9 +1390,9 @@ private struct SubscriptionListView: View {
                 SheetOverlayCard {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("会重启内核")
-                            .font(.headline)
+                            .font(.system(size: 17, weight: .semibold))
                         Text("正在用的配置在这一批里。更新后会重启 OpenClash，正在走的连接会断一下（约 5 秒）。")
-                            .font(.caption)
+                            .font(.system(size: 12))
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -1457,7 +1456,7 @@ private struct SubscriptionEditView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("订阅地址")
                     TextEditor(text: $address)
-                        .font(.footnote.monospaced())
+                        .font(.system(size: 12, design: .monospaced))
                         .frame(minHeight: 76)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
@@ -1465,7 +1464,7 @@ private struct SubscriptionEditView: View {
                         .overlay(alignment: .topLeading) {
                             if address.isEmpty {
                                 Text("一行一个地址")
-                                    .font(.footnote)
+                                    .font(.system(size: 12))
                                     .foregroundStyle(.tertiary)
                                     .padding(.top, 8)
                                     .allowsHitTesting(false)
@@ -1478,7 +1477,7 @@ private struct SubscriptionEditView: View {
                     Text("User-Agent")
                         .frame(width: 96, alignment: .leading)
                     TextField("clash-verge/v2.4.5", text: $ua)
-                        .font(.caption.monospaced())
+                        .font(.system(size: 12, design: .monospaced))
                         .multilineTextAlignment(.trailing)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
@@ -1692,10 +1691,10 @@ private struct KeywordEditor: View {
 
             Section {
                 Text("新加坡&奈飞")
-                    .font(.callout.monospaced())
+                    .font(.system(size: 15, design: .monospaced))
                     .adaptiveRowBackground()
                 Text("名字里同时有这两个词，才保留")
-                    .font(.caption)
+                    .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .adaptiveRowBackground()
             } header: {
@@ -1727,16 +1726,16 @@ struct NoticeRow: View {
         VStack(alignment: .leading, spacing: 5) {
             Label {
                 Text(notice.title)
-                    .font(.footnote.weight(.semibold))
+                    .font(.system(size: 12, weight: .semibold))
             } icon: {
                 Image(systemName: notice.symbol)
-                    .font(.footnote)
+                    .font(.system(size: 12))
             }
             .foregroundStyle(tint)
 
             if !notice.detail.isEmpty {
                 Text(notice.detail)
-                    .font(.caption2)
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
