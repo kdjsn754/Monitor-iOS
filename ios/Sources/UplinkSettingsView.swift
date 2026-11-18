@@ -557,18 +557,38 @@ struct UplinkSettingsView: View {
 
     // MARK: - 蜂窝面板
 
+    /// 这一格管两条完全不同的通道，**以前只认后面那条**（2026-11-18 用户插着手机
+    /// 开了 USB 热点共享，界面照样写「没有检测到 USB Modem」）：
+    /// - **USB Modem**：插 SIM 卡的 4G/5G 棒，判据是 `cellular.modem` 的 `modems` 非空；
+    /// - **USB 热点共享**：手机用数据线把网络分给路由器，判据是内核里多出的一张
+    ///   挂在 USB 总线上的网卡（实机 `usb0`），型号从 sysfs 读（`Xiaomi 14`）。
+    /// 有设备不等于连着：手机没开共享、或路由器没 `ifup tethering` 时，网卡在、
+    /// 没载波也没 IP——这时说的是「未连接」，不是「未检测到」。
     private var cellularPanel: some View {
-        card("蜂窝网络", trailing: rep.modemPresent ? "已插入" : "未检测到") {
+        card("蜂窝网络", trailing: cellularTrailing) {
             HStack(spacing: 10) {
-                Image(systemName: "antenna.radiowaves.left.and.right")
+                Image(systemName: rep.modemPresent ? "antenna.radiowaves.left.and.right"
+                                                   : "personalhotspot")
                     .font(.system(size: 15))
                     .foregroundStyle(.secondary)
-                Text(rep.modemPresent ? "检测到 USB Modem" : "没有检测到 USB Modem")
+                Text(cellularTitle)
                     .font(.system(size: 15))
                 Spacer(minLength: 0)
             }
             .padding(.vertical, 12)
         }
+    }
+
+    private var cellularTrailing: String {
+        if rep.modemPresent { return "已插入" }
+        guard let usb = rep.usbUplink else { return "未检测到" }
+        return usb.connected ? "已连接" : "未连接"
+    }
+
+    private var cellularTitle: String {
+        if rep.modemPresent { return "检测到 USB Modem" }
+        guard let usb = rep.usbUplink else { return "没有检测到 USB Modem 或手机热点" }
+        return usb.connected ? "\(usb.label) · \(usb.ip)" : "检测到 \(usb.label)（手机热点）"
     }
 
     // MARK: - 表单是否改过

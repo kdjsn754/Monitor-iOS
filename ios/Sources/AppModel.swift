@@ -1172,7 +1172,8 @@ private struct NetVap {
     /// repeater.@network[0].ssid='@xxx'    ← 一条条已保存的上级网络
     /// repeater.@network[0].selected='1'   ← 标了这条是当前在用的
     /// ```
-    private func parseRepeater(config: String?, status: String?, modem: String?) -> RepeaterInfo {
+    private func parseRepeater(config: String?, status: String?, modem: String?,
+                               usb: String? = nil) -> RepeaterInfo {
         var info = RepeaterInfo()
 
         // ---- 配置面 ----
@@ -1258,6 +1259,26 @@ private struct NetVap {
         // ---- 蜂窝 ----
         if let object = json(modem), let list = object["modems"] as? [Any] {
             info.modemPresent = !list.isEmpty
+        }
+
+        // ---- USB 热点共享 ----
+        //
+        // 每行是 `USB|网卡|有IP(0/1)|IPv4|-|-`，由采集脚本从
+        // `/sys/class/net/*/device/../idVendor` 认出来（有 idVendor 就是挂在 USB 上的
+        // 网卡，`eth0` 这类平台设备没有）。**只取第一条**：一台机器同时插两根数据线
+        // 共享的情况没意义，官方网页那页也只让其选一个设备。
+        for line in (usb ?? "").split(separator: "\n") {
+            let text = String(line).trimmingCharacters(in: .whitespaces)
+            guard text.hasPrefix("USB|") else { continue }
+            let parts = text.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+            guard parts.count >= 6 else { continue }
+            var device = UsbUplink()
+            device.name = parts[1]
+            device.ip = parts[3] == "-" ? "" : parts[3]
+            device.manufacturer = parts[4] == "-" ? "" : parts[4]
+            device.product = parts[5] == "-" ? "" : parts[5]
+            info.usbUplink = device
+            break
         }
         return info
     }
@@ -1587,7 +1608,8 @@ private struct NetVap {
         // 蜂窝面 `ubus call cellular.modem status`。**不碰 LuCI 那一套**。
         info.repeater = parseRepeater(config: sections["REPEATER"],
                                       status: sections["REPSTAT"],
-                                      modem: sections["MODEM"])
+                                      modem: sections["MODEM"],
+                                      usb: sections["USB"])
 
         // ---- 无线 ----
         //
@@ -2378,7 +2400,7 @@ private struct NetVap {
         guard connected else { return "还没连上路由器" }
         switch mode {
         case .cellular:
-            return "没有检测到 USB Modem，连不了蜂窝网络"
+            return "没有检测到 USB Modem 或手机热点，连不了这条链路"
         case .repeater:
             let lines = [
                 "uci -q set network.wwan.disabled='0'",
@@ -4865,6 +4887,14 @@ private extension AppModel {
             // 状态面 `ubus call repeater status` 给信号、频段、信道、BSSID、来自中继的 DNS。
             // 蜂窝看 `cellular.modem status` 的 `modems`：为空就是没插 Modem。
             //
+            // **USB 热点共享是另一条通道（v3.2.1）**：手机开「USB 网络共享」后内核里多
+            // 一张网卡（这台 `usb0`），`cellular.modem` 完全不报它——用户 2026-11-18
+            // 插着小米 14 开了共享，界面还写「没有检测到 USB Modem」就是这个。
+            // `@@USB` 用「`device/../idVendor` 可读」认出挂在 USB 总线上的网卡
+            // （`eth0`/`br-lan` 这类平台设备没有 idVendor，天然排除），型号从 sysfs 读。
+            // 官方 App 也是手机与 Modem 并列两条（`TetheringService` + `ModemService`），
+            // 网页端标签是 `manufacturer + " (Android)"`。**别再合并成一句「USB Modem」**。
+            //
             // 无线仍然是 UCI（配置面）+ `iw`（实测面）两路：MTK 私有驱动下
             // 读不到 SSID 的 VAP 很常见（主 SSID 被 `disabled=1` 关掉时就是这样），
             // 所以 SSID / 加密 / 开关一律以 UCI 为准，`iw` 只补信道、频宽、功率。
@@ -4895,6 +4925,10 @@ private extension AppModel {
             // `"{\"name\":\"$n2\"}"` 的话 Swift 的 `\"` 先被吃成 `"`，shell 拿到的是
             // `"{"name":"$n2"}"`，引号在第二个 `"` 处就闭合了，拼出来少引号、ubus 直接报错。
             // （v3.1.6 起这一段的循环变量叫 `n2`：`n` 已经给慢档的拍数计数器用了。）
+            //
+            // **`usb*` 不进网口列表（v3.2.1）**：手机 USB 热点共享会让内核多出一张
+            // `usb0`，它有 `device` 却没有载波也没有地址，混进「网络端口」只是多一个
+            // 永远「未插线」的假口。它归蜂窝那张卡（见上面的 `@@USB`）。
             //
             // **上级无线按「哪条真连上了」挑接口，不是按「哪条存在」（v3.1.10）**：
             // 这台机器挂了两条中继虚接口——`apclii0` 是 5G，`apcli0` 是 2.4G。
@@ -4979,9 +5013,22 @@ private extension AppModel {
             ubus call repeater status 2>/dev/null
             echo @@MODEM
             ubus call cellular.modem status 2>/dev/null
+            echo @@USB
+            for d in /sys/class/net/*; do
+              n3=${d##*/}
+              [ -r "$d/device/../idVendor" ] || continue
+              read -r mf < "$d/device/../manufacturer" 2>/dev/null
+              read -r pd < "$d/device/../product" 2>/dev/null
+              ip4=$(ip -4 addr show dev "$n3" 2>/dev/null | awk '/inet /{print $2; exit}')
+              ip4=${ip4%%/*}
+              [ -n "$ip4" ] && up=1 || up=0
+              [ -n "$mf" ] || mf=-
+              [ -n "$pd" ] || pd=-
+              echo "USB|$n3|$up|${ip4:--}|$mf|$pd"
+            done
             for d in /sys/class/net/*; do
               n2=${d##*/}
-              case "$n2" in lo|br-*|*.*|ppp*|apcli*|ra*|rai*|rax*|wlan*|sit*|gre*|tun*|tap*|bond*|veth*|docker*|ifb*) continue;; esac
+              case "$n2" in lo|br-*|*.*|ppp*|apcli*|ra*|rai*|rax*|wlan*|usb*|sit*|gre*|tun*|tap*|bond*|veth*|docker*|ifb*) continue;; esac
               [ -e "$d/device" ] || continue
               st=$(ubus call network.device status '{"name":"'"$n2"'"}' 2>/dev/null)
               c=$(printf '%s' "$st" | jsonfilter -e '@.carrier' 2>/dev/null)

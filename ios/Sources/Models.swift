@@ -312,6 +312,32 @@ struct RepeaterChoice: Identifiable {
     var id: String { value }
 }
 
+/// 挂在 USB 上的网络设备（手机「USB 热点共享」）。
+///
+/// 路由器内核里会多出一个网卡（这台机器叫 `usb0`），它的 `device` 指向 USB 总线，
+/// 往上两级能读到厂商与型号（实机：`Xiaomi` / `Xiaomi 14`）。
+/// **有设备 ≠ 已连上**：手机没点「USB 网络共享」、或路由器这边还没 `ifup tethering` 时，
+/// 网卡在、但没有载波、也没有 IPv4——官方网页那页这时给的是「连接」按钮。
+struct UsbUplink: Equatable {
+    /// 网卡名，实机是 `usb0`（另有 `rndis0` / `ecm0` 这类叫法）。
+    var name = ""
+    /// 厂商，读不到是空串。
+    var manufacturer = ""
+    /// 型号，读不到是空串。
+    var product = ""
+    /// 已经拿到 IPv4（= 这条路真的通了）。
+    var ip = ""
+
+    var connected: Bool { !ip.isEmpty }
+
+    /// 界面上一行里用的名字：型号优先，退到厂商，再退到网卡名。
+    var label: String {
+        if !product.isEmpty { return product }
+        if !manufacturer.isEmpty { return manufacturer }
+        return name
+    }
+}
+
 /// 中继（无线中继）的配置与状态。
 ///
 /// **数据只走官方通道**（见 `开发交接.md` 3.0）：配置读 `uci show repeater`，
@@ -359,6 +385,13 @@ struct RepeaterInfo {
     var saved: [RepeaterSavedNetwork] = []
     /// 有没有插 USB Modem（蜂窝模式能不能用）。
     var modemPresent = false
+    /// 挂在 USB 上的网络设备——手机「USB 热点共享」走的就是这条。
+    ///
+    /// 和 `modemPresent` 是**两件事**：Modem 是插 SIM 卡的 4G/5G 棒（`cellular.modem`
+    /// 的 `modems` 非空），热点共享是手机用数据线把它的网络分给路由器（内核里多出
+    /// 一个 `usb0` 这样的网卡，厂商自报 RNDIS/NCM）。2026-11-18 用户插着小米 14 开了
+    /// 热点共享，界面却写「没有检测到 USB Modem」——因为以前只问了前者。
+    var usbUplink: UsbUplink?
 
     var connected: Bool { state == "connected" }
 
