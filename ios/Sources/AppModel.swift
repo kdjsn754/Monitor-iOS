@@ -1313,6 +1313,8 @@ private struct NetVap {
         let defdev = firstLine(sections["DEFDEV"])
         let wanStatus = json(sections["WANST"])
         let wwanStatus = json(sections["WWANST"])
+        // 热点共享（v3.2.2）：`network.tethering` 存在时才有这一段，没连过就是空的。
+        let tethStatus = json(sections["TETHST"])
 
         func l3(_ object: [String: Any]?) -> String {
             guard let value = object?["l3_device"] as? String, !value.isEmpty else { return "" }
@@ -1334,12 +1336,19 @@ private struct NetVap {
         } else if !defdev.isEmpty, l3(wanStatus) == defdev {
             chosen = .wired
             status = wanStatus
+        } else if !defdev.isEmpty, l3(tethStatus) == defdev {
+            chosen = .tethering
+            status = tethStatus
         } else if isUp(wanStatus) {
             chosen = .wired
             status = wanStatus
         } else if isUp(wwanStatus) {
             chosen = .repeater
             status = wwanStatus
+        } else if isUp(tethStatus) {
+            // 中继与有线都没起来、只剩手机热点共享在顶着（v3.2.2 加）。
+            chosen = .tethering
+            status = tethStatus
         }
 
         info.uplink = status == nil ? UplinkKind.none : chosen
@@ -2436,6 +2445,124 @@ private struct NetVap {
                 guard !wwan, wan else { return "切换没生效（回读 wwan=\(wwan ? 1 : 0) wan=\(wan ? 1 : 0)）" }
             } else {
                 guard wwan, !wan else { return "切换没生效（回读 wwan=\(wwan ? 1 : 0) wan=\(wan ? 1 : 0)）" }
+            }
+            return nil
+        } catch {
+            return describe(error)
+        }
+    }
+
+    // MARK: - 手机 USB 热点共享（v3.2.2）
+
+    /// 连接手机 USB 热点共享：建 `network.tethering` 接口并让它起来。
+    ///
+    /// **照官方那套写**，不是我自己发明的组合。路由器的 RPC 是编译过的 Lua
+    /// （`/usr/lib/oui-httpd/rpc/tethering`，字符串表里能读出 `delete network` /
+    /// `interface` / `proto=dhcp` / `ifname` / `metric` / `firewall`），
+    /// `/lib/functions/tethering.sh` 的 `tethering_event` 是同一件事的明文版：
+    ///
+    /// ```
+    /// uci delete network.tethering
+    /// uci set network.tethering=interface
+    /// uci set network.tethering.proto=dhcp
+    /// uci set network.tethering.ifname=<usb 网卡>
+    /// uci set network.tethering.metric=<kmwan.tethering.metric，这台是 30>
+    /// uci add_list firewall.@zone[<wan>].network=tethering   # 不加就没有 NAT
+    /// uci commit network; uci commit firewall
+    /// /etc/init.d/network reload; /etc/init.d/firewall reload
+    /// ```
+    ///
+    /// **为什么这个按钮敢放进 App**：metric 30 比中继 `wwan` 的 20 大，netifd/kmwan
+    /// 只会把它当**备胎**——中继还活着时默认路由不会被这条抢走。真正会换出口的是
+    /// kmwan 的 failover（中继和有线都断了才轮到它），那本来就是这套固件的行为。
+    ///
+    /// 返回 `(error, note)`：`error` 是「没写进去」，红卡；`note` 是「写进去了但
+    /// 手机还没分配地址」，正常提示。**不再拿一个字符串兼任两件事**。
+    func connectTethering(_ device: String) async -> (error: String?, note: String?) {
+        guard connected else { return (error: "还没连上路由器", note: nil) }
+        let name = device.trimmingCharacters(in: .whitespaces)
+        // 网卡名会直接拼进 uci 命令，先卡死字符集（这台是 `usb0`，别的固件可能是
+        // `rndis0` / `ecm0`）。不合法就什么都不发。
+        guard !name.isEmpty,
+              name.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" }) else {
+            return (error: "网卡名不对劲（\(device)），不敢往上写", note: nil)
+        }
+
+        // 防火墙那两行：找 network 列表里已经有 `wwan` 的那个 zone（GL 上就是 wan 区），
+        // 把 `tethering` 补进去。`uci get` 的列表是空格分隔、不带引号，所以两边垫空格再匹配。
+        let lines = [
+            "uci -q delete network.tethering",
+            "uci -q set network.tethering='interface'",
+            "uci -q set network.tethering.proto='dhcp'",
+            "uci -q set network.tethering.ifname='\(name)'",
+            "uci -q set network.tethering.metric='30'",
+            "uci -q set network.tethering.disabled='0'",
+            "uci -q commit network",
+            "Z=''; for s in $(uci -q show firewall | grep '\\.network=' | awk -F. '{print $2}'); do case \" $(uci -q get \"firewall.$s.network\") \" in *' wwan '*) Z=$s;; esac; done",
+            "[ -n \"$Z\" ] && case \" $(uci -q get \"firewall.$Z.network\") \" in *' tethering '*) ;; *) uci -q add_list \"firewall.$Z.network=tethering\";; esac",
+            "uci -q commit firewall",
+            "/etc/init.d/network reload >/dev/null 2>&1",
+            "/etc/init.d/firewall reload >/dev/null 2>&1",
+            // DHCP 一般 2~5 秒。等 3 秒再看一眼：拿到了地址就能直接报给用户，
+            // 没有也不算失败（配置已经确认写进去了）。
+            "sleep 3",
+            "echo @@IFN; uci -q get network.tethering.ifname",
+            "echo @@PROTO; uci -q get network.tethering.proto",
+            "echo @@DIS; uci -q get network.tethering.disabled",
+            "echo @@FW; uci -q get \"firewall.$Z.network\"",
+            "echo @@ST; ubus call network.interface.tethering status 2>/dev/null"
+        ]
+
+        do {
+            let sections = parseSections(try await execute(lines.joined(separator: "; "), timeout: 90))
+            func read(_ key: String) -> String {
+                (sections[key] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            guard read("IFN") == name else {
+                return (error: "接口没写成 \(name)（读回来是「\(read("IFN"))」）", note: nil)
+            }
+            guard read("PROTO") == "dhcp" else {
+                return (error: "协议没写成 DHCP（读回来是「\(read("PROTO"))」）", note: nil)
+            }
+            guard read("DIS") == "0" else {
+                return (error: "接口被标成了停用（disabled=\(read("DIS"))）", note: nil)
+            }
+
+            let state = json(read("ST"))
+            var ip = ""
+            if let list = state?["ipv4-address"] as? [[String: Any]],
+               let first = list.first,
+               let address = first["address"] as? String, !address.isEmpty {
+                ip = address
+            }
+            let up = (state?["up"] as? Bool) ?? false
+            if up, !ip.isEmpty { return (error: nil, note: ip) }
+            if up { return (error: nil, note: "等手机分配地址") }
+            return (error: nil, note: "接口还没起来，确认手机上「USB 网络共享」是开着的")
+        } catch {
+            return (error: describe(error), note: nil)
+        }
+    }
+
+    /// 断开手机热点共享：只把接口标成停用，**保留 `ifname`**。
+    ///
+    /// 保留的原因：再连的时候不用重新认网卡，一点就回来。停用之后固件的 hotplug
+    /// （`/etc/hotplug.d/usb/31-tethering`）会看到 `disabled=1` 而不再自动接管——
+    /// 这正是我们要的：**用户点了断开，就别在插拔数据线时偷偷连回去**。
+    func disconnectTethering() async -> String? {
+        guard connected else { return "还没连上路由器" }
+        let lines = [
+            "uci -q set network.tethering.disabled='1'",
+            "uci -q commit network",
+            "ifdown tethering >/dev/null 2>&1",
+            "/etc/init.d/network reload >/dev/null 2>&1",
+            "echo @@DIS; uci -q get network.tethering.disabled"
+        ]
+        do {
+            let sections = parseSections(try await execute(lines.joined(separator: "; "), timeout: 60))
+            let disabled = (sections["DIS"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard disabled == "1" else {
+                return "没能停用热点共享（读回来是「\(disabled)」）"
             }
             return nil
         } catch {
@@ -4954,6 +5081,8 @@ private extension AppModel {
             ubus call network.interface.wan status 2>/dev/null
             echo @@WWANST
             ubus call network.interface.wwan status 2>/dev/null
+            echo @@TETHST
+            ubus call network.interface.tethering status 2>/dev/null
             echo @@LANST
             ubus call network.interface.lan status 2>/dev/null
             echo @@WANSPD

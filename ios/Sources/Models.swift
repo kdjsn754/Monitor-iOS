@@ -111,12 +111,21 @@ enum UplinkKind: String {
     case none
     case wired
     case repeater
+    /// 手机 USB 热点共享（v3.2.2）。
+    ///
+    /// 和「中继 / 以太网」并列的第三条出口：路由器上是一个 `network.tethering` 接口，
+    /// 出口网卡是挂在 USB 总线上的那张（这台是 `usb0`）。**和插 SIM 卡的 USB Modem
+    /// 不是一回事**——那条是 `cellular.modem` 管的 `wwan`，这条是手机把它的网络
+    /// 用数据线分给路由器。官方 App 的 Internet 页也是四类并列
+    /// （`internet_*` 那组：repeater / cable / modem / tethering）。
+    case tethering
 
     var title: String {
         switch self {
         case .none: return "未联网"
         case .wired: return "以太网"
         case .repeater: return "中继"
+        case .tethering: return "热点共享"
         }
     }
 }
@@ -197,6 +206,7 @@ struct NetworkInfo {
         switch uplink {
         case .repeater: return "wwan"
         case .wired: return "wan"
+        case .tethering: return "tethering"
         case .none: return "wan"
         }
     }
@@ -234,6 +244,11 @@ struct NetworkInfo {
             return upstreamSSID.isEmpty ? "中继" : "中继 · \(upstreamSSID)"
         case .wired:
             return uplinkIP.isEmpty ? "以太网" : "以太网 · \(uplinkIP)"
+        case .tethering:
+            // 名字用手机型号（`Xiaomi 14`），读数时比「热点共享」四个字有用得多。
+            let name = repeater.usbUplink?.label ?? ""
+            let head = name.isEmpty ? "热点共享" : name
+            return uplinkIP.isEmpty ? head : "\(head) · \(uplinkIP)"
         }
     }
 

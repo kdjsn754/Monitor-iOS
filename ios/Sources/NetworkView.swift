@@ -196,7 +196,7 @@ struct NetworkView: View {
             openUplink()
         } label: {
             HStack(spacing: 7) {
-                Image(systemName: info.uplink == .repeater ? "wifi" : "globe")
+                Image(systemName: uplinkNodeIcon)
                     .font(.system(size: 12, weight: .semibold))
                 Text(info.uplinkLabel)
                     .font(.system(size: 13.5, weight: .medium))
@@ -229,6 +229,17 @@ struct NetworkView: View {
             }
         }
         .buttonStyle(.plain)
+    }
+
+    /// 出口那个胶囊左边的小图标。热点共享单独给一个手机图标——它既不是无线中继，
+    /// 也不是网线（v3.2.2）。
+    private var uplinkNodeIcon: String {
+        switch info.uplink {
+        case .repeater: return "wifi"
+        case .wired: return "globe"
+        case .tethering: return "personalhotspot"
+        case .none: return "globe"
+        }
     }
 
     /// 出口 → 路由器 的那一截竖线：上深下浅，像光从出口流进路由器；断线整段变灰。
@@ -440,7 +451,7 @@ struct NetworkView: View {
         card("上网", trailing: info.uplink == .none ? "未联网" : info.protoLabel) {
             metricGrid([
                 [("方式", info.uplink.title, nil),
-                 ("上级网络", info.upstreamSSID.isEmpty ? "—" : info.upstreamSSID, nil)],
+                 ("上级网络", upstreamName, nil)],
                 [("IP 地址", info.uplinkIP.isEmpty ? "—" : info.uplinkIP, nil),
                  ("网关", info.uplinkGateway.isEmpty ? "—" : info.uplinkGateway, nil)],
                 [("信号", signalText(info.upstreamSignal), nil),
@@ -460,6 +471,22 @@ struct NetworkView: View {
             // **v2.9.5 去掉「重新连接」**（用户 2026-11-15：「去掉上网瓦片的重新连接按钮」）。
             // 它一直是这一卡里唯一的动作，和下面「设备」区的操作挤在一起看着像两套东西；
             // 真要重连，断开再把中继切一下也能做到，不值得在这一卡里留一颗按钮。
+        }
+    }
+
+    /// 「上级网络」那一格：中继是 SSID，热点共享是手机型号。
+    ///
+    /// 以前这一格只认 `upstreamSSID`，热点共享上网时它会空着写「—」，
+    /// 而「方式」那一格明明写着「热点共享」——同一行自相矛盾（v3.2.2）。
+    private var upstreamName: String {
+        switch info.uplink {
+        case .tethering:
+            let model = info.repeater.usbUplink?.label ?? ""
+            return model.isEmpty ? "—" : model
+        case .repeater:
+            return info.upstreamSSID.isEmpty ? "—" : info.upstreamSSID
+        case .wired, .none:
+            return "—"
         }
     }
 

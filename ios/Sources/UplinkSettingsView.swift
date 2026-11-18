@@ -64,6 +64,8 @@ struct UplinkSettingsView: View {
     @State private var errorText: String?
     /// 切上网方式的确认弹窗
     @State private var pendingMode: UplinkMode?
+    /// 断开热点共享的确认弹窗（v3.2.2）
+    @State private var pendingTetherOff = false
 
     private var info: NetworkInfo { model.network }
     private var rep: RepeaterInfo { info.repeater }
@@ -73,6 +75,8 @@ struct UplinkSettingsView: View {
         switch info.uplink {
         case .repeater: return .repeater
         case .wired: return .wired
+        // 热点共享归在「蜂窝」那一格里（官方也是手机热点与 Modem 并列在同一页）。
+        case .tethering: return .cellular
         case .none: return nil
         }
     }
@@ -207,6 +211,7 @@ struct UplinkSettingsView: View {
         switch info.uplink {
         case .repeater: return "中继上网"
         case .wired: return "有线上网"
+        case .tethering: return "热点共享上网"
         case .none: return "未联网"
         }
     }
@@ -224,6 +229,13 @@ struct UplinkSettingsView: View {
             var parts = [info.protoLabel, info.bestPortLabel]
             if !info.wanCable { parts[0] = "未插网线" }
             return parts.joined(separator: " · ")
+        case .tethering:
+            // 手机型号 + 网卡名：`Xiaomi 14 · usb0 · DHCP`
+            var parts: [String] = []
+            if let usb = rep.usbUplink, !usb.label.isEmpty { parts.append(usb.label) }
+            if let usb = rep.usbUplink, !usb.name.isEmpty { parts.append(usb.name) }
+            parts.append(info.protoLabel)
+            return parts.joined(separator: " · ")
         case .none:
             // 说明性小字一律不写（用户 2026-10-31 的规矩），「未联网」由标题给出。
             return ""
@@ -234,6 +246,7 @@ struct UplinkSettingsView: View {
         switch info.uplink {
         case .repeater: return "wifi"
         case .wired: return "cable.connector"
+        case .tethering: return "personalhotspot"
         case .none: return "wifi.slash"
         }
     }
@@ -247,6 +260,7 @@ struct UplinkSettingsView: View {
         switch info.uplink {
         case .repeater: return rep.connected ? "已连接" : "已启用"
         case .wired: return "已连接"
+        case .tethering: return "已连接"
         case .none: return "未联网"
         }
     }
@@ -564,6 +578,10 @@ struct UplinkSettingsView: View {
     ///   挂在 USB 总线上的网卡（实机 `usb0`），型号从 sysfs 读（`Xiaomi 14`）。
     /// 有设备不等于连着：手机没开共享、或路由器没 `ifup tethering` 时，网卡在、
     /// 没载波也没 IP——这时说的是「未连接」，不是「未检测到」。
+    ///
+    /// **v3.2.2 起这张卡能动手**：认出设备之后给一颗「连接热点共享」（写
+    /// `network.tethering` + 防火墙 wan 区，见 `AppModel.connectTethering`），
+    /// 连着的时候给「断开」。这跟网页端「热点共享」那页是同一件事、同一份配置。
     private var cellularPanel: some View {
         card("蜂窝网络", trailing: cellularTrailing) {
             HStack(spacing: 10) {
@@ -573,10 +591,48 @@ struct UplinkSettingsView: View {
                     .foregroundStyle(.secondary)
                 Text(cellularTitle)
                     .font(.system(size: 15))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
                 Spacer(minLength: 0)
             }
             .padding(.vertical, 12)
+
+            // 只有「手机热点共享」这条路能在 App 里接/断（v3.2.2）。USB Modem 走的是
+            // `wwan`（`cellular.modem`），插上就在，没有「连接」这个动作。
+            if let usb = rep.usbUplink, !rep.modemPresent {
+                divider
+                metricRow(("接口", usb.name, nil),
+                          ("地址", usb.ip.isEmpty ? "—" : usb.ip, nil))
+                divider
+                if tetherOn {
+                    redRow("断开热点共享") { pendingTetherOff = true }
+                } else {
+                    modeSwitchButton("连接热点共享", enabled: true) {
+                        Task { await connectTether(usb) }
+                    }
+                }
+            }
         }
+        .confirmationDialog(
+            "断开热点共享",
+            isPresented: Binding(get: { pendingTetherOff },
+                                 set: { if !$0 { pendingTetherOff = false } }),
+            titleVisibility: .visible
+        ) {
+            Button("断开", role: .destructive) { Task { await disconnectTether() } }
+            Button("取消", role: .cancel) { pendingTetherOff = false }
+        } message: {
+            Text("断开后手机的网络不再分给路由器；数据线不用拔，随时能再连。")
+        }
+    }
+
+    /// 热点共享现在是「通着」还是「没通」。
+    ///
+    /// 两个判据任一成立就算通：网卡上有 IPv4（`UsbUplink.connected`），或者默认路由
+    /// 已经落在 `tethering` 上（`info.uplink == .tethering`）。前一个是常态
+    /// （metric 30 比中继的 20 大，它平时只拿地址、不当默认出口）。
+    private var tetherOn: Bool {
+        info.uplink == .tethering || (rep.usbUplink?.connected ?? false)
     }
 
     private var cellularTrailing: String {
@@ -588,7 +644,8 @@ struct UplinkSettingsView: View {
     private var cellularTitle: String {
         if rep.modemPresent { return "检测到 USB Modem" }
         guard let usb = rep.usbUplink else { return "没有检测到 USB Modem 或手机热点" }
-        return usb.connected ? "\(usb.label) · \(usb.ip)" : "检测到 \(usb.label)（手机热点）"
+        // 地址不再写进标题（v3.2.2）：下面那行「地址」已经写着，一处就够。
+        return usb.connected ? "\(usb.label)（手机热点）" : "检测到 \(usb.label)（手机热点）"
     }
 
     // MARK: - 表单是否改过
@@ -704,6 +761,28 @@ struct UplinkSettingsView: View {
         .buttonStyle(.plain)
         .disabled(!enabled || busy)
         .padding(.vertical, 11)
+    }
+
+    /// 反向动作行：红字 + 一行高（断开热点共享）。
+    ///
+    /// 用红字而不是蓝底按钮：蓝底是「去做一件事」（切换链路、连接），红字是
+    /// 「把现在这个停掉」。红值和设置页「断开并清除密码」、网络页「已拦截」同一个
+    /// （`0.85 / 0.25 / 0.22`），别新开一个红。
+    private func redRow(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                Image(systemName: "xmark.circle")
+                    .font(.system(size: 13, weight: .medium))
+                Text(title)
+                    .font(.system(size: 15))
+                Spacer(minLength: 8)
+            }
+            .foregroundStyle(Color(red: 0.85, green: 0.25, blue: 0.22))
+            .padding(.vertical, 11)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(busy)
     }
 
     /// 输入框：标签在上、框在下。右对齐的 `TextField` 在 iOS 上编辑长 SSID 时很难用。
@@ -966,6 +1045,46 @@ struct UplinkSettingsView: View {
         model.notice = Notice(kind: .ok, title: "已切换", detail: target.title)
         // 换链路要十几秒才重新拿到地址，这里等一下再刷新。
         try? await Task.sleep(nanoseconds: 15_000_000_000)
+        await model.manualRefresh()
+    }
+
+    // MARK: - 热点共享（v3.2.2）
+
+    /// 连接手机热点共享。
+    ///
+    /// **没有确认弹窗**：写进去的 `network.tethering` metric 是 30，比中继的 20 大，
+    /// 中继还活着时默认路由不会被它抢走——它只是多了一条备用出口。所以这一步
+    /// 不会把用户当前的网络搞断，不需要拦一道。
+    private func connectTether(_ usb: UsbUplink) async {
+        guard !busy else { return }
+        busy = true
+        errorText = nil
+        let outcome = await model.connectTethering(usb.name)
+        busy = false
+        if let problem = outcome.error {
+            errorText = problem
+            return
+        }
+        // `note` 是「拿到了哪个地址 / 还没拿到」这一句，写进提示里：用户点完就知道
+        // 是「连上了」还是「配置写了但手机那边没给网」。
+        model.notice = Notice(kind: .ok, title: "已连接热点共享",
+                              detail: outcome.note ?? usb.label)
+        await model.manualRefresh()
+    }
+
+    /// 断开热点共享。断开之后固件的 hotplug 不会自动连回来（`disabled=1`）。
+    private func disconnectTether() async {
+        pendingTetherOff = false
+        guard !busy else { return }
+        busy = true
+        errorText = nil
+        let problem = await model.disconnectTethering()
+        busy = false
+        if let problem {
+            errorText = problem
+            return
+        }
+        model.notice = Notice(kind: .ok, title: "已断开", detail: "热点共享")
         await model.manualRefresh()
     }
 }
