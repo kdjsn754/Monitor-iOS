@@ -2439,8 +2439,13 @@ private struct NetVap {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             if await isInterfaceUp(to) { return nil }
 
-            // 最多三轮：每轮先停对家、再用两条通道起自己，然后等 4 秒问状态。
-            for _ in 0..<3 {
+            // **以太网这侧没插网线时 `wan` 永远起不来**，而「切过去就没网」是用户在
+            // 确认弹窗里已经点过头的结果，不是切换失败——页面自己会写「未插网线」，
+            // 这里不该再弹一张红卡，也不用陪跑三轮。
+            let noCable = (to == "wan") && !(await cablePluggedIn())
+
+            // 每轮：先停对家、再用两条通道起自己，然后等 4 秒问状态。没网线就只来一轮。
+            for _ in 0..<(noCable ? 1 : 3) {
                 let apply = [
                     "ifdown \(from) >/dev/null 2>&1",
                     "ubus call network.interface.\(to) up >/dev/null 2>&1",
@@ -2450,15 +2455,28 @@ private struct NetVap {
                 _ = try? await execute(apply, timeout: 40)
                 if await isInterfaceUp(to) { return nil }
             }
+            if noCable { return nil }
             // 中继还起不来：走官方那条通道，让 repeater 服务自己重建 STA。
             if to == "wwan" {
                 _ = try? await execute("ubus call repeater reload >/dev/null 2>&1; sleep 8", timeout: 60)
                 if await isInterfaceUp("wwan") { return nil }
+                return "已经切到中继，但接口没拿到地址；看一眼上级网络，再点一次"
             }
-            return "已经切到\(title)，但接口没拿到地址；看一眼网线/上级网络，再点一次"
+            return "已经切到\(title)，但接口没拿到地址；看一眼网线对面，再点一次"
         } catch {
             return describe(error)
         }
+    }
+
+    /// 有线口上到底插没插网线（`/sys/class/net/<dev>/carrier`，`1` = 有载波）。
+    private func cablePluggedIn() async -> Bool {
+        let cmd = [
+            "D=$(uci -q get network.wan.device)",
+            "[ -n \"$D\" ] || D=eth0",
+            "cat /sys/class/net/$D/carrier 2>/dev/null"
+        ].joined(separator: "; ")
+        guard let text = try? await execute(cmd, timeout: 15) else { return false }
+        return text.contains("1")
     }
 
     /// 问 netifd：这条接口现在是不是真的起来了（`up` 为 `true` 才算）。
