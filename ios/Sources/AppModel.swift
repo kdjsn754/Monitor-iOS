@@ -2403,7 +2403,6 @@ private struct NetVap {
     /// **两条链路互斥**：官方固件给 `wan` 和 `wwan` 两条接口都留着默认路由，
     /// 谁先起来用谁。真正「切模式」就是把另一条停掉：
     /// 中继 = `wwan` 开、`wan` 关；以太网 = `wan` 开、`wwan` 关。
-    /// 改完 `ifdown` 一次让路由立刻重算，然后回读两个 `disabled` 核对。
     @discardableResult
     func applyUplinkMode(_ mode: UplinkMode) async -> String? {
         guard connected else { return "还没连上路由器" }
@@ -2411,45 +2410,62 @@ private struct NetVap {
         case .cellular:
             return "没有检测到 USB Modem 或手机热点，连不了这条链路"
         case .repeater:
-            let lines = [
-                "uci -q set network.wwan.disabled='0'",
-                "uci -q set network.wan.disabled='1'",
-                "uci -q commit network",
-                "ifdown wan >/dev/null 2>&1; ifup wwan >/dev/null 2>&1",
-                "echo @@WWAN; uci -q get network.wwan.disabled",
-                "echo @@WAN; uci -q get network.wan.disabled"
-            ]
-            return await applyModeLines(lines, wantRepeater: true)
+            return await switchUplink(to: "wwan", from: "wan", title: "中继")
         case .wired:
-            let lines = [
-                "uci -q set network.wan.disabled='0'",
-                "uci -q set network.wwan.disabled='1'",
-                "uci -q commit network",
-                "ifdown wwan >/dev/null 2>&1; ifup wan >/dev/null 2>&1",
-                "echo @@WWAN; uci -q get network.wwan.disabled",
-                "echo @@WAN; uci -q get network.wan.disabled"
-            ]
-            return await applyModeLines(lines, wantRepeater: false)
+            return await switchUplink(to: "wan", from: "wwan", title: "以太网")
         }
     }
 
-    private func applyModeLines(_ lines: [String], wantRepeater: Bool) async -> String? {
+    /// 把出口从 `from` 换到 `to`：先写配置，隔两秒再起接口，最后按状态确认。
+    ///
+    /// **v3.2.3 修的时序问题**：`uci commit` 之后 netifd 要自己重读一次配置，
+    /// 紧跟着发的那条 `ifup` 会被这次重读吞掉——实测「以太网 → 中继」时 `wwan`
+    /// 一直停在 `up=false`，路由器网页转「正在获取 IP 地址」转到用户自己去点，
+    /// 而回读 `disabled` 明明是 0，所以旧代码还报了「已切换」。现在：
+    /// 写配置一条命令、起接口另一条命令（隔两秒），并且**按 `ubus` 里的 `up`
+    /// 真起来了才算成功**，起不来就重试，中继再不行走一次官方 `repeater reload`。
+    private func switchUplink(to: String, from: String, title: String) async -> String? {
+        let write = [
+            "uci -q set network.\(to).disabled='0'",
+            "uci -q set network.\(from).disabled='1'",
+            "uci -q commit network",
+            "echo @@WROTE"
+        ].joined(separator: "; ")
         do {
-            let sections = parseSections(try await execute(lines.joined(separator: "; "), timeout: 40))
-            func read(_ key: String) -> String {
-                (sections[key] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard try await execute(write, timeout: 30).contains("@@WROTE") else {
+                return "配置没写进去，请再试一次"
             }
-            let wwan = read("WWAN") == "1"
-            let wan = read("WAN") == "1"
-            if wantRepeater {
-                guard !wwan, wan else { return "切换没生效（回读 wwan=\(wwan ? 1 : 0) wan=\(wan ? 1 : 0)）" }
-            } else {
-                guard wwan, !wan else { return "切换没生效（回读 wwan=\(wwan ? 1 : 0) wan=\(wan ? 1 : 0)）" }
+            // 这两秒是这版的要害：让 netifd 先把 commit 吃进去，再起接口。
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            if await isInterfaceUp(to) { return nil }
+
+            // 最多三轮：每轮先停对家、再用两条通道起自己，然后等 4 秒问状态。
+            for _ in 0..<3 {
+                let apply = [
+                    "ifdown \(from) >/dev/null 2>&1",
+                    "ubus call network.interface.\(to) up >/dev/null 2>&1",
+                    "ifup \(to) >/dev/null 2>&1",
+                    "sleep 4"
+                ].joined(separator: "; ")
+                _ = try? await execute(apply, timeout: 40)
+                if await isInterfaceUp(to) { return nil }
             }
-            return nil
+            // 中继还起不来：走官方那条通道，让 repeater 服务自己重建 STA。
+            if to == "wwan" {
+                _ = try? await execute("ubus call repeater reload >/dev/null 2>&1; sleep 8", timeout: 60)
+                if await isInterfaceUp("wwan") { return nil }
+            }
+            return "已经切到\(title)，但接口没拿到地址；看一眼网线/上级网络，再点一次"
         } catch {
             return describe(error)
         }
+    }
+
+    /// 问 netifd：这条接口现在是不是真的起来了（`up` 为 `true` 才算）。
+    private func isInterfaceUp(_ name: String) async -> Bool {
+        let cmd = "ubus call network.interface.\(name) status 2>/dev/null | jsonfilter -e '@.up'"
+        guard let text = try? await execute(cmd, timeout: 15) else { return false }
+        return text.contains("true")
     }
 
     // MARK: - 手机 USB 热点共享（v3.2.2）

@@ -1043,8 +1043,9 @@ struct UplinkSettingsView: View {
         }
         mode = target
         model.notice = Notice(kind: .ok, title: "已切换", detail: target.title)
-        // 换链路要十几秒才重新拿到地址，这里等一下再刷新。
-        try? await Task.sleep(nanoseconds: 15_000_000_000)
+        // 接口是**确认拿到地址之后**才返回成功的（`switchUplink` 里按 `up` 验过），
+        // 这里只等一拍让它出现在下一次采集里，不用再赌十几秒。
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
         await model.manualRefresh()
     }
 
