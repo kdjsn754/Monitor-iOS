@@ -2442,7 +2442,13 @@ private struct NetVap {
             // **以太网这侧没插网线时 `wan` 永远起不来**，而「切过去就没网」是用户在
             // 确认弹窗里已经点过头的结果，不是切换失败——页面自己会写「未插网线」，
             // 这里不该再弹一张红卡，也不用陪跑三轮。
-            let noCable = (to == "wan") && !(await cablePluggedIn())
+            // （写成语句而不是 `to == "wan" && !(await …)`：`&&` 右边是 autoclosure，
+            //  放 `await` 过不了编译。）
+            var noCable = false
+            if to == "wan" {
+                let plugged = await cablePluggedIn()
+                noCable = !plugged
+            }
 
             // 每轮：先停对家、再用两条通道起自己，然后等 4 秒问状态。没网线就只来一轮。
             for _ in 0..<(noCable ? 1 : 3) {
