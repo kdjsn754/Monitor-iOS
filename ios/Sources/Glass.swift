@@ -585,7 +585,12 @@ struct SheetOverlay<Content: View>: View {
 
     var body: some View {
         ZStack {
-            Color.black.opacity(0.3)
+            // 遮罩：一层极薄材质 + 一点黑。材质会把身后的页面**真正糊掉**
+            // （系统的实时高斯模糊），再压一点暗保证卡片浮起来；
+            // 纯黑遮罩是 v3.2.4 之前的样子，边框硬、和 App 的玻璃感不搭。
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .overlay { Color.black.opacity(0.18) }
                 .ignoresSafeArea()
                 .contentShape(Rectangle())
                 .onTapGesture { onDismiss() }
@@ -597,10 +602,17 @@ struct SheetOverlay<Content: View>: View {
     }
 }
 
-/// 浮层中间那张白卡片：20 内边距、22 圆角、一圈细边 + 一层柔影。
+/// 浮层中间那张卡片：20 内边距、26 圆角、一层毛玻璃 + 顶部一道高光细边。
+///
+/// v3.2.5 从「不透明白底 + 柔影」换成 `.regularMaterial`：用户 2026-11-18
+/// 「这类型的弹窗很丑都重新设计一下，最好能够有高斯模糊效果」。材质本身就带
+/// 实时模糊，深浅色都不用另配颜色；高光边用白色半透明，深色下自动压暗
+/// （`colorScheme` 分两档），否则深色模式会亮得像一圈白线。
+///
 /// 末尾那个空手势是为了把卡片范围内的点击吃掉，
 /// 否则会穿透到后面的遮罩上，被当成「点了外面」而误关。
 struct SheetOverlayCard<Content: View>: View {
+    @Environment(\.colorScheme) private var scheme
     @ViewBuilder let content: () -> Content
 
     var body: some View {
@@ -608,21 +620,26 @@ struct SheetOverlayCard<Content: View>: View {
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                Color(.systemBackground),
-                in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .regularMaterial,
+                in: RoundedRectangle(cornerRadius: 26, style: .continuous)
             )
             .overlay {
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .strokeBorder(Color(.separator).opacity(0.5), lineWidth: 0.5)
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .strokeBorder(Color.white.opacity(scheme == .dark ? 0.14 : 0.45),
+                                  lineWidth: 0.8)
             }
-            .shadow(color: .black.opacity(0.18), radius: 26, y: 12)
-            .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .shadow(color: .black.opacity(scheme == .dark ? 0.55 : 0.20),
+                    radius: 34, y: 16)
+            .contentShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
             .onTapGesture {}
     }
 }
 
-/// 浮层卡片底部的等宽按钮。`tint` 为空是次要按钮（浅灰底黑字），
+/// 浮层卡片底部的等宽按钮。`tint` 为空是次要按钮（毛玻璃底 + 主色字），
 /// 传了颜色就是主按钮（实色底白字），删除用 `.red`。
+///
+/// 次要按钮从 `tertiarySystemFill` 换成 `.ultraThinMaterial`：和卡片同一层玻璃，
+/// 按钮才像「长在卡片上」的，而不是贴了一块灰塑料。
 struct SheetOverlayButton: View {
     let title: String
     var tint: Color? = nil
@@ -632,14 +649,23 @@ struct SheetOverlayButton: View {
         Button(action: action) {
             Text(title)
                 .font(.subheadline.weight(.semibold))
-                .foregroundStyle(tint == nil ? Color(uiColor: .label) : Color.white)
+                .foregroundStyle(tint == nil ? Color.primary : Color.white)
                 .frame(maxWidth: .infinity)
-                .frame(height: 44)
-                .background(
-                    tint ?? Color(.tertiarySystemFill),
-                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-                )
-                .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .frame(height: 46)
+                .background {
+                    if let tint {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(tint)
+                    } else {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(.ultraThinMaterial)
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5)
+                            }
+                    }
+                }
+                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
         .buttonStyle(.plain)
     }

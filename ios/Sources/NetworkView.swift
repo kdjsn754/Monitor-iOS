@@ -42,6 +42,8 @@ struct NetworkView: View {
     @State private var showLan = false
     /// 上网二级页（点拓扑最上面那个出口进来）。
     @State private var showUplink = false
+    /// 无线二级页（点「无线」卡右上角「更多」进来，v3.2.5）。
+    @State private var showWifi = false
 
     private var info: NetworkInfo { model.network }
 
@@ -106,6 +108,10 @@ struct NetworkView: View {
             // 上网二级页（点拓扑图最上面那个出口进来）。
             .navigationDestination(isPresented: $showUplink) {
                 UplinkSettingsView()
+            }
+            // 无线二级页（「无线」卡右上角「更多」）。
+            .navigationDestination(isPresented: $showWifi) {
+                WifiSettingsView()
             }
             // 底栏在 `MainTabs` 上挂着 `.tint(.primary)`，那是往下传的环境值。
             // 这一页不再整页染蓝（v2.9.2）：按钮文字一律主色，只有开关是蓝的，
@@ -537,28 +543,47 @@ struct NetworkView: View {
     /// 分组本身照 GL 官方 App（用户 2026-11-15「全量对齐」），但**不搬它那些灰色
     /// 说明文字**——2026-10-31 定的规矩：页面上不放解释性小字。
     ///
+    /// **v3.2.5 起只列开着的网络**（用户 2026-11-18：「只显示已经开启的，没开启的不显示」）。
+    /// 关掉的访客 / IoT / 多链路、关着的频段都不再占一行 —— 以前四块瓦片里常有两块写着
+    /// 「未启用」，既没有信息量、又把真正在用的挤小。要开要关、要改名称密码，点右上角
+    /// 「更多」进 `WifiSettingsView`（无线二级页）。
+    ///
     /// 主网络按频段各给一个开关：这台机器常见「5G 开、2.4G 关」，整组一个开关表达不了。
     /// 访客 / IoT / 多链路是整组一个开关，因为它们的 2.4G 与 5G 本来就是同一个名字。
     private var wifiCard: some View {
         let groups = info.wifiGroups
         let total = groups.reduce(0) { $0 + $1.clients }
         let main = groups.first { $0.kind == .main }
-        let sides = groups.filter { $0.kind == .guest || $0.kind == .iot }
-        let mlo = groups.first { $0.kind == .mlo }
-        return card("无线", trailing: total > 0 ? "\(total) 台" : "") {
+        let onBands = (main?.members ?? []).filter { $0.ssidOn }
+        let sides = groups.filter { ($0.kind == .guest || $0.kind == .iot) && $0.isOn }
+        let mlo = groups.first { $0.kind == .mlo && $0.isOn }
+        let nothingOn = onBands.isEmpty && sides.isEmpty && mlo == nil
+        return card("无线",
+                    trailing: total > 0 ? "\(total) 台 · 更多" : "更多",
+                    trailingAction: { showWifi = true }) {
             VStack(spacing: 8) {
-                if let main = main {
-                    wifiTile(main)
-                }
-                if !sides.isEmpty {
-                    HStack(alignment: .top, spacing: 8) {
-                        ForEach(sides) { group in
-                            wifiTile(group)
+                if nothingOn {
+                    HStack {
+                        Text("无线已关闭")
+                            .font(.system(size: 14))
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.vertical, 8)
+                } else {
+                    if !onBands.isEmpty, let main = main {
+                        wifiTile(main, bands: onBands)
+                    }
+                    if !sides.isEmpty {
+                        HStack(alignment: .top, spacing: 8) {
+                            ForEach(sides) { group in
+                                wifiTile(group)
+                            }
                         }
                     }
-                }
-                if let mlo = mlo {
-                    wifiTile(mlo)
+                    if let mlo = mlo {
+                        wifiTile(mlo)
+                    }
                 }
             }
             .padding(.top, 6)
@@ -568,7 +593,7 @@ struct NetworkView: View {
 
     /// 一块瓦片：组名在第一行，开关跟在组名右边（主网络例外——它一行一个开关）。
     @ViewBuilder
-    private func wifiTile(_ group: WifiNetGroup) -> some View {
+    private func wifiTile(_ group: WifiNetGroup, bands: [WifiBandInfo]? = nil) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 Text(group.kind.title)
@@ -601,7 +626,8 @@ struct NetworkView: View {
                 }
                 .buttonStyle(.plain)
             } else if group.kind == .main {
-                ForEach(group.members) { member in
+                // 只画开着的频段（v3.2.5）：关掉的那一条连 SSID 都没有，列出来只是噪音。
+                ForEach(bands ?? group.members) { member in
                     tileBandRow(member, group: group)
                 }
             } else {
@@ -832,6 +858,7 @@ struct NetworkView: View {
     /// 卡片：白底 + 一条 0.6pt 细边，没有阴影。靠留白分层，不靠色块。
     private func card<Content: View>(_ title: String,
                                      trailing: String = "",
+                                     trailingAction: (() -> Void)? = nil,
                                      @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -840,10 +867,27 @@ struct NetworkView: View {
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 8)
                 if !trailing.isEmpty {
-                    Text(trailing)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
+                    // 传了动作就是一颗按钮（「更多 ›」）。其余卡片的右上角仍然是纯文字，
+                    // 不加箭头——那里本来就没得点。
+                    if let trailingAction {
+                        Button(action: trailingAction) {
+                            HStack(spacing: 2) {
+                                Text(trailing)
+                                    .monospacedDigit()
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 10, weight: .semibold))
+                            }
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        Text(trailing)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
                 }
             }
             .padding(.bottom, 4)
@@ -1093,221 +1137,6 @@ private struct BandEditorSheet: View {
             model.notice = Notice(kind: .ok,
                                   title: "\(band.bandName) 已保存",
                                   detail: ssid)
-            dismiss()
-            await model.manualRefresh()
-            return
-        }
-        errorText = problem
-    }
-}
-
-// MARK: - 无线分组编辑（v3.0.0）
-
-/// 一组无线网络的编辑页：名称 / 密码 / 隐藏 / 启用。
-///
-/// 版式与 `BandEditorSheet` 一致（`Form` + 右上角保存），区别是它写的是**整组**：
-/// 同组的 2.4G 与 5G 名字和密码必须一样，分开改很容易只改到一半。
-private struct WifiGroupEditorSheet: View {
-    @Environment(AppModel.self) private var model: AppModel
-    @Environment(\.dismiss) private var dismiss
-
-    let group: WifiNetGroup
-
-    @State private var ssid: String
-    @State private var key: String
-    @State private var hidden: Bool
-    @State private var enabled: Bool
-    @State private var busy = false
-    @State private var errorText: String?
-
-    init(group: WifiNetGroup) {
-        self.group = group
-        _ssid = State(initialValue: group.ssid)
-        _key = State(initialValue: group.key)
-        _hidden = State(initialValue: group.hidden)
-        _enabled = State(initialValue: group.broadcasting)
-    }
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    HStack {
-                        Text("名称")
-                        TextField("", text: $ssid)
-                            .multilineTextAlignment(.trailing)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                    }
-                    .adaptiveRowBackground()
-
-                    if group.needsKey {
-                        HStack {
-                            Text("密码")
-                            SecureField("", text: $key)
-                                .multilineTextAlignment(.trailing)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                        }
-                        .adaptiveRowBackground()
-                    }
-
-                    Toggle("隐藏网络", isOn: $hidden)
-                        .blueSwitch()
-                        .adaptiveRowBackground()
-                    Toggle("启用", isOn: $enabled)
-                        .blueSwitch()
-                        .adaptiveRowBackground()
-                }
-
-                // 频段只读：改频段是 radio 的事，在这一页放开关会让人以为能单独起一个频段。
-                Section {
-                    ForEach(group.members) { member in
-                        HStack {
-                            Text(member.bandName)
-                            Spacer()
-                            Text(member.encryption.isEmpty ? "—" : member.securityLabel)
-                                .foregroundStyle(.secondary)
-                        }
-                        .adaptiveRowBackground()
-                    }
-                }
-
-                if let errorText {
-                    Section {
-                        Text(errorText)
-                            .font(.system(size: 13))
-                            .foregroundStyle(Color(red: 0.85, green: 0.25, blue: 0.22))
-                            .adaptiveRowBackground()
-                    }
-                }
-            }
-            .themedFormBackground()
-            .primaryButtons()
-            .navigationTitle(group.kind.title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("取消") { dismiss() }
-                        .navBarTint()
-                        .disabled(busy)
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    if busy {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Button("保存") { Task { await save() } }
-                            .fontWeight(.semibold)
-                            .navBarTint()
-                    }
-                }
-            }
-        }
-    }
-
-    private func save() async {
-        guard !busy else { return }
-        busy = true
-        errorText = nil
-        var problem = await model.saveWifiGroup(group, ssid: ssid, key: key, hidden: hidden)
-        // 开关单独提交：名称和开关混在同一条命令里，失败时分不清是哪一半没成。
-        if problem == nil, enabled != group.broadcasting {
-            problem = await model.setWifiGroup(group, on: enabled)
-        }
-        busy = false
-        guard let problem else {
-            model.notice = Notice(kind: .ok, title: "\(group.kind.title)已保存", detail: ssid)
-            dismiss()
-            await model.manualRefresh()
-            return
-        }
-        errorText = problem
-    }
-}
-
-/// 「添加网络」：把 GL 固件预置的访客 / IoT 模板段启用并命名。
-private struct WifiGroupCreateSheet: View {
-    @Environment(AppModel.self) private var model: AppModel
-    @Environment(\.dismiss) private var dismiss
-
-    let kind: WifiNetGroup.Kind
-
-    @State private var ssid = ""
-    @State private var key = ""
-    @State private var busy = false
-    @State private var errorText: String?
-
-    private var hint: String {
-        switch kind {
-        case .guest: return "访客网络"
-        case .iot: return "IoT 网络"
-        default: return "无线网络"
-        }
-    }
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    HStack {
-                        Text("名称")
-                        TextField(hint, text: $ssid)
-                            .multilineTextAlignment(.trailing)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                    }
-                    .adaptiveRowBackground()
-
-                    HStack {
-                        Text("密码")
-                        SecureField("至少 8 位", text: $key)
-                            .multilineTextAlignment(.trailing)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                    }
-                    .adaptiveRowBackground()
-                }
-
-                if let errorText {
-                    Section {
-                        Text(errorText)
-                            .font(.system(size: 13))
-                            .foregroundStyle(Color(red: 0.85, green: 0.25, blue: 0.22))
-                            .adaptiveRowBackground()
-                    }
-                }
-            }
-            .themedFormBackground()
-            .primaryButtons()
-            .navigationTitle("添加\(kind.title)")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("取消") { dismiss() }
-                        .navBarTint()
-                        .disabled(busy)
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    if busy {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Button("创建") { Task { await create() } }
-                            .fontWeight(.semibold)
-                            .navBarTint()
-                    }
-                }
-            }
-        }
-    }
-
-    private func create() async {
-        guard !busy else { return }
-        busy = true
-        errorText = nil
-        let problem = await model.createWifiGroup(kind, ssid: ssid, key: key)
-        busy = false
-        guard let problem else {
-            model.notice = Notice(kind: .ok, title: "\(kind.title)已创建", detail: ssid)
             dismiss()
             await model.manualRefresh()
             return

@@ -637,6 +637,13 @@ struct WifiBandInfo: Identifiable, Equatable {
     var key = ""
     /// SSID 是否隐藏（`hidden=1`）。
     var hidden = false
+    /// 成员是否用随机 BSSID（`random_bssid=1`）。官方默认开，关掉就是固定 MAC。
+    var randomBSSID = true
+    /// 所在 radio 是否被关掉（`wireless.<radio>.disabled=1`）。
+    /// 和成员自己的 `disabled` 是两回事：整频段关了，这个频段上所有网络都没有。
+    var radioOff = false
+    /// 5G 是否允许使用 DFS 信道（`wireless.<radio>.dfs_enable=1`）。
+    var dfsEnabled = false
     /// 原始 `htmode`（`EHT40`）。写频宽要保留前面的制式前缀，不能只存数字。
     var htmode = ""
     /// UCI 的发射功率百分比（`txpower=100`）。0 表示这一项没配。
@@ -702,6 +709,43 @@ struct WifiBandInfo: Identifiable, Equatable {
         case "sae", "sae-mixed", "psk3", "sae+ccmp": return encryption == "sae" ? "WPA3" : "WPA3 混合"
         case "psk-mixed", "psk-mixed+ccmp": return "WPA/WPA2 混合"
         default: return encryption.uppercased()
+        }
+    }
+}
+
+/// Wi-Fi 安全性（官方无线设置里那一档下拉，写 UCI 的 `encryption`）。
+///
+/// 只列这台固件真正用得上的四挡：`psk2` / `sae-mixed` / `sae` / `none`。
+/// 认不出来的老值（`psk2+tkip+ccmp`、`psk-mixed`）在编辑页里按「不改」处理——
+/// 没选中任何一档时保存不会动 `encryption`，免得把固件原有的组合压成别的。
+enum WifiSecurity: String, CaseIterable, Identifiable {
+    case wpa2 = "psk2"
+    case mixed = "sae-mixed"
+    case wpa3 = "sae"
+    case open = "none"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .wpa2: return "WPA2"
+        case .mixed: return "WPA2/WPA3 混合"
+        case .wpa3: return "WPA3"
+        case .open: return "无密码"
+        }
+    }
+
+    /// 有没有密码这一项。`open` 不用填密码。
+    var needsKey: Bool { self != .open }
+
+    /// 从 UCI 的 `encryption` 反查。认不得返回 nil（调用方就不显示选中态）。
+    static func match(_ raw: String) -> WifiSecurity? {
+        switch raw {
+        case "psk2", "psk2+ccmp", "psk2+tkip+ccmp": return .wpa2
+        case "sae-mixed", "psk-mixed", "psk-mixed+ccmp": return .mixed
+        case "sae", "sae+ccmp", "psk3": return .wpa3
+        case "", "none": return .open
+        default: return nil
         }
     }
 }
@@ -777,6 +821,15 @@ struct WifiNetGroup: Identifiable, Equatable {
 
     /// 加密方式取第一条成员的（同组几条本来就一致）。
     var securityLabel: String { members.first?.securityLabel ?? "" }
+
+    /// 编辑页要用的加密档位；认不出来时是 nil（保存时不动 `encryption`）。
+    var security: WifiSecurity? { members.first.flatMap { WifiSecurity.match($0.encryption) } }
+
+    /// 同组是否用随机 BSSID（按第一条算）。
+    var randomBSSID: Bool { members.first?.randomBSSID ?? true }
+
+    /// 现在哪几个频段在广播（编辑页频段开关的初值，值是 `2.4` / `5`）。
+    var onBands: Set<String> { Set(members.filter { $0.ssidOn }.map(\.band)) }
 }
 
 /// 一个物理网口。
