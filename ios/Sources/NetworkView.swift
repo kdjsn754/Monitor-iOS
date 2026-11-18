@@ -592,6 +592,10 @@ struct NetworkView: View {
     }
 
     /// 一块瓦片：组名在第一行，开关跟在组名右边（主网络例外——它一行一个开关）。
+    ///
+    /// 非主网络那张瓦片第二行原本只写 SSID，v3.2.6 起下面再挂一行频段短名
+    /// （`2.4G · 5G`）：访客 / IoT / 多链路几个频段共用同一个名字，
+    /// 不写出来就不知道它到底开了哪几段。频段行只列开着的。
     @ViewBuilder
     private func wifiTile(_ group: WifiNetGroup, bands: [WifiBandInfo]? = nil) -> some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -634,13 +638,24 @@ struct NetworkView: View {
                 Button {
                     editingGroup = group
                 } label: {
-                    HStack(spacing: 6) {
-                        Text(group.isOn ? group.ssid : "未启用")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Spacer(minLength: 2)
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 6) {
+                            Text(group.isOn ? group.ssid : "未启用")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer(minLength: 2)
+                        }
+                        // 频段短名（v3.2.6）：访客 / IoT / 多链路的 2.4G 与 5G 用的是
+                        // **同一个 SSID**，光看名字没人知道它占了哪几段。主网络那几行
+                        // 自带频段名，不需要这一行；这里只列开着的频段。
+                        if group.isOn, !group.onBandShort.isEmpty {
+                            Text(group.onBandShort)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                        }
                     }
                     .contentShape(Rectangle())
                 }

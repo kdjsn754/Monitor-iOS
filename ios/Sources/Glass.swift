@@ -580,17 +580,20 @@ struct GlassProminentButtonStyle: ButtonStyle {
 /// **tab 根页**又踩了一次（设置页的退出确认），所以这条没有例外。
 /// 自绘这套之后位置永远落在这一屏正中，样式也能跟着 App 的卡片走。
 struct SheetOverlay<Content: View>: View {
+    @Environment(\.colorScheme) private var scheme
     let onDismiss: () -> Void
     @ViewBuilder let content: () -> Content
 
     var body: some View {
         ZStack {
-            // 遮罩：一层极薄材质 + 一点黑。材质会把身后的页面**真正糊掉**
-            // （系统的实时高斯模糊），再压一点暗保证卡片浮起来；
-            // 纯黑遮罩是 v3.2.4 之前的样子，边框硬、和 App 的玻璃感不搭。
-            Rectangle()
-                .fill(.ultraThinMaterial)
-                .overlay { Color.black.opacity(0.18) }
+            // 遮罩**只压暗、不模糊**（v3.2.6）。
+            //
+            // v3.2.5 这里铺的是 `.ultraThinMaterial`，本意是「让卡片浮起来」，
+            // 实际把**整页**糊成了一片灰白——用户 2026-11-18 的截图里连底栏图标
+            // 都看不清了，原话是「我是要弹窗高斯模糊，不是整个页面模糊」。
+            // 模糊该只发生在卡片内部（材质自带实时模糊，见下面的 Card），
+            // 页面本身要留得住：知道弹窗盖在什么上面，才知道自己在确认什么。
+            Color.black.opacity(scheme == .dark ? 0.42 : 0.16)
                 .ignoresSafeArea()
                 .contentShape(Rectangle())
                 .onTapGesture { onDismiss() }
@@ -604,10 +607,11 @@ struct SheetOverlay<Content: View>: View {
 
 /// 浮层中间那张卡片：20 内边距、26 圆角、一层毛玻璃 + 顶部一道高光细边。
 ///
-/// v3.2.5 从「不透明白底 + 柔影」换成 `.regularMaterial`：用户 2026-11-18
-/// 「这类型的弹窗很丑都重新设计一下，最好能够有高斯模糊效果」。材质本身就带
-/// 实时模糊，深浅色都不用另配颜色；高光边用白色半透明，深色下自动压暗
-/// （`colorScheme` 分两档），否则深色模式会亮得像一圈白线。
+/// **高斯模糊只发生在这里**（v3.2.6）：`.thinMaterial` 是系统的实时材质，
+/// 卡片把身后那层页面模糊后透进来，才算一块真的磨砂玻璃。
+/// v3.2.5 用的是 `.regularMaterial`——浅色下它几乎不透（约九成白），
+/// 实机看仍是一张白卡片，用户没看出模糊；而遮罩铺了材质把整页糊掉了，
+/// 正好看反。现在遮罩去掉了模糊，模糊全部由这张卡片承担。
 ///
 /// 末尾那个空手势是为了把卡片范围内的点击吃掉，
 /// 否则会穿透到后面的遮罩上，被当成「点了外面」而误关。
@@ -619,27 +623,30 @@ struct SheetOverlayCard<Content: View>: View {
         VStack(alignment: .leading, spacing: 14) { content() }
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                .regularMaterial,
-                in: RoundedRectangle(cornerRadius: 26, style: .continuous)
-            )
-            .overlay {
+            .background {
                 RoundedRectangle(cornerRadius: 26, style: .continuous)
-                    .strokeBorder(Color.white.opacity(scheme == .dark ? 0.14 : 0.45),
+                    .fill(.thinMaterial)
+            }
+            .overlay {
+                // 一道白高光把玻璃的边立起来；没有它，薄材质在浅色页面会糊成一片。
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .strokeBorder(Color.white.opacity(scheme == .dark ? 0.16 : 0.55),
                                   lineWidth: 0.8)
             }
-            .shadow(color: .black.opacity(scheme == .dark ? 0.55 : 0.20),
+            .shadow(color: .black.opacity(scheme == .dark ? 0.5 : 0.22),
                     radius: 34, y: 16)
             .contentShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
             .onTapGesture {}
     }
 }
 
-/// 浮层卡片底部的等宽按钮。`tint` 为空是次要按钮（毛玻璃底 + 主色字），
+/// 浮层卡片底部的等宽按钮。`tint` 为空是次要按钮（浅一层底 + 主色字），
 /// 传了颜色就是主按钮（实色底白字），删除用 `.red`。
 ///
-/// 次要按钮从 `tertiarySystemFill` 换成 `.ultraThinMaterial`：和卡片同一层玻璃，
-/// 按钮才像「长在卡片上」的，而不是贴了一块灰塑料。
+/// 次要按钮 v3.2.5 用的是 `.ultraThinMaterial`，当时卡片是 `.regularMaterial`，
+/// 两层材质叠着还行；v3.2.6 卡片换成更透的 `.thinMaterial` 之后，再叠一层材质
+/// 会连按钮边界都糊掉，于是改成「同色系 8% 填充 + 一道 12% 细边」——
+/// 玻璃卡片上看着是一块浅浅的凹槽，字仍然读得清。
 struct SheetOverlayButton: View {
     let title: String
     var tint: Color? = nil
@@ -658,7 +665,7 @@ struct SheetOverlayButton: View {
                             .fill(tint)
                     } else {
                         RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(.ultraThinMaterial)
+                            .fill(Color.primary.opacity(0.08))
                             .overlay {
                                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                                     .strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5)

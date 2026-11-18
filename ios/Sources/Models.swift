@@ -814,6 +814,24 @@ struct WifiNetGroup: Identifiable, Equatable {
         return names.isEmpty ? "未配置" : names.joined(separator: " + ")
     }
 
+    /// 网络页瓦片上那一行小字：**只列开着的频段**，用短名（`2.4G` / `5G` / `6G`）。
+    ///
+    /// 主网络的瓦片是一行一个频段、带频段名，本来就看得出；访客 / IoT / 多链路
+    /// 以前只写 SSID，两三个频段共用同一个名字，用户看不出它到底占了哪几段
+    /// （2026-11-18「其他网络在无线模块看不出来开了什么频段的 wifi」）。
+    /// `bandSummary` 用全名带单位，半宽瓦片放不下，这里另给一套短名。
+    var onBandShort: String {
+        let names = members.filter { $0.ssidOn }.map { member -> String in
+            switch member.band {
+            case "": return ""
+            case "2.4": return "2.4G"
+            case "S1G": return "Sub-1G"
+            default: return member.band + "G"
+            }
+        }.filter { !$0.isEmpty }
+        return names.joined(separator: " · ")
+    }
+
     /// 有没有任意一条成员是加密的（决定编辑页要不要密码行）。
     var needsKey: Bool {
         members.contains { !$0.encryption.isEmpty && $0.encryption != "none" }
