@@ -470,9 +470,9 @@ struct RepeaterSurvey: Identifiable, Equatable {
 /// 关联表、也不再读 `/tmp/dhcp.leases`——那是 LuCI 那一套，随机 MAC 一变就跟
 /// 官方列表对不上（本机实测：官方是 9C:…:0D，关联表是 9E:…:8D）。
 ///
-/// 名称顺序：`gl-client.alias`（用户在官方 App 里改的）→ 官方 `name`
-/// （这台固件的缓存会串号，4 个 MAC 一起报同一个名字，所以只在全场唯一时才用）
-/// → IP（`displayName` 兜底）。
+/// 名称顺序：`gl-client.alias`（用户在官方 App 里改的）→ 官方 `name` → IP
+/// （`displayName` 兜底）。v3.3.2 起不再做「同名就丢弃」：网页后台读的是同一份
+/// `name`（rpc 模块 `clients.get_list`）且不去重，我们照原样用才能跟后台一致。
 struct NetClient: Identifiable, Equatable {
     var mac = ""
     /// 最终上屏的名字（已经按上面顺序算好，解析时就填进来）。

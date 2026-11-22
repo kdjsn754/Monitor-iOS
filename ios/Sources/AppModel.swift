@@ -1546,7 +1546,14 @@ private struct NetVap {
         //
         // `alias` 是用户在官方 App 里改过的名字，`class` 是官方 App 给这台设备判的
         // 设备类型（phone / laptop / television…）。两者都按 MAC 存，比其他来源可靠。
-        // 名称顺序：别名 → 官方列表的 `name`（全场唯一时才用，见下）→ IP。
+        // 名称顺序：别名 → 官方列表的 `name` → IP。
+        //
+        // v3.3.2 起**不再做「同名就丢弃」**：那道光是为了防 v2.8.0 那次
+        // 「4 个 MAC 一起报 Xiaomi-14」，但它会误伤真事——本机实测（2026-11-22）
+        // 一台电脑两块网卡都叫 `Catmint`，于是两条记录都被降级成 IP，而网页后台
+        // `#/clients` 照原样显示 `Catmint`，看上去就是「跟后台对不上」。
+        // 后台读的是同一个 `gl-clients` 的 `name`（rpc 模块 `clients.get_list`），
+        // 它不做任何唯一性判断；要跟后台一字不差，这里也只能照原样用。
         let glClient = uciValues(sections["GCONF"])
         var aliasByMAC: [String: String] = [:]
         var classByMAC: [String: String] = [:]
@@ -1558,9 +1565,7 @@ private struct NetVap {
             if key.hasSuffix(".class") { classByMAC[mac.uppercased()] = value }
         }
 
-        // 先按原始字段读一遍，再统一决定名字——「唯一性」要看到全场才能判。
         var raw: [(object: [String: Any], mac: String)] = []
-        var nameCount: [String: Int] = [:]
         for rawLine in (sections["CLIENTS"] ?? "").split(separator: "\n") {
             let text = String(rawLine).trimmingCharacters(in: .whitespaces)
             guard text.hasPrefix("{"), let data = text.data(using: .utf8),
@@ -1568,10 +1573,6 @@ private struct NetVap {
             else { continue }
             let mac = ((object["mac"] as? String) ?? "").uppercased()
             raw.append((object, mac))
-            let reported = ((object["name"] as? String) ?? "").trimmingCharacters(in: .whitespaces)
-            if !reported.isEmpty, reported != "*" {
-                nameCount[reported, default: 0] += 1
-            }
         }
 
         var clients: [NetClient] = []
@@ -1593,13 +1594,13 @@ private struct NetVap {
             client.reservedIP = reserved[client.mac] ?? ""
             client.deviceClass = classByMAC[client.mac] ?? ""
 
-            // 名字：别名 → 官方 `name`（只在这一份缓存没串号时才敢用）→ IP。
+            // 名字：别名 → 官方 `name` → IP（与网页后台 `#/clients` 同一套，不做去重）。
             if let alias = aliasByMAC[client.mac] {
                 client.alias = alias
                 client.name = alias
             } else {
                 let reported = ((object["name"] as? String) ?? "").trimmingCharacters(in: .whitespaces)
-                if reported != "*", !reported.isEmpty, (nameCount[reported] ?? 0) <= 1 {
+                if reported != "*", !reported.isEmpty {
                     client.name = reported
                 }
             }
