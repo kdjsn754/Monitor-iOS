@@ -460,6 +460,16 @@ struct OverviewView: View {
     ///   ① 顶部一行结论：大数字 + 台在线 + 离线标签 + 右边「无线 n / 有线 n」彩点胶囊；
     ///   ② 三条设备：图标圆底 → 名字 / 地址·接入 → 实时速率，行间用细线分；
     ///   ③ 底部一行「查看全部 + 总台数 + ›」，把整段收住。
+    /// 切到网络页并**落到「设备」卡**（v3.3.3）。
+    ///
+    /// 以前只写 `tabRequest = 2`，切是切了，可网络页停在最上面（拓扑图），
+    /// 用户还得自己往下滚——「查看全部」等于只换了个标签。
+    /// `focus` 为空就停在设备卡顶部；传 `NetClient.id` 就把那一行滚到屏幕中间。
+    private func openClients(_ focus: String? = nil) {
+        model.networkFocus = focus.map { "client:" + $0 } ?? "clients"
+        model.tabRequest = 2
+    }
+
     private var devicesContent: some View {
         let clients = model.network.clients
         let online = clients.filter(\.online)
@@ -467,7 +477,7 @@ struct OverviewView: View {
         let preview = Array(online.prefix(3))
 
         return VStack(spacing: 0) {
-            Button { model.tabRequest = 2 } label: {
+            Button { openClients() } label: {
                 HStack(alignment: .center, spacing: 6) {
                     HStack(alignment: .firstTextBaseline, spacing: 4) {
                         Text("\(online.count)")
@@ -508,13 +518,13 @@ struct OverviewView: View {
                     Divider()
                     ForEach(preview) { client in
                         if client.id != preview.first?.id { Divider().opacity(0.6) }
-                        Button { model.tabRequest = 2 } label: { deviceRow(client) }
+                        Button { openClients(client.id) } label: { deviceRow(client) }
                             .buttonStyle(.plain)
                     }
                 }
 
                 Divider()
-                Button { model.tabRequest = 2 } label: {
+                Button { openClients() } label: {
                     HStack(spacing: 5) {
                         Text("查看全部")
                             .font(.system(size: 13, weight: .medium))

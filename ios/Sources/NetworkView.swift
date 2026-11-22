@@ -51,90 +51,97 @@ struct NetworkView: View {
     private static let leafSpacing: CGFloat = 8
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(spacing: UI.cardSpacing) {
-                    // 拓扑里的节点：出口进「上网」二级页，频段进编辑页，
-                    // 路由器与有线进局域网二级页。
-                    topology(openLan: { showLan = true },
-                             openUplink: { showUplink = true })
-                    wifiCard
-                    uplinkCard
-                    clientsCard
+        // 跨页定位要一个 proxy（v3.3.3）：概览点设备 / 「查看全部」切过来后
+        // 得滚到「设备」卡，光切标签等于没跳。
+        ScrollViewReader { proxy in
+            NavigationStack {
+                ScrollView {
+                    VStack(spacing: UI.cardSpacing) {
+                        // 拓扑里的节点：出口进「上网」二级页，频段进编辑页，
+                        // 路由器与有线进局域网二级页。
+                        topology(openLan: { showLan = true },
+                                 openUplink: { showUplink = true })
+                        wifiCard
+                        uplinkCard
+                        // 跨页定位的落点（v3.3.3）：概览「查看全部」滚到这里。
+                        clientsCard.id("clients")
+                    }
+                    .padding(.horizontal, UI.pagePadding)
+                    .padding(.top, 12)
+                    .padding(.bottom, 30)
+                    // 滚动手感与另外三个根页一致（见 ScrollTuning.swift 与 7.1）：
+                    // 长页正常回弹、短页拉不动，都不碰下拉刷新。
+                    .background(ScrollBounceTuning())
                 }
-                .padding(.horizontal, UI.pagePadding)
-                .padding(.top, 12)
-                .padding(.bottom, 30)
-                // 滚动手感与另外三个根页一致（见 ScrollTuning.swift 与 7.1）：
-                // 长页正常回弹、短页拉不动，都不碰下拉刷新。
-                .background(ScrollBounceTuning())
-            }
-            .scrollBounceBehavior(.basedOnSize)
-            // 标题滑到状态栏下面时由系统糊一层，否则硬叠在时间上。
-            .scrollEdgeEffectStyle(.soft, for: .top)
-            .background { AppBackground() }
-            .pageChrome("网络") {
-                if refreshing {
-                    ProgressView()
-                        .controlSize(.small)
-                        .frame(width: 38, height: 38)
-                } else {
-                    HeaderButton("arrow.clockwise") {
-                        Task { await refresh() }
+                .scrollBounceBehavior(.basedOnSize)
+                // 标题滑到状态栏下面时由系统糊一层，否则硬叠在时间上。
+                .scrollEdgeEffectStyle(.soft, for: .top)
+                .background { AppBackground() }
+                .pageChrome("网络") {
+                    if refreshing {
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(width: 38, height: 38)
+                    } else {
+                        HeaderButton("arrow.clockwise") {
+                            Task { await refresh() }
+                        }
                     }
                 }
-            }
-            .sheet(item: $editingBand) { band in
-                BandEditorSheet(band: band)
-                    .presentationBackground(Color.clear)
-            }
-            .sheet(item: $editingClient) { client in
-                ClientEditorSheet(client: client)
-                    .presentationBackground(Color.clear)
-            }
-            .sheet(item: $editingGroup) { group in
-                WifiGroupEditorSheet(group: group)
-                    .presentationBackground(Color.clear)
-            }
-            .navigationDestination(isPresented: $showLan) {
-                LanSettingsView()
-            }
-            // 上网二级页（点拓扑图最上面那个出口进来）。
-            .navigationDestination(isPresented: $showUplink) {
-                UplinkSettingsView()
-            }
-            // 无线二级页（「无线」卡右上角「更多」）。
-            .navigationDestination(isPresented: $showWifi) {
-                WifiSettingsView()
-            }
-            // 底栏在 `MainTabs` 上挂着 `.tint(.primary)`，那是往下传的环境值。
-            // 这一页不再整页染蓝（v2.9.2）：按钮文字一律主色，只有开关是蓝的，
-            // 见 `ButtonStyles.swift`。推上来的「上网 / 局域网」和两个编辑页
-            // 各自带 `primaryButtons()`，开关各自带 `blueSwitch()`。
-            .primaryButtons()
-            // 删单条离线记录的确认（v3.2.7）。和全 App 一样用自绘浮层——
-            // 系统 `alert` / `confirmationDialog` 在 iOS 26 上会贴到页面上方。
-            .overlay {
-                if let victim = pendingDeleteClient {
-                    SheetOverlay(onDismiss: { pendingDeleteClient = nil }) {
-                        SheetOverlayCard {
-                            Text("删除这条离线记录？")
-                                .font(.system(size: 17, weight: .semibold))
-                            Text("只删路由器上留下的这条记录，不影响这台设备；它再连上来会重新出现。")
-                                .font(.system(size: 13))
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                            HStack(spacing: 10) {
-                                SheetOverlayButton(title: "取消") { pendingDeleteClient = nil }
-                                SheetOverlayButton(title: "删除", tint: .red) {
-                                    Task { await deleteOffline(victim) }
+                .sheet(item: $editingBand) { band in
+                    BandEditorSheet(band: band)
+                        .presentationBackground(Color.clear)
+                }
+                .sheet(item: $editingClient) { client in
+                    ClientEditorSheet(client: client)
+                        .presentationBackground(Color.clear)
+                }
+                .sheet(item: $editingGroup) { group in
+                    WifiGroupEditorSheet(group: group)
+                        .presentationBackground(Color.clear)
+                }
+                .navigationDestination(isPresented: $showLan) {
+                    LanSettingsView()
+                }
+                // 上网二级页（点拓扑图最上面那个出口进来）。
+                .navigationDestination(isPresented: $showUplink) {
+                    UplinkSettingsView()
+                }
+                // 无线二级页（「无线」卡右上角「更多」）。
+                .navigationDestination(isPresented: $showWifi) {
+                    WifiSettingsView()
+                }
+                // 底栏在 `MainTabs` 上挂着 `.tint(.primary)`，那是往下传的环境值。
+                // 这一页不再整页染蓝（v2.9.2）：按钮文字一律主色，只有开关是蓝的，
+                // 见 `ButtonStyles.swift`。推上来的「上网 / 局域网」和两个编辑页
+                // 各自带 `primaryButtons()`，开关各自带 `blueSwitch()`。
+                .primaryButtons()
+                // 删单条离线记录的确认（v3.2.7）。和全 App 一样用自绘浮层——
+                // 系统 `alert` / `confirmationDialog` 在 iOS 26 上会贴到页面上方。
+                .overlay {
+                    if let victim = pendingDeleteClient {
+                        SheetOverlay(onDismiss: { pendingDeleteClient = nil }) {
+                            SheetOverlayCard {
+                                Text("删除这条离线记录？")
+                                    .font(.system(size: 17, weight: .semibold))
+                                Text("只删路由器上留下的这条记录，不影响这台设备；它再连上来会重新出现。")
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                HStack(spacing: 10) {
+                                    SheetOverlayButton(title: "取消") { pendingDeleteClient = nil }
+                                    SheetOverlayButton(title: "删除", tint: .red) {
+                                        Task { await deleteOffline(victim) }
+                                    }
                                 }
+                                .padding(.top, 2)
                             }
-                            .padding(.top, 2)
                         }
                     }
                 }
             }
+            .onChange(of: model.networkFocus) { _, _ in scrollToFocus(proxy) }
+            .onAppear { scrollToFocus(proxy) }
         }
     }
 
@@ -143,6 +150,29 @@ struct NetworkView: View {
         refreshing = true
         await model.manualRefresh()
         refreshing = false
+    }
+
+    /// 把网络页滚到概览点的那一处（v3.3.3）。
+    ///
+    /// **为什么先等一下**：跨页跳转是「切标签 + 设落点」两步，切过去的这一瞬间
+    /// 网络页还没按新宽度完成布局，立刻 `scrollTo` 会拿上一帧的内容高度算，
+    /// 结果是滚不动——用户看到的就是「只换了标签页」。等切页动画（约 0.25s）
+    /// 落定再滚即可，320ms 肉眼察觉不到。
+    ///
+    /// 落点在读到的这一帧就清空：只滚一次，用户之后自己往下拉不会被拽回去。
+    private func scrollToFocus(_ proxy: ScrollViewProxy) {
+        guard let focus = model.networkFocus else { return }
+        model.networkFocus = nil
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 320_000_000)
+            withAnimation(.easeOut(duration: 0.25)) {
+                if focus.hasPrefix("client:") {
+                    proxy.scrollTo(String(focus.dropFirst("client:".count)), anchor: .center)
+                } else {
+                    proxy.scrollTo("clients", anchor: .top)
+                }
+            }
+        }
     }
 
     // MARK: - 拓扑
@@ -766,6 +796,8 @@ struct NetworkView: View {
                         clientRow(client)
                     }
                     .buttonStyle(.plain)
+                    // 概览点某一台时按这个 id 滚到它（v3.3.3）。
+                    .id(client.id)
                     // 单条删除（v3.2.7）：只给离线设备挂，在线的那台删了也会被下一轮
                     // 扫描写回来。长按是快捷入口，编辑页底部还有一个同样的。
                     .contextMenu {
