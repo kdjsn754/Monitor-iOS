@@ -535,14 +535,15 @@ struct NetClient: Identifiable, Equatable {
 
     var wired: Bool { iface == "有线" }
 
-    /// 设备类型的中文名。取值照官方固件 `/www/i18n/gl-sdk4-ui-clients.*.json`
-    /// 里的 `clients.*` 键——固件前端就是 `t('clients.' + class)`，键和 class
-    /// 是同一套字符串。以前这里抄的是 `gamepad` / `homeAppliances` / `router`
-    /// 这些猜出来的名字，固件根本不发（2026-11-16 核对语言包时发现的）。
+    /// 设备类型的中文名。原始值与文案照**官方 App 那份「设备类型」弹窗**
+    /// （用户 2026-11-23 截图：默认 / 手机 / 笔记本 / 可穿戴设备 / 电脑 / 平板电脑 /
+    /// 相机 / 打印机 / 音响 / 电视 / 游戏机 / 网关 / 智能家电 / NAS / 服务器 / 交换机）。
+    ///
+    /// 以前抄的是固件网页端语言包的旧文案——「笔记本电脑 / 台式电脑 / 摄像头 / 电视机」，
+    /// 而且只有 13 项、没有 NAS 与服务器。用户在官方 App 里能给设备设 NAS / 服务器，
+    /// 我们这边没有对应的项，只能显示成「未知」。
     var classLabel: String {
-        if let known = ClientClass(rawValue: deviceClass) { return known.title }
-        if deviceClass.isEmpty { return wired ? "有线设备" : "无线设备" }
-        return deviceClass
+        ClientClass(stored: deviceClass)?.title ?? "默认"
     }
 
     /// 图标不在这里给：那一列统一走 `DeviceGlyph`（自绘线条），
@@ -551,52 +552,83 @@ struct NetClient: Identifiable, Equatable {
 
 /// 官方固件支持的设备类型。
 ///
-/// 原始值、中文名、顺序都照官方客户端语言包
-/// （`/www/i18n/gl-sdk4-ui-clients.zh-cn.json` 的 `clients` 段），也就是官方 App
-/// 那个「修改客户端设备」弹窗里能选的 13 项。选中后写回
-/// `/etc/config/gl-client` 里那台设备的 `class`。
+/// 原始值是写进 `/etc/config/gl-client` 的 `class`；中文名与顺序照官方 App
+/// 那个「设备类型」三列九宫格（2026-11-23 用户截图核对，16 项）。
+/// 旧版这里只有 13 项、文案也旧，所以官方设成 NAS / 服务器的设备在这边显示「未知」。
 enum ClientClass: String, CaseIterable {
+    /// 「默认」：交给路由器按 MAC 自己判。官方列表排第一，也是没归类时的显示。
+    case auto = "default"
     case phone
-    case pad
     case laptop
-    case computer
-    case television
-    case camera
-    case sound
-    case printer
     case watch
+    case computer
+    case pad
+    case camera
+    case printer
+    case sound
+    case television
     case games
-    case smartAppliances = "smart_appliances"
     case gateway
-    case unknown
+    case smartAppliances = "smart_appliances"
+    case nas
+    case server
+    case networkSwitch = "switch"
 
     var title: String {
         switch self {
+        case .auto: return "默认"
         case .phone: return "手机"
-        case .pad: return "平板电脑"
-        case .laptop: return "笔记本电脑"
-        case .computer: return "台式电脑"
-        case .television: return "电视机"
-        case .camera: return "摄像头"
-        case .sound: return "音响"
-        case .printer: return "打印机"
+        case .laptop: return "笔记本"
         case .watch: return "可穿戴设备"
+        case .computer: return "电脑"
+        case .pad: return "平板电脑"
+        case .camera: return "相机"
+        case .printer: return "打印机"
+        case .sound: return "音响"
+        case .television: return "电视"
         case .games: return "游戏机"
-        case .smartAppliances: return "智能家电"
         case .gateway: return "网关"
-        case .unknown: return "未知"
+        case .smartAppliances: return "智能家电"
+        case .nas: return "NAS"
+        case .server: return "服务器"
+        case .networkSwitch: return "交换机"
         }
     }
 
-    /// 中文名之外的图形不在这里给：图标走 `DeviceGlyph`（自绘线条），
-    /// 免得 SF Symbols 里实心/线框混在一起。
+    /// 从 `gl-client.class` 读出来的原始值。
+    ///
+    /// 老固件/老 App 会把没认出来的设备写成 `unknown`（本机那台「COKIT智能电热蚊香」
+    /// 就是），官方显示成「默认」；另外历史上还出现过驼峰、单数等几种写法，
+    /// 都在这里归一到同一项，免得又冒出一个「未知」。
+    init?(stored raw: String) {
+        let key = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if key.isEmpty { self = .auto; return }
+        if let exact = ClientClass(rawValue: key) { self = exact; return }
+        switch key {
+        case "unknown", "none", "other", "others": self = .auto
+        case "smartappliances", "smart_appliance", "homeappliances", "home_appliances",
+             "appliance", "appliances": self = .smartAppliances
+        case "gamepad", "console", "game_console": self = .games
+        case "router": self = .gateway
+        case "tablet": self = .pad
+        case "desktop", "pc": self = .computer
+        case "wearable": self = .watch
+        case "tv": self = .television
+        case "speaker": self = .sound
+        case "storage", "nas_server": self = .nas
+        case "switcher": self = .networkSwitch
+        default: return nil
+        }
+    }
 
-    /// 选择器里的排列顺序，照官方 App 那个九宫格（手机 → 笔记本 → 可穿戴 → 电脑 →
-    /// 平板 → 相机 → 打印机 → 音响 → 电视 → 游戏机 → 网关 → 智能家电 → 未知）。
+    /// 选择器里的排列顺序，照官方 App 的三列九宫格逐行读：
+    /// 默认 / 手机 / 笔记本 · 可穿戴设备 / 电脑 / 平板电脑 · 相机 / 打印机 / 音响 ·
+    /// 电视 / 游戏机 / 网关 · 智能家电 / NAS / 服务器 · 交换机。
     /// `allCases` 是声明顺序，直接用会显得像随手排的。
     static var pickerOrder: [ClientClass] {
-        [.phone, .laptop, .watch, .computer, .pad, .camera, .printer,
-         .sound, .television, .games, .gateway, .smartAppliances, .unknown]
+        [.auto, .phone, .laptop, .watch, .computer, .pad,
+         .camera, .printer, .sound, .television, .games, .gateway,
+         .smartAppliances, .nas, .server, .networkSwitch]
     }
 }
 

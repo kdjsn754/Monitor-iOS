@@ -13,7 +13,7 @@ struct ClientBadgeIcon: View {
     var size: CGFloat = 30
 
     var body: some View {
-        DeviceGlyph(kind: ClientClass(rawValue: client.deviceClass), size: size * 0.64)
+        DeviceGlyph(kind: ClientClass(stored: client.deviceClass), size: size * 0.64)
             .foregroundStyle(tint)
             .frame(width: size, height: size)
             .background {

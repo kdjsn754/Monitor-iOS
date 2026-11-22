@@ -4,7 +4,7 @@ import SwiftUI
 ///
 /// **为什么不用 SF Symbols**：那套里 `hifispeaker` / `applewatch` / `gamecontroller` /
 /// `wifi.router` 是实心笔画，`iphone` / `laptopcomputer` / `tv` / `camera` 是线框，
-/// 13 个并排看下去像东拼西凑（用户 2026-11-16：「图标风格不一样，有的实心有的线条」）。
+/// 这一排并排看下去像东拼西凑（用户 2026-11-16：「图标风格不一样，有的实心有的线条」）。
 ///
 /// **为什么也不是手画的**：上一版我在 24×24 网格上凭手感写了 13 组坐标，比例和圆角
 /// 都不对，缩到 18pt 之后糊成一团（用户：「重画图标太丑了」）。现在改用 **Lucide**
@@ -12,7 +12,7 @@ import SwiftUI
 /// round cap/join，本身就是按「一套」设计的。路径是机械翻译过来的，一个点没改。
 ///
 /// 画布尺寸按 `size` 等比缩放，线宽跟着缩放，所以 19pt（列表）、34pt（类型选择器）
-/// 观感一致。没归类的设备（`kind == nil` 或 `.unknown`）画问号。
+/// 观感一致。没归类的设备（`kind == nil`）画官方那个「默认」图形（屏幕 + 手机）。
 struct DeviceGlyph: View {
     let kind: ClientClass?
     var size: CGFloat = 18
@@ -21,7 +21,7 @@ struct DeviceGlyph: View {
 
     var body: some View {
         Path { p in
-            GlyphBuilder.build(kind ?? .unknown, into: &p, scale: size / 24)
+            GlyphBuilder.build(kind ?? .auto, into: &p, scale: size / 24)
         }
         .stroke(style: StrokeStyle(lineWidth: weight * size / 24,
                                    lineCap: .round,
@@ -30,11 +30,12 @@ struct DeviceGlyph: View {
     }
 }
 
-/// 13 个图形，几何取自 Lucide（github.com/lucide-icons/lucide）。
+/// 16 个图形，几何取自 Lucide（github.com/lucide-icons/lucide）。
 /// 坐标都在 24×24 网格上，乘 `k` 换算成实际点；一律只描边、不填色。
 private enum GlyphBuilder {
     static func build(_ kind: ClientClass, into p: inout Path, scale k: CGFloat) {
         switch kind {
+        case .auto: monitorPhone(&p, k)
         case .phone: phone(&p, k)
         case .pad: pad(&p, k)
         case .laptop: laptop(&p, k)
@@ -47,7 +48,9 @@ private enum GlyphBuilder {
         case .games: games(&p, k)
         case .smartAppliances: smartAppliances(&p, k)
         case .gateway: gateway(&p, k)
-        case .unknown: unknown(&p, k)
+        case .nas: nas(&p, k)
+        case .server: server(&p, k)
+        case .networkSwitch: networkSwitch(&p, k)
         }
     }
 
@@ -229,13 +232,54 @@ private enum GlyphBuilder {
         p.addCurve(to: pt(9.35, 4.34, k), control1: pt(17.536, 1.218, k), control2: pt(12.474, 1.218, k))
     }
 
-    private static func unknown(_ p: inout Path, _ k: CGFloat) {
-        p.addEllipse(in: CGRect(x: 2 * k, y: 2 * k, width: 20 * k, height: 20 * k))
-        p.move(to: pt(9, 9.5, k))
-        p.addCurve(to: pt(12, 7, k), control1: pt(9, 8.119, k), control2: pt(10.343, 7, k))
-        p.addCurve(to: pt(15, 9.5, k), control1: pt(13.657, 7, k), control2: pt(15, 8.119, k))
-        p.addCurve(to: pt(12, 13, k), control1: pt(15, 11.5, k), control2: pt(13, 11.5, k))
-        p.move(to: pt(12, 17, k))
-        p.addLine(to: pt(12.01, 17, k))
+    /// 「默认」：显示器 + 一台手机（Lucide `monitor-smartphone`），
+    /// 和官方列表第一格那个图形一致；以前这里画的是问号，看着像「出错了」。
+    private static func monitorPhone(_ p: inout Path, _ k: CGFloat) {
+        p.move(to: pt(18, 8, k))
+        p.addLine(to: pt(18, 6, k))
+        p.addCurve(to: pt(16, 4, k), control1: pt(18, 4.895, k), control2: pt(17.105, 4, k))
+        p.addLine(to: pt(4, 4, k))
+        p.addCurve(to: pt(2, 6, k), control1: pt(2.895, 4, k), control2: pt(2, 4.895, k))
+        p.addLine(to: pt(2, 13, k))
+        p.addCurve(to: pt(4, 15, k), control1: pt(2, 14.105, k), control2: pt(2.895, 15, k))
+        p.addLine(to: pt(12, 15, k))
+        p.move(to: pt(9, 19, k))
+        p.addLine(to: pt(9, 15, k))
+        p.move(to: pt(6, 19, k))
+        p.addLine(to: pt(11, 19, k))
+        p.addRoundedRect(in: CGRect(x: 16 * k, y: 12 * k, width: 6 * k, height: 10 * k),
+                         cornerSize: CGSize(width: 1.5 * k, height: 1.5 * k), style: .continuous)
+    }
+
+    /// NAS：方框里四根竖条（官方格子里就是这个「盘位」样子）。
+    private static func nas(_ p: inout Path, _ k: CGFloat) {
+        p.addRoundedRect(in: CGRect(x: 3 * k, y: 3 * k, width: 18 * k, height: 18 * k),
+                         cornerSize: CGSize(width: 2 * k, height: 2 * k), style: .continuous)
+        for x in [CGFloat(7.5), 10.5, 13.5, 16.5] {
+            p.move(to: pt(x, 7, k))
+            p.addLine(to: pt(x, 17, k))
+        }
+    }
+
+    /// 服务器：两层机架 + 各自一颗指示灯（Lucide `server`）。
+    private static func server(_ p: inout Path, _ k: CGFloat) {
+        p.addRoundedRect(in: CGRect(x: 2 * k, y: 2 * k, width: 20 * k, height: 8 * k),
+                         cornerSize: CGSize(width: 2 * k, height: 2 * k), style: .continuous)
+        p.addRoundedRect(in: CGRect(x: 2 * k, y: 14 * k, width: 20 * k, height: 8 * k),
+                         cornerSize: CGSize(width: 2 * k, height: 2 * k), style: .continuous)
+        p.move(to: pt(6, 6, k))
+        p.addLine(to: pt(6.01, 6, k))
+        p.move(to: pt(6, 18, k))
+        p.addLine(to: pt(6.01, 18, k))
+    }
+
+    /// 交换机：扁机箱 + 四个网口。
+    private static func networkSwitch(_ p: inout Path, _ k: CGFloat) {
+        p.addRoundedRect(in: CGRect(x: 2 * k, y: 5 * k, width: 20 * k, height: 14 * k),
+                         cornerSize: CGSize(width: 2 * k, height: 2 * k), style: .continuous)
+        for x in [CGFloat(5.5), 9.5, 13.5, 17.5] {
+            p.addRoundedRect(in: CGRect(x: (x - 1) * k, y: 12 * k, width: 2 * k, height: 3 * k),
+                             cornerSize: CGSize(width: 0.4 * k, height: 0.4 * k), style: .continuous)
+        }
     }
 }

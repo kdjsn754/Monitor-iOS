@@ -1253,7 +1253,7 @@ private struct ClientEditorSheet: View {
                             if savingClass {
                                 ProgressView().controlSize(.small)
                             } else {
-                                DeviceGlyph(kind: ClientClass(rawValue: classValue), size: 19)
+                                DeviceGlyph(kind: ClientClass(stored: classValue), size: 19)
                                     .foregroundStyle(.secondary)
                                 Text(shownClass)
                                     .foregroundStyle(.secondary)
@@ -1395,10 +1395,10 @@ private struct ClientEditorSheet: View {
         }
     }
 
-    /// 行里显示的类型名：认得的走官方文案，认不得（设备还没类型）就说有线 / 无线。
+    /// 行里显示的类型名。认不得的值（老固件写的 `unknown`、没写过）都归到「默认」，
+    /// 与官方 App 一致——那边也没有「未知」这一项。
     private var shownClass: String {
-        if let known = ClientClass(rawValue: classValue) { return known.title }
-        return client.classLabel
+        ClientClass(stored: classValue)?.title ?? client.classLabel
     }
 
     /// 选完立刻写，不走「保存」——类型是独立的配置，跟名称/地址那几项没有先后关系。
@@ -1527,7 +1527,7 @@ private struct ClientClassSheet: View {
 
     /// 一格：圆底图标 + 名字。选中时圆底是主题蓝、图标转白、名字回主色。
     private func cell(_ item: ClientClass) -> some View {
-        let on = item.rawValue == current
+        let on = ClientClass(stored: current) == item
         return Button {
             pick(item.rawValue)
         } label: {
