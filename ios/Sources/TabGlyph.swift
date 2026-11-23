@@ -75,6 +75,19 @@ enum TabGlyphImage {
                     cg.strokePath()
                     cg.setBlendMode(.normal)
                 }
+                // 实心态必须沿同一条路径再描一遍 1.7（v3.3.6）：
+                // 空心是「描边」，笔画有一半涨在轮廓外面（0.85）；实心只填不描，
+                // 外形就比空心小一圈。四枚图标在 24pt 画布里差 7~8%
+                // （实心跨度 20.8~21.0，空心 22.5~22.7），切换标签时看着
+                // 就是「选中之后图标变小了」（用户 2026-11-23 反馈）。
+                // 描边排在挖空之后：球的两条圈会伸到外沿附近，后描能把被啃掉的
+                // 球边缘补回来，圈看起来像从边缘下面穿过去。
+                cg.addPath(glyph.outline.cgPath)
+                cg.setStrokeColor(UIColor.black.cgColor)
+                cg.setLineWidth(1.7)
+                cg.setLineCap(.round)
+                cg.setLineJoin(.round)
+                cg.strokePath()
             } else {
                 cg.setStrokeColor(UIColor.black.cgColor)
                 cg.setLineWidth(1.7)

@@ -325,7 +325,8 @@ struct OverviewView: View {
                 hardwareTile(
                     icon: temperatureIcon,
                     title: "温度",
-                    value: model.stats.temperature.map { String(format: "%.1f °C", $0) } ?? "无传感器",
+                    value: model.stats.temperature.map { String(format: "%.1f", $0) } ?? "无传感器",
+                    unit: model.stats.temperature == nil ? nil : "°C",
                     color: temperatureTone,
                     badge: temperatureBadge
                 )
@@ -338,7 +339,8 @@ struct OverviewView: View {
                     hardwareTile(
                         icon: "fanblades",
                         title: "风扇",
-                        value: model.stats.fanRPM.map { String(format: "%.0f RPM", $0) } ?? "无传感器",
+                        value: model.stats.fanRPM.map { String(format: "%.0f", $0) } ?? "无传感器",
+                        unit: model.stats.fanRPM == nil ? nil : "RPM",
                         color: fanTone,
                         badge: fanBadge,
                         showsChevron: true
@@ -396,7 +398,16 @@ struct OverviewView: View {
         return "低速"
     }
 
+    /// 数值与单位**必须分开两段字号**（v3.3.6）。
+    ///
+    /// 以前是「数字 + 空格 + RPM」塞进同一个 `Text`，再挂 `minimumScaleFactor(0.75)`：
+    /// 三位数的 `952 RPM` 放得下、原样画，四位数的 `1180 RPM` 差几 pt 就被整体缩到 0.75，
+    /// 于是用户看到「三位数和四位数字体不一样」（2026-11-23）。数字是主角，不该为了
+    /// 让单位挤进来而缩；单位本来就可以小一号。
+    /// 现在数字 15pt 恒不缩放、单位 11pt 灰字，两种位数完全同字号；两格再拉成等宽，
+    /// 数值区宽度固定，以后不管几位都不会再变。
     private func hardwareTile(icon: String, title: String, value: String,
+                              unit: String? = nil,
                               color: Color, badge: String? = nil,
                               showsChevron: Bool = false) -> some View {
         HStack(spacing: 10) {
@@ -428,11 +439,18 @@ struct OverviewView: View {
                             .foregroundStyle(color)
                     }
                 }
-                Text(value)
-                    .font(.system(size: 15, weight: .semibold))
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.75)
+                HStack(alignment: .firstTextBaseline, spacing: 3) {
+                    Text(value)
+                        .font(.system(size: 15, weight: .semibold))
+                        .monospacedDigit()
+                        .lineLimit(1)
+                    if let unit {
+                        Text(unit)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
             }
 
             Spacer(minLength: 0)
@@ -444,6 +462,9 @@ struct OverviewView: View {
             }
         }
         .padding(10)
+        // 两格拉成等宽（v3.3.6）：宽度由容器均分，不再随「952 / 1180」的位数伸缩，
+        // 这也是字体不再被压缩的前提之一。
+        .frame(maxWidth: .infinity, alignment: .leading)
         .plainTile(radius: 12)
     }
 
