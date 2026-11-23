@@ -5,7 +5,11 @@ import SSH2
 /// Small libssh2 wrapper. NMSSH's CFSocket connection path does not work
 /// reliably on current iOS releases, so this uses a normal BSD socket and
 /// libssh2 directly. Every operation runs on the same private queue.
-final class SSHService {
+///
+/// `@unchecked Sendable`（v3.3.8）：`probe()` / `interrupt()` 会被 `AppModel`
+/// 从任务组里并发调用，而所有可变状态要么在本类的串行 `queue` 上、要么在
+/// `stateLock` 后面，可以安全跨线程引用。
+final class SSHService: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.catmint.openwrtmonitor.ssh")
     private var session: OpaquePointer?
     private var socketFD: Int32 = -1
@@ -40,6 +44,31 @@ final class SSHService {
         stateLock.lock()
         pendingFD = fd
         stateLock.unlock()
+    }
+
+    /// `socketFD` 也走锁：`interrupt()` 要从别的线程读它。
+    private func setSocketFD(_ fd: Int32) {
+        stateLock.lock()
+        socketFD = fd
+        stateLock.unlock()
+    }
+
+    /// 打断当前会话上正在阻塞的读写（v3.3.8）。
+    ///
+    /// 回前台重连前必须先调它：上一次采集可能正卡在 `channel_read` 里（socket 读超时
+    /// 10 秒，外层还有 EAGAIN 的重试窗口），而所有 SSH 操作都排在**同一条串行队列**上。
+    /// 不打断的话，`connect` 的 block 就排在它后面，界面白转十几秒——用户看到的
+    /// 就是「切回来要等很久」。
+    ///
+    /// 只 shutdown 不 close：fd 统一由 `closeLocked()` 关掉，免得这里关掉之后
+    /// 号码被系统复用，后面的 `shutdown` 误伤别人的 socket。
+    func interrupt() {
+        stateLock.lock()
+        let fd = socketFD
+        stateLock.unlock()
+        if fd >= 0 {
+            Darwin.shutdown(fd, SHUT_RDWR)
+        }
     }
 
     func connect(host: String, port: Int, user: String, password: String,
@@ -117,7 +146,7 @@ final class SSHService {
         if isCancelled { throw AppError.cancelled }
 
         self.session = ssh
-        self.socketFD = fd
+        setSocketFD(fd)
         sessionFreed = true
         adopted = true
     }
@@ -141,11 +170,7 @@ final class SSHService {
             return error
         }
 
-        var socketTimeout = timeval(tv_sec: 10, tv_usec: 0)
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &socketTimeout,
-                   socklen_t(MemoryLayout<timeval>.size))
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &socketTimeout,
-                   socklen_t(MemoryLayout<timeval>.size))
+        setSocketTimeouts(fd, seconds: 10)
 
         var address = sockaddr_in()
         address.sin_family = sa_family_t(AF_INET)
@@ -217,6 +242,54 @@ final class SSHService {
         return fd
     }
 
+    /// 改 socket 的收发超时。`probe()` 用它把等待压到零点几秒，探完再恢复成 10 秒。
+    private func setSocketTimeouts(_ fd: Int32, seconds: TimeInterval) {
+        let whole = Int(seconds)
+        var value = timeval(tv_sec: whole,
+                            tv_usec: Int32((seconds - Double(whole)) * 1_000_000))
+        let size = socklen_t(MemoryLayout<timeval>.size)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &value, size)
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &value, size)
+    }
+
+    /// 探一下旧会话还在不在（v3.3.8，回前台复用会话用）。
+    ///
+    /// 只做两步，任何一步不成就返回 false，让调用方去走完整重连：
+    /// ① `getsockopt(SO_ERROR)`：内核要是已经收到过这条连接的死讯（对端 RST、
+    ///    网卡已经换掉），这里立刻就能知道，一个字节都不用发、不用等超时；
+    /// ② 用 0.45 秒的 socket 超时发一句 `echo -n 1`，答上来才算活着。
+    ///
+    /// ⚠️ 它本身**不是**「一定能返回」的：libssh2 在阻塞模式下等 socket 用的是
+    /// poll/select，不受 SO_RCVTIMEO 约束。所以调用方必须自己加墙钟兜底
+    /// （见 `AppModel.probeSessionAlive` 的 0.8 秒竞速 + `interrupt()`）。
+    func probe(timeout: TimeInterval = 0.45) async -> Bool {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            queue.async {
+                guard self.session != nil, self.socketFD >= 0 else {
+                    continuation.resume(returning: false)
+                    return
+                }
+                let fd = self.socketFD
+                var socketError: Int32 = 0
+                var length = socklen_t(MemoryLayout<Int32>.size)
+                getsockopt(fd, SOL_SOCKET, SO_ERROR, &socketError, &length)
+                if socketError != 0 {
+                    continuation.resume(returning: false)
+                    return
+                }
+                self.setSocketTimeouts(fd, seconds: timeout)
+                defer {
+                    // 探针期间 socket 已经被换掉的话就别再动新 socket 的超时。
+                    if self.socketFD == fd { self.setSocketTimeouts(fd, seconds: 10) }
+                }
+                let echoed = (try? self.executeLocked("echo -n 1",
+                                                      timeout: timeout,
+                                                      floor: timeout)) ?? ""
+                continuation.resume(returning: echoed.contains("1"))
+            }
+        }
+    }
+
     /// 跑一条命令，把它的标准输出整段读回来。
     ///
     /// `timeout` 是**整条命令**的读超时（默认 30 秒）：读不到数据时按 EAGAIN
@@ -225,84 +298,86 @@ final class SSHService {
     func execute(_ command: String, timeout: TimeInterval = 30) async throws -> String {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
             queue.async {
-                guard let session = self.session else {
-                    continuation.resume(throwing: AppError.notConnected)
-                    return
+                do {
+                    continuation.resume(returning: try self.executeLocked(command, timeout: timeout))
+                } catch {
+                    continuation.resume(throwing: error)
                 }
-                guard let channel = "session".withCString({ channelType in
-                    libssh2_channel_open_ex(
-                        session,
-                        channelType,
-                        7,
-                        2 * 1024 * 1024,
-                        32768,
-                        nil,
-                        0
-                    )
-                }) else {
-                    continuation.resume(throwing: AppError.message(
-                        "打开 SSH 通道失败：\(Self.lastError(session))"
-                    ))
-                    return
-                }
-                defer {
-                    libssh2_channel_free(channel)
-                }
-                let execResult = command.withCString { pointer in
-                    "exec".withCString { request in
-                        libssh2_channel_process_startup(
-                            channel,
-                            request,
-                            4,
-                            pointer,
-                            UInt32(command.utf8.count)
-                        )
-                    }
-                }
-                guard execResult == 0 else {
-                    continuation.resume(throwing: AppError.message(
-                        "执行 SSH 命令失败：\(Self.lastError(session))"
-                    ))
-                    return
-                }
-
-                var output = Data()
-                output.reserveCapacity(16 * 1024)
-                var buffer = [CChar](repeating: 0, count: 16 * 1024)
-                // Blocking mode should never spin, but a socket timeout can surface
-                // as EAGAIN. Back off with a sleep and a hard deadline instead of
-                // hammering the channel in a tight loop (that used to burn phone
-                // CPU and keep the router's shell busy).
-                let deadline = Date().addingTimeInterval(max(timeout, 5))
-                while true {
-                    let read = buffer.withUnsafeMutableBufferPointer { pointer in
-                        libssh2_channel_read_ex(
-                            channel,
-                            0,
-                            pointer.baseAddress,
-                            pointer.count
-                        )
-                    }
-                    if read > 0 {
-                        output.append(contentsOf: buffer.prefix(read).map { UInt8(bitPattern: $0) })
-                    } else if read == 0 {
-                        break
-                    } else if read == Int(LIBSSH2_ERROR_EAGAIN) {
-                        if Date() > deadline {
-                            continuation.resume(throwing: AppError.message("读取 SSH 输出超时"))
-                            return
-                        }
-                        usleep(20_000)
-                    } else {
-                        continuation.resume(throwing: AppError.message(
-                            "读取 SSH 输出失败：\(Self.lastError(session))"
-                        ))
-                        return
-                    }
-                }
-                continuation.resume(returning: String(decoding: output, as: UTF8.self))
             }
         }
+    }
+
+    /// 同步版 `execute`：调用方保证自己已经在 `queue` 上（probe 直接用它）。
+    ///
+    /// `floor` 是 EAGAIN 重试窗口的下限，默认 5 秒（普通采集命令至少给 5 秒的余地）；
+    /// 探针传自己的短超时，免得探一个死连接还要空转 5 秒。
+    private func executeLocked(_ command: String, timeout: TimeInterval,
+                               floor: TimeInterval = 5) throws -> String {
+        guard let session = self.session else {
+            throw AppError.notConnected
+        }
+        guard let channel = "session".withCString({ channelType in
+            libssh2_channel_open_ex(
+                session,
+                channelType,
+                7,
+                2 * 1024 * 1024,
+                32768,
+                nil,
+                0
+            )
+        }) else {
+            throw AppError.message("打开 SSH 通道失败：\(Self.lastError(session))")
+        }
+        defer {
+            libssh2_channel_free(channel)
+        }
+        let execResult = command.withCString { pointer in
+            "exec".withCString { request in
+                libssh2_channel_process_startup(
+                    channel,
+                    request,
+                    4,
+                    pointer,
+                    UInt32(command.utf8.count)
+                )
+            }
+        }
+        guard execResult == 0 else {
+            throw AppError.message("执行 SSH 命令失败：\(Self.lastError(session))")
+        }
+
+        var output = Data()
+        output.reserveCapacity(16 * 1024)
+        var buffer = [CChar](repeating: 0, count: 16 * 1024)
+        // Blocking mode should never spin, but a socket timeout can surface
+        // as EAGAIN. Back off with a sleep and a hard deadline instead of
+        // hammering the channel in a tight loop (that used to burn phone
+        // CPU and keep the router's shell busy).
+        let deadline = Date().addingTimeInterval(max(timeout, floor))
+        while true {
+            let read = buffer.withUnsafeMutableBufferPointer { pointer in
+                libssh2_channel_read_ex(
+                    channel,
+                    0,
+                    pointer.baseAddress,
+                    pointer.count
+                )
+            }
+            if read > 0 {
+                output.append(contentsOf: buffer.prefix(read).map { UInt8(bitPattern: $0) })
+            } else if read == 0 {
+                break
+            } else if read == Int(LIBSSH2_ERROR_EAGAIN) {
+                if Date() > deadline {
+                    throw AppError.message("读取 SSH 输出超时")
+                }
+                usleep(20_000)
+            } else {
+                throw AppError.message("读取 SSH 输出失败：\(Self.lastError(session))")
+            }
+        }
+        return String(decoding: output, as: UTF8.self)
     }
 
     func disconnect() {
@@ -312,8 +387,9 @@ final class SSHService {
     }
 
     private func closeLocked() {
-        if socketFD >= 0 {
-            Darwin.shutdown(socketFD, SHUT_RDWR)
+        let fd = socketFD
+        if fd >= 0 {
+            Darwin.shutdown(fd, SHUT_RDWR)
         }
         if let session {
             "bye".withCString { description in
@@ -324,9 +400,9 @@ final class SSHService {
             libssh2_session_free(session)
             self.session = nil
         }
-        if socketFD >= 0 {
-            Darwin.close(socketFD)
-            socketFD = -1
+        if fd >= 0 {
+            Darwin.close(fd)
+            setSocketFD(-1)
         }
     }
 

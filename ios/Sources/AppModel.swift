@@ -225,6 +225,9 @@ final class AppModel {
     private var activePassword: String?
     private var lastSuccessfulPoll: Date?
     private var lastReconnectAttempt: Date?
+    /// 退到后台的时刻（v3.3.8）。回前台时用它判断「旧会话还值不值得探」：
+    /// 三分钟内探一下（连接多半还活着，直接复用），超过就直接完整重连。
+    private var backgroundedAt: Date?
     /// CPU / 网速都是「两次读数做差再除以时间」算出来的，所以必须记住上一拍的时间。
     /// 缺了这个时间戳，两轮挨得太近时除的是一个几十毫秒的窗口，占用率会蹦到 100%。
     private var lastCpuTotal: Double?
@@ -789,18 +792,83 @@ final class AppModel {
         if !value, connected, pollTask == nil { startPolling() }
     }
 
+    /// 回前台：能复用会话就别重连（v3.3.8）。
+    ///
+    /// 以前这里只有一条路——离开超过 10 秒就直接 `reconnect(force:)`，也就是
+    /// 「拆掉旧会话 → 建 TCP → 握手 → 密码认证 → 采集」。可是后台待一两分钟，
+    /// iOS 挂起进程**并不会**拆掉已建立的 TCP，SSH 会话多数还活着，上面这套
+    /// 纯属白做；而且 `bootstrapRefresh` 会顺手删掉路由器侧那份配置快照，
+    /// 网络页下一拍要整段重算（`uci show` + 每个 AP 的 `iw` + 口子 carrier）。
+    ///
+    /// 现在是三级：
+    /// ① 10 秒内：数据是热的，直接接着采；
+    /// ② 3 分钟内：先用 0.45 秒探一下会话还在不在，在就直接采（省掉握手 + 认证 + 缓存重算）；
+    /// ③ 探不通 / 后台太久：完整重连，失败按 0.4 / 0.9 秒短退避再试两次。
+    ///
+    /// 第 ③ 步的重试是必须的：回前台那一瞬 Wi-Fi 常常还没重新关联上，第一次 TCP
+    /// 直接 ENETUNREACH。旧逻辑一失败就弹红字，还要等 `reconnect` 的 5 秒节流，
+    /// 用户看到的就是「切回来要等好几秒才连上」。
     func resumeAfterForeground() async {
         guard connected else { return }
         // 系统浮层盖着：别重连、也别重开轮询，交给浮层收起时那句。
         guard !modalActive else { return }
+        // 上一次重连 / 新连接还在跑：让它自己收尾，别插一脚。
+        guard !reconnecting, !connecting else { return }
         // 回前台就是要看数据，退避重试用尽的挡板一起拉开。
         autoReconnectPaused = false
+
         if let lastSuccessfulPoll,
            Date().timeIntervalSince(lastSuccessfulPoll) < 10 {
             startPolling()
             return
         }
-        await reconnect(force: true)
+
+        if await probeSessionAlive() {
+            // 会话还在：只补当前页的数据。静态信息（型号 / 固件）先不占着界面等，
+            // 让它在后台补；配置快照也不删——用户没改过配置，快照就是对的。
+            if await bootstrapRefresh(invalidateCache: false, awaitInfo: false) {
+                startPolling()
+                return
+            }
+        }
+
+        let delays: [UInt64] = [0, 400, 900]
+        for (index, milliseconds) in delays.enumerated() {
+            if milliseconds > 0 {
+                try? await Task.sleep(nanoseconds: milliseconds * 1_000_000)
+            }
+            // 期间用户自己断开、或者换了一条连接：别再往老目标上撞。
+            guard connected, !connecting else { return }
+            if await reconnect(force: true, quiet: index < delays.count - 1) { return }
+        }
+    }
+
+    /// 回前台先探一下旧 SSH 会话还在不在。
+    ///
+    /// 探针本身的超时只有 0.45 秒，但 libssh2 在阻塞模式下等 socket 用的是
+    /// poll/select，那一步不受 SO_RCVTIMEO 约束——所以这里还要一层墙钟兜底：
+    /// 0.8 秒没结果就 `interrupt()` 把 socket 打断（会话本来也要重建，打断不丢东西），
+    /// 绝不让界面卡在「等一个不会回来的回包」上。
+    ///
+    /// 后台超过 3 分钟就不探了：那种情况连接大概率已经被清掉，探失败还要白等
+    /// 一个超时窗口，直接完整重连更快。
+    private func probeSessionAlive() async -> Bool {
+        if let backgroundedAt, Date().timeIntervalSince(backgroundedAt) > 180 {
+            return false
+        }
+        let service = ssh
+        return await withTaskGroup(of: Bool.self) { group in
+            group.addTask { await service.probe() }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                if Task.isCancelled { return false }
+                service.interrupt()
+                return false
+            }
+            let answer = await group.next() ?? false
+            group.cancelAll()
+            return answer
+        }
     }
 
     func manualRefresh() async {
@@ -817,8 +885,11 @@ final class AppModel {
 
     /// 返回这次是否连上了。`false` 既包括「没去连」（正在连别的、密码没取到），
     /// 也包括「连了但失败」——调用方只需要知道「现在能不能用」。
+    ///
+    /// `quiet` 为真时不弹红字：回前台的重连会连试三次，前两次失败大概率只是
+    /// Wi-Fi 还没回来，不该闪一条错误给用户看。
     @discardableResult
-    func reconnect(force: Bool) async -> Bool {
+    func reconnect(force: Bool, quiet: Bool = false) async -> Bool {
         // 正在「新建/切换连接」时别插一脚：那会儿 currentProfile 可能已经指向新连接，
         // 抢着重连会把旧会话搅乱。
         guard !reconnecting, !connecting, let profile = currentProfile else { return false }
@@ -834,6 +905,10 @@ final class AppModel {
 
         lastReconnectAttempt = Date()
         reconnecting = true
+        // 先把旧 socket 打断（v3.3.8）：上一次采集可能正卡在读写里，而所有 SSH
+        // 操作排在同一条串行队列上。不打断的话，`connect` 的 block 要排在它后面，
+        // 界面白转十几秒——「回前台重连很慢」有一半是这么来的。
+        ssh.interrupt()
         do {
             try await ssh.connect(
                 host: profile.host,
@@ -844,7 +919,9 @@ final class AppModel {
             activePassword = password
             sessionProfileID = profile.id
             connected = true
-            await bootstrapRefresh()
+            // 新会话刚建好，配置快照不用删（用户没在旁边改过路由器），
+            // 静态信息也不占着「正在恢复连接」的时间，交给后台补。
+            await bootstrapRefresh(invalidateCache: false, awaitInfo: false)
             startPolling()
             reconnecting = false
             lastReconnectAttempt = nil
@@ -855,7 +932,9 @@ final class AppModel {
         } catch {
             reconnecting = false
             status = "连接中断"
-            presentError(describe(error), seconds: 12)
+            if !quiet {
+                presentError(describe(error), seconds: 12)
+            }
             if connected {
                 startPolling()
             }
@@ -987,26 +1066,53 @@ final class AppModel {
     }
 
     /// App 进入后台时停掉轮询，回前台由 resumeAfterForeground() 重新拉起。
+    ///
+    /// 注意：**这里不记「离开时刻」**。`pausePolling` 也被「无线重载」那条恢复流程
+    /// 在**前台**调用，记进去会让回前台的判断误以为刚离开过。
+    /// 真正退后台由 `markBackgrounded()` 单独记。
     func pausePolling() {
         pollTask?.cancel()
         pollTask = nil
     }
 
+    /// 记下「刚退到后台」的时刻（v3.3.8）：回前台据此决定探旧会话还是直接重连。
+    func markBackgrounded() {
+        backgroundedAt = Date()
+    }
+
     /// 连接后的首次填充：先取当前页面的数据（界面立刻有数字），再补静态信息。
-    private func bootstrapRefresh() async {
-        // 先扔掉路由器上那份「配置面快照」（v3.1.6，见 `.network` 脚本里的慢档缓存）。
-        // 这条路径只在「刚连上 / 用户点了刷新 / 写完配置」时走，多一次 exec 无所谓；
-        // 不扔的话，改完信道或 SSID 可能要等十几秒界面才对。失败就拿旧快照，不影响功能。
-        _ = try? await execute("rm -f /tmp/.opwrt-mon-cfg /tmp/.opwrt-mon-n", timeout: 10)
+    ///
+    /// `invalidateCache`：是否先删掉路由器侧的配置面快照。只在「刚建立会话」
+    /// 「用户点了刷新」「写完配置」时为真——删了下一拍要整段重算（`uci show` +
+    /// 每个 AP 的 `iw` + 网口 carrier，网络页实测要多花几百毫秒）。
+    /// 回前台复用旧会话时传 false：用户没改过配置，那份快照就是对的。
+    ///
+    /// `awaitInfo`：静态信息（型号 / 固件 / 核数）要不要等。为 false 时丢到后台补，
+    /// 让「正在恢复连接」的浮层在数据到手的瞬间就能撤掉。
+    ///
+    /// 返回数据是否取到了；调用方（回前台复用会话那条路）失败时还要接着重连。
+    @discardableResult
+    private func bootstrapRefresh(invalidateCache: Bool = true,
+                                  awaitInfo: Bool = true) async -> Bool {
+        if invalidateCache {
+            // 先扔掉路由器上那份「配置面快照」（v3.1.6，见 `.network` 脚本里的慢档缓存）。
+            // 不扔的话，改完信道或 SSID 可能要等十几秒界面才对。失败就拿旧快照，不影响功能。
+            _ = try? await execute("rm -f /tmp/.opwrt-mon-cfg /tmp/.opwrt-mon-n", timeout: 10)
+        }
         do {
             try await runItems(activeItems)
             lastTickAt = Date()
             lastSuccessfulPoll = Date()
         } catch {
             status = "连接中断"
-            return
+            return false
         }
-        await refreshInfo()
+        if awaitInfo {
+            await refreshInfo()
+        } else {
+            Task { await self.refreshInfo() }
+        }
+        return true
     }
 
     /// 一轮：把当前页面要采集的项拼成一条命令发出去。

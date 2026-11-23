@@ -33,6 +33,8 @@ struct RootView: View {
     // 连接弹窗：只在“发起连接”时出现，成功后自动收起，失败给重试。
     @State private var popupPhase: ConnectionPhase?
     @State private var connectStartedAt: Date?
+    /// 「正在恢复连接」浮层是否已经该亮了（v3.3.8，慢 0.35 秒，避免白闪）。
+    @State private var recoveringVisible = false
 
     var body: some View {
         ZStack {
@@ -64,7 +66,10 @@ struct RootView: View {
                 )
                 .zIndex(2)
             }
-            if model.reconnecting || model.activityTitle != nil {
+            // v3.3.8：重连浮层晚 0.35 秒才亮。回前台复用会话 / 快速重连常常在
+            // 200 ms 内就结束了，旧写法会先糊一层全屏遮罩再撤掉——一次白闪，
+            // 看着比实际耗时更「卡」。真慢了（超出 0.35 秒）照样亮，不会没有反馈。
+            if (model.reconnecting && recoveringVisible) || model.activityTitle != nil {
                 ZStack {
                     Color.black.opacity(0.18)
                         .ignoresSafeArea()
@@ -120,12 +125,26 @@ struct RootView: View {
                 finishPopup()
             }
         }
+        .onChange(of: model.reconnecting) { _, isRecovering in
+            guard isRecovering else {
+                if recoveringVisible { recoveringVisible = false }
+                return
+            }
+            // 0.35 秒还没好才亮浮层：快的时候用户根本不该看到这层遮罩。
+            Task {
+                try? await Task.sleep(nanoseconds: 350_000_000)
+                guard model.reconnecting else { return }
+                withAnimation(.easeInOut(duration: 0.15)) { recoveringVisible = true }
+            }
+        }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active:
                 Task { await model.resumeAfterForeground() }
             case .background:
                 // 退到后台立刻停掉轮询，别让路由器替一个看不见的界面干活。
+                // 先记下离开时刻：回前台要据此判断「探旧会话」还是直接重连（v3.3.8）。
+                model.markBackgrounded()
                 model.pausePolling()
             default:
                 break
