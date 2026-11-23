@@ -90,6 +90,11 @@ struct RootView: View {
                 .transition(.opacity)
             }
         }
+        // v3.3.7：滚动期间把刷新率顶到 120。
+        // 挂在这里是为了覆盖**所有**页面——探针每 0.25s 扫一遍窗口视图树，
+        // 把找到的 UIScrollView（SwiftUI 的 ScrollView / Form / List 底下都是它）
+        // 登记给 `ScrollBoostCenter`。实现与原因见 `FrameRateBoost.swift`。
+        .background { FrameRateBoostProbe() }
         .preferredColorScheme(colorScheme)
         .tint(.blue)
         .animation(.easeInOut(duration: 0.2), value: popupPhase)
