@@ -24,6 +24,24 @@ targets:
     info:
       path: Sources/Info.plist
       properties:
+        # ── 120Hz ProMotion（v3.3.6，2026-11-24）───────────────────────────
+        # **别再删这一行。** iPhone 上第三方 App 默认被锁在 60Hz：Apple 官方文档
+        # 原话是「不配置此 Key 时，Core Animation 不会使用高于 60Hz 的帧率」，
+        # 所以滚动写得再顺也顶在 60，跟手机有没有 ProMotion 无关。
+        #
+        # 设成 true 之后，UIKit / SwiftUI / CAAnimation / SpriteKit 会自己接管
+        # frame pacing（Apple：“Frameworks that automatically handle frame pacing”），
+        # UIScrollView（也就是 SwiftUI 的 ScrollView / List）惯性滚动直接上到 120。
+        # 项目里不需要手写 CADisplayLink，也不需要给 ScrollView 设帧率——
+        # 这一个是 iPhone 唯一的开关。
+        #
+        # 三点别搞错：
+        #   ① 只有 iPhone 需要这个键，iPad Pro 本来不限制（加了也无害）。
+        #   ② 它是「允许」不是「强制」：App 改不了屏幕刷新率，只能给系统机会，
+        #      由 Core Animation 按当前负载自己决定给多少。
+        #   ③ 低电量模式、设置→辅助功能→动态效果→限制帧速率、机身过热时，
+        #      系统会主动降回 60 —— 这是设计行为，不是键没生效。
+        CADisableMinimumFrameDurationOnPhone: true
         CFBundleDisplayName: OpenWrt 监控
         # v2.4.5：长按输入框弹出的「剪切 / 拷贝 / 自动填充 / 查找」是 UIKit 的
         # 系统菜单，它的语言**不跟手机系统走，跟 App 自己声明支持的本地化走**。
