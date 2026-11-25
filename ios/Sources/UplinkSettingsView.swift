@@ -860,16 +860,16 @@ struct UplinkSettingsView: View {
         .padding(.vertical, 12)
     }
 
-    /// 插了 SIM 卡 Modem：这台机器没这个硬件，真插上了也只报能读到的三项。
+    /// 插了 SIM 卡 Modem：这台机器没这个硬件，读不到的一律不编。
     private var modemBody: some View {
         VStack(alignment: .leading, spacing: 0) {
             CardRule()
             HStack(alignment: .top, spacing: 12) {
                 MetricCell(label: "Modem", value: "已插入")
-                MetricCell(label: "SIM 卡", value: "已检测")
+                MetricCell(label: "SIM 卡", value: "未读取")
             }
             .padding(.vertical, UI.rowPadding)
-            Text("SIM 卡、APN、频段这些要在固件支持 Modem 的机型上才有；这台按官方接口读不到就不编。")
+            Text("SIM 卡、APN、频段这些要固件支持 Modem 才读得到，这台按官方接口取不到就不编。")
                 .font(UI.label())
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
