@@ -5,49 +5,38 @@ import UIKit
 ///
 /// **入口**：网络页「无线」卡右上角的「更多」。
 ///
-/// ## v3.4.1 重做（用户 2026-11-25：「无线页也参考官方重做，布局也重做不要参考
-/// 官方布局，你自己设计要图形化」）
+/// ## v3.4.3 第三次重做（用户 2026-11-26 00:36：「配色太丑和这布局结合太丑了重新设计」
+/// → 00:42「现在又没图形化了」）
 ///
-/// 之前这一页是 `Form` + 五张系统分区表：主网络两行、访客一行、IoT 一行、多链路
-/// 一行、无线配置两行，全是「标题 + 灰字 + 开关」的文字行。用户要的是图形化，
-/// 所以版式整个换掉，**信息结构仍然按官方那套**（`/www/i18n/gl-sdk4-ui-wireless`
-/// 的分组：主网络 / 访客 / IoT / 多链路 / 无线配置），只是把它画出来：
+/// 两版都被否过一次，弄清问题在哪：v3.4.1 的问题是**同一种视觉形态被复制三遍**——
+/// 三个频段各一张卡，卡里都是「彩色徽章 + 频谱条 + 三颗参数胶囊」，一屏三套同样的
+/// 东西，再叠五种颜色，所以又花又笨。v3.4.2 只换颜色不改形态，用户仍然说丑。
+/// 而把图全删掉只留列表（第二版稿）又被回「没图形化了」——**他要图形，只是不要
+/// 那种一根根细柱子的频宽图**。
+///
+/// 所以这一版的做法：
 ///
 /// | 区域 | 画法 |
 /// | --- | --- |
-/// | 顶部 | 无线波纹 + 「几个频段在广播 / 几台设备」+ 每个频段的色点胶囊 |
-/// | 每个频段一张卡 | 频段徽章（2.4 / 5）+ SSID + 开关 + **频谱条** + 三项参数胶囊 |
-/// | 频谱条 | 按这一频段可用信道画刻度，高亮当前信道、宽度按频宽占位 |
-/// | 其他网络 | 彩色图标块 + 频段圆点 + 开关（访客 / IoT / 多链路） |
-/// | 编辑页 | 安全性四个胶囊、频段开关、密码框；无线参数页是「信道标尺 + 频宽块 + 功率格」 |
+/// | 顶部 | **场景图**：一台路由器 + 三层弧 + 四周散着手机 / 笔记本 / 电视，一句话在下面 |
+/// | 主网络 | 一个频段一行：频段标签、SSID、加密与台数、开关 |
+/// | 无线参数 | 一个频段一行：信道与频宽、发射功率，点进去是那一频段的参数页 |
+/// | 其他网络 | 图标块 + 名称 + 「SSID · 频段」+ 开关 |
+///
+/// 三条硬规矩（写进 开发交接.md 第 5 节）：
+/// 1. **整页只有一种彩色**（`WifiPalette`），频段靠标签和开关状态区分，关掉的压灰；
+/// 2. **图形只出现在顶部，且只有一处**；下面一律是安静的行，不再每卡配一条小图；
+/// 3. **信道 / 频宽 / 功率不进主网络行**——它们是 radio 级参数，同频段所有网络共用，
+///    混在 SSID 行里既重复又挤。
 ///
 /// **能不能改得动，靠的是通道不是界面**：所有写入都走 `AppModel.saveWifiGroup` /
 /// `createWifiGroup` / `saveRadioSettings`，写完回读 `uci`，对得上才算成功，最后
 /// `wifi reload` 生效（那一步会断线，见 `reloadWireless`）。
 ///
-/// 这一版顺手修掉一个会「改坏」的老毛病：编辑页以前不管用户动没动安全性，
-/// 保存时都把 `encryption` 写一遍。原值是认不出的老组合（`owe` / `wpa3` 之类）时，
-/// 只改个名字也会被压成 WPA2/WPA3 混合——现在没动过就不写。
-///
 /// **没做的两项**（原因写进第 5 节）：无线模式 `hwmode` 与使用环境（室内/户外）。
 /// 前者这台固件没有 `hwmode` 这个键，制式写在 `htmode` 前缀里，写错会让 MTK 驱动
 /// 直接不认这个频段；后者在固件里没有 uci 落点（官方走 RPC 直调驱动）。
-///
-/// ## v3.4.2 配色重定（用户 2026-11-25：「这页面的配色太丑了」）
-///
-/// 版式没动，只换颜色。旧版一屏里有五种高饱和色，而且互相撞：
-/// 2.4G 墨绿和 IoT 草绿是同一个色族，6G 的紫和「多链路」的紫**完全相同**
-/// （都是 `0.44,0.36,0.88`），再叠一个很亮的橙，整页像拼图。
-///
-/// 现在：
-/// - **频段只用冷色一族**——青绿（2.4）→ 青蓝（5，接着网络页拓扑的青色）→ 靛蓝（6），
-///   色相只差二十来度，明度对齐，扫过去是一组；
-/// - **次要网络全部降饱和**——访客暖赭（唯一暖色，用来分主次）、物联网中性灰蓝、
-///   多链路暗洋红，都不与频段撞；
-/// - **亮色系 + 两档**（用户同日 23:53：「要用亮色系」）：色块取亮的一档（400 级，
-///   薄荷绿 / 天青 / 亮靛），文字取同色相深一档（`ink`），浅色 / 深色各有一套值；
-/// - 顺手把「关闭态」的灰从 `systemGray4` 换到 `Color.primary.opacity(…)`，浅色下
-///   那些 13% 灰底原先几乎看不见。 
+
 struct WifiSettingsView: View {
     @Environment(AppModel.self) private var model: AppModel
 
@@ -82,17 +71,21 @@ struct WifiSettingsView: View {
         }
     }
 
+    /// 正在广播的频段。
+    private var liveBands: [WifiBandInfo] { bands.filter(\.up) }
+
+    /// 三个频段上的设备加起来（同一台设备可能同时在两个频段上，这里只是近似）。
+    private var clientCount: Int { bands.reduce(0) { $0 + $1.clients } }
+
     var body: some View {
         ScrollView {
             VStack(spacing: UI.cardSpacing) {
-                heroCard
-
                 if bands.isEmpty {
                     emptyCard
                 } else {
-                    ForEach(bands) { band in
-                        bandCard(band)
-                    }
+                    sceneCard
+                    mainCard
+                    radioCard
                 }
 
                 networksCard
@@ -123,56 +116,40 @@ struct WifiSettingsView: View {
         }
     }
 
-    // MARK: - 顶部：现在开着几个频段
+    // MARK: - 顶部：一张场景图
 
-    /// 顶上那一块：左边是无线波纹（弧数跟着开着的频段数走），右边一句结论。
-    private var heroCard: some View {
-        let live = bands.filter { $0.up }
-        let clients = bands.reduce(0) { $0 + $1.clients }
-        return HStack(alignment: .center, spacing: 14) {
-            WifiWaveGlyph(lit: live.isEmpty ? 0 : min(live.count, 3),
-                          color: live.isEmpty ? Color.secondary : NetPalette.wifi)
-                .frame(width: 86, height: 64)
+    /// 顶上一整块：路由器 + 波纹 + 四周的设备，底下一句结论。
+    ///
+    /// 全页**唯一**的图。位置、尺寸、画法都在 `WifiScene` 里，这里只管占位和文字。
+    private var sceneCard: some View {
+        VStack(spacing: 0) {
+            WifiScene(live: liveBands.count, tint: WifiPalette.accent)
+                .frame(height: 168)
                 .accessibilityHidden(true)
 
-            VStack(alignment: .leading, spacing: 5) {
-                Text(live.isEmpty ? "无线已关闭" : "\(live.count) 个频段在广播")
-                    .font(UI.title(.semibold))
-                    .foregroundStyle(.primary)
-                Text(clients > 0 ? "\(clients) 台设备连着" : "暂时没有设备连着")
-                    .font(UI.label())
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(liveBands.isEmpty ? Color.secondary.opacity(0.35) : WifiPalette.accent)
+                    .frame(width: 6, height: 6)
+                Text(sceneLine)
+                    .font(.system(size: 12.5))
                     .foregroundStyle(.secondary)
-                if !bands.isEmpty {
-                    HStack(spacing: 6) {
-                        ForEach(bands) { band in
-                            bandPill(band)
-                        }
-                    }
-                    .padding(.top, 2)
-                }
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
             }
-
-            Spacer(minLength: 0)
+            .padding(.top, 4)
         }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 10)
+        .padding(.bottom, 16)
         .cardSurface()
     }
 
-    private func bandPill(_ band: WifiBandInfo) -> some View {
-        let on = band.up
-        let tint = BandTint.color(band.band)
-        return HStack(spacing: 4) {
-            Circle()
-                .fill(on ? tint : Color(.systemGray3))
-                .frame(width: 5, height: 5)
-            Text(shortBand(band.band))
-                .font(.system(size: 10.5, weight: .semibold))
-                .foregroundStyle(on ? BandTint.ink(band.band) : Color.secondary)
-        }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 3)
-        .background {
-            Capsule().fill((on ? tint : Color(.systemGray4)).opacity(0.18))
-        }
+    private var sceneLine: String {
+        if liveBands.isEmpty { return "无线已全部关闭" }
+        var text = "\(liveBands.count) 个频段在广播"
+        if clientCount > 0 { text += " · \(clientCount) 台设备连着" }
+        return text
     }
 
     private var emptyCard: some View {
@@ -184,79 +161,49 @@ struct WifiSettingsView: View {
         }
     }
 
-    // MARK: - 每个频段一张卡
+    // MARK: - 主网络
 
-    /// 一个频段 = 一张卡：频段徽章、主 SSID、开关、频谱条、三项参数。
-    ///
-    /// 参数（信道 / 频宽 / 功率）挂在 radio 上，这一频段的**所有**网络共用一份，
-    /// 所以它不跟着某个 SSID 走，而是单独一行，点开就是无线参数页（与官方
-    /// 「以下配置将应用到所有 X 频段的网络」同一件事）。
-    private func bandCard(_ band: WifiBandInfo) -> some View {
-        let tint = BandTint.color(band.band)
-        let on = band.ssidOn && !band.radioOff
-
-        return VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .center, spacing: 11) {
-                bandBadge(band, on: on)
-
-                Button {
-                    if let mainGroup { editingGroup = mainGroup }
-                } label: {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(band.ssid.isEmpty ? "—" : band.ssid)
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(on ? Color.primary : Color.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Text(bandSubline(band))
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.8)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
+    /// 一个频段一行。名字、加密方式、设备数都在这一行，右端是开关。
+    private var mainCard: some View {
+        CardPanel("主网络", icon: "wifi", trailing: "三个频段同名") {
+            VStack(spacing: 0) {
+                ForEach(Array(bands.enumerated()), id: \.element.id) { index, band in
+                    if index > 0 { CardRule() }
+                    mainRow(band)
                 }
-                .buttonStyle(.plain)
-                .disabled(mainGroup?.editable != true)
-
-                bandSwitch(band)
             }
-
-            WifiSpectrum(channels: spectrumChannels(band),
-                         highlight: band.channel,
-                         slots: spectrumSlots(band.width),
-                         tint: on ? tint : Color(.systemGray3))
-                .frame(height: 28)
-                .padding(.top, 12)
-                .opacity(on ? 1 : 0.55)
-                .accessibilityHidden(true)
-
-            HStack(spacing: 8) {
-                paramChip("信道", band.channelSettingLabel, band: band)
-                paramChip("频宽", band.width.isEmpty ? "—" : "\(band.width) MHz", band: band)
-                paramChip("功率", band.powerLabel, band: band)
-            }
-            .padding(.top, 10)
         }
-        .cardSurface()
     }
 
-    private func bandBadge(_ band: WifiBandInfo, on: Bool) -> some View {
-        let tint = BandTint.color(band.band)
-        return VStack(spacing: -1) {
-            Text(band.band.isEmpty ? "?" : band.band)
-                .font(.system(size: 17, weight: .bold))
-                .foregroundStyle(on ? BandTint.ink(band.band) : Color.secondary)
-            Text("GHz")
-                .font(.system(size: 8, weight: .semibold))
-                .foregroundStyle((on ? BandTint.ink(band.band) : Color.secondary).opacity(0.8))
+    private func mainRow(_ band: WifiBandInfo) -> some View {
+        let on = band.ssidOn && !band.radioOff
+        return HStack(spacing: 12) {
+            bandTag(band.band, on: on)
+
+            Button {
+                if let mainGroup { editingGroup = mainGroup }
+            } label: {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(band.ssid.isEmpty ? "—" : band.ssid)
+                        .font(.system(size: 15.5, weight: .medium))
+                        .foregroundStyle(on ? Color.primary : Color.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(bandSubline(band))
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(mainGroup?.editable != true)
+
+            bandSwitch(band)
         }
-        .frame(width: 48, height: 42)
-        .background {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill((on ? tint : Color(.systemGray4)).opacity(0.16))
-        }
+        .padding(.vertical, 11)
     }
 
     private func bandSubline(_ band: WifiBandInfo) -> String {
@@ -272,53 +219,21 @@ struct WifiSettingsView: View {
         return parts.isEmpty ? "—" : parts.joined(separator: " · ")
     }
 
-    /// 信道 / 频宽 / 功率：三颗等宽的小胶囊，点哪一颗都进同一页（无线参数）。
-    private func paramChip(_ title: String, _ value: String, band: WifiBandInfo) -> some View {
-        Button {
-            editingRadio = band
-        } label: {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
-                Text(value)
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .foregroundStyle(band.editable ? Color.primary : Color.secondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.75)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 7)
+    /// 频段标签：固定 44×30 的小块。开着是主色淡底，关掉只留中性灰。
+    ///
+    /// **不许再按频段给不同颜色**（v3.4.1～v3.4.2 的教训）：一屏三个色块就会互相抢，
+    /// 用户原话是「配色太丑」。要区分频段，靠这几个字和开关状态就够了。
+    private func bandTag(_ raw: String, on: Bool) -> some View {
+        Text(raw.isEmpty ? "?" : shortBand(raw))
+            .font(.system(size: 11.5, weight: .semibold))
+            .foregroundStyle(on ? WifiPalette.ink : Color.secondary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+            .frame(width: 44, height: 30)
             .background {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.primary.opacity(0.05))
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(on ? WifiPalette.accent.opacity(0.12) : Color.primary.opacity(0.05))
             }
-            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .disabled(!band.editable)
-    }
-
-    /// 频率刻度上的候选信道。当前信道一定要在里面（可能停在 DFS 信道上），
-    /// 否则频谱条上会找不到高亮，看着像「没信号」。
-    private func spectrumChannels(_ band: WifiBandInfo) -> [Int] {
-        var list = band.channelOptions
-        if band.channel > 0, !list.contains(band.channel) {
-            list.append(band.channel)
-            list.sort()
-        }
-        return list
-    }
-
-    /// 频宽在频谱条上占几格（20M 一格、40M 两格、80M 四格、160M 八格）。
-    private func spectrumSlots(_ width: String) -> Int {
-        switch width {
-        case "160": return 8
-        case "80": return 4
-        case "40": return 2
-        default: return 1
-        }
     }
 
     private func bandSwitch(_ band: WifiBandInfo) -> some View {
@@ -339,6 +254,66 @@ struct WifiSettingsView: View {
         .frame(width: 51)
     }
 
+    // MARK: - 无线参数
+
+    /// 信道 / 频宽 / 发射功率挂在 radio 段上，这一频段的**所有**网络共用一份，
+    /// 所以单独一张卡，不跟着某个 SSID 走。点一行就是那一频段的参数页。
+    private var radioCard: some View {
+        CardPanel("无线参数", icon: "slider.horizontal.3", trailing: "同频段共用") {
+            VStack(spacing: 0) {
+                ForEach(Array(bands.enumerated()), id: \.element.id) { index, band in
+                    if index > 0 { CardRule() }
+                    radioRow(band)
+                }
+            }
+        }
+    }
+
+    private func radioRow(_ band: WifiBandInfo) -> some View {
+        let on = band.ssidOn && !band.radioOff
+        return Button {
+            editingRadio = band
+        } label: {
+            HStack(spacing: 12) {
+                bandTag(band.band, on: on)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(radioTitle(band))
+                        .font(.system(size: 14.5, weight: .medium))
+                        .foregroundStyle(on ? Color.primary : Color.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                    Text(band.radioOff ? "频段已关闭" : "发射功率 " + band.powerLabel)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 0)
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.vertical, 11)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!band.editable)
+    }
+
+    /// 「自动 · CH 6 · 160 MHz」或「CH 36 · 80 MHz」。
+    private func radioTitle(_ band: WifiBandInfo) -> String {
+        var parts: [String] = []
+        if band.channelMode == "auto" || band.channelMode.isEmpty {
+            parts.append(band.channel > 0 ? "自动 · CH \(band.channel)" : "自动信道")
+        } else {
+            parts.append("CH \(band.channelMode)")
+        }
+        if !band.width.isEmpty { parts.append(band.width + " MHz") }
+        return parts.joined(separator: " · ")
+    }
+
     // MARK: - 其他网络
 
     private var networksCard: some View {
@@ -354,15 +329,14 @@ struct WifiSettingsView: View {
         }
     }
 
-    /// 一行一个组：彩色图标块 + 标题 + SSID + 频段圆点 + 开关。
-    /// 没有成员段的组画成「添加」，点进去就是创建页；多链路没有模板段，只画一条占位。
+    /// 一行一个组：图标块 + 标题 + 「SSID · 频段」+ 开关。
+    /// 没有成员段的组画成「添加」，点进去就是创建页。
     private func networkRow(_ group: WifiNetGroup) -> some View {
         let exists = !group.members.isEmpty
         let on = group.isOn
-        let tint = KindTint.color(group.kind)
         let canCreate = group.kind == .guest || group.kind == .iot
 
-        return HStack(alignment: .center, spacing: 12) {
+        return HStack(spacing: 12) {
             Button {
                 if exists {
                     editingGroup = group
@@ -370,34 +344,27 @@ struct WifiSettingsView: View {
                     creatingKind = group.kind
                 }
             } label: {
-                HStack(alignment: .center, spacing: 12) {
+                HStack(spacing: 12) {
                     ZStack {
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(exists && on ? tint.opacity(0.16) : Color.primary.opacity(0.06))
-                            .frame(width: 42, height: 42)
-                        Image(systemName: exists ? KindTint.icon(group.kind) : "plus")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(exists && on ? KindTint.ink(group.kind) : Color.secondary)
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(exists && on ? WifiPalette.accent.opacity(0.12) : Color.primary.opacity(0.05))
+                            .frame(width: 38, height: 38)
+                        Image(systemName: exists ? KindIcon.symbol(group.kind) : "plus")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(exists && on ? WifiPalette.ink : Color.secondary)
                     }
 
                     VStack(alignment: .leading, spacing: 3) {
                         Text(exists ? group.kind.title : "添加\(group.kind.title)")
-                            .font(.system(size: 15, weight: .semibold))
+                            .font(.system(size: 14.5, weight: .medium))
                             .foregroundStyle(exists ? Color.primary : Color.secondary)
                             .lineLimit(1)
 
-                        if exists {
-                            Text(group.ssid.isEmpty ? "—" : group.ssid)
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                            bandDots(group)
-                        } else {
-                            Text(canCreate ? "还没有这个网络" : "这台路由器没有这一组")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.tertiary)
-                        }
+                        Text(groupLine(group, canCreate: canCreate))
+                            .font(.system(size: 12))
+                            .foregroundStyle(exists ? Color.secondary : Color.secondary.opacity(0.6))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
 
                     Spacer(minLength: 0)
@@ -420,7 +387,7 @@ struct WifiSettingsView: View {
                 }
             } else {
                 Image(systemName: canCreate ? "chevron.right" : "minus")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.tertiary)
                     .frame(width: 51)
             }
@@ -428,28 +395,14 @@ struct WifiSettingsView: View {
         .padding(.vertical, 10)
     }
 
-    /// 组里哪几个频段在广播：亮色 = 开，灰 = 关。
-    private func bandDots(_ group: WifiNetGroup) -> some View {
-        HStack(spacing: 4) {
-            ForEach(group.members) { member in
-                let lit = member.ssidOn && !member.radioOff
-                Text(shortBand(member.band))
-                    .font(.system(size: 9.5, weight: .semibold))
-                    .foregroundStyle(lit ? BandTint.ink(member.band) : Color.secondary)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1.5)
-                    .background {
-                        Capsule()
-                            .fill(lit ? BandTint.color(member.band).opacity(0.19) : Color.primary.opacity(0.07))
-                    }
-            }
-            if group.clients > 0 {
-                Text("\(group.clients) 台")
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(.secondary)
-            }
+    private func groupLine(_ group: WifiNetGroup, canCreate: Bool) -> String {
+        guard !group.members.isEmpty else {
+            return canCreate ? "还没有这个网络" : "这台路由器没有这一组"
         }
-        .padding(.top, 1)
+        var text = group.ssid.isEmpty ? "—" : group.ssid
+        let names = group.members.map { shortBand($0.band) }
+        if !names.isEmpty { text += " · " + names.joined(separator: " + ") }
+        return text
     }
 
     // MARK: - 写：开关
@@ -520,33 +473,88 @@ struct WifiSettingsView: View {
 
 // MARK: - 图形件
 
-/// 无线波纹：底部一个圆点，向上三圈弧。亮起的弧数跟着「开着几个频段」走。
+/// 无线场景图：一台路由器，三层弧往外扩，四周散着几台设备。
 ///
-/// 用 `Canvas` 一次画完（同网络页的 `TopoFork`），滚动时只做位移合成，
-/// 不会因为几个 `Path` 叠在一起掉帧。
-private struct WifiWaveGlyph: View {
-    let lit: Int
-    let color: Color
+/// 全页唯一的图（v3.4.3）。用 `Canvas` 一次画完，滚动时只做合成，
+/// 不会因为几十个 `Path` 叠着掉帧（同网络页 `TopoFork` 的做法）。
+///
+/// 两处都是「示意」不是「仪表」：
+/// - 弧的层数跟着**开着几个频段**走，全关只剩最里面一层很淡的；
+/// - 四周的设备**不按真实台数增减**——数量一变整个画面会跳，十台也摆不下。
+///   真实台数写在图下面那行字里。
+private struct WifiScene: View {
+    /// 开着的频段数（0…3）。
+    let live: Int
+    let tint: Color
 
     var body: some View {
         Canvas { context, size in
-            let base = CGPoint(x: size.width / 2, y: size.height - 5)
-            let radii: [CGFloat] = [size.height * 0.30,
-                                    size.height * 0.52,
-                                    size.height * 0.74]
+            let w = size.width
+            let h = size.height
+            let cx = w / 2
+            let baseY = h * 0.76
+            let on = live > 0
+
+            // 四周的设备（先画，压在弧下面）
+            let devices: [(CGRect, Double)] = [
+                (CGRect(x: w * 0.085, y: h * 0.150, width: w * 0.042, height: h * 0.096), 0.30),
+                (CGRect(x: w * 0.800, y: h * 0.115, width: w * 0.070, height: h * 0.046), 0.24),
+                (CGRect(x: w * 0.815, y: h * 0.470, width: w * 0.082, height: h * 0.056), 0.20),
+                (CGRect(x: w * 0.070, y: h * 0.500, width: w * 0.056, height: h * 0.050), 0.24)
+            ]
+            for (rect, alpha) in devices {
+                context.fill(Path(roundedRect: rect, cornerRadius: min(rect.width, rect.height) * 0.28),
+                             with: .color(tint.opacity(on ? alpha : alpha * 0.6)))
+            }
+
+            // 同心弧：半径按宽度算，换屏幕不会挤在一起
+            let radii: [CGFloat] = [w * 0.125, w * 0.215, w * 0.305]
             for (index, radius) in radii.enumerated() {
                 var path = Path()
-                path.addArc(center: base, radius: radius,
-                            startAngle: .degrees(215), endAngle: .degrees(325),
+                path.addArc(center: CGPoint(x: cx, y: baseY),
+                            radius: radius,
+                            startAngle: .degrees(202),
+                            endAngle: .degrees(338),
                             clockwise: false)
-                let on = index < lit
+                let lit = index < max(live, 1)
+                let alpha: Double = on ? (lit ? 0.40 - Double(index) * 0.10 : 0.09) : 0.07
                 context.stroke(path,
-                               with: .color(color.opacity(on ? 0.9 - Double(index) * 0.18 : 0.16)),
-                               style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                               with: .color(tint.opacity(alpha)),
+                               style: StrokeStyle(lineWidth: index == 0 ? 2.2 : 1.5, lineCap: .round))
             }
-            var dot = Path()
-            dot.addEllipse(in: CGRect(x: base.x - 4, y: base.y - 4, width: 8, height: 8))
-            context.fill(dot, with: .color(color.opacity(lit > 0 ? 1 : 0.32)))
+
+            // 地面投影
+            var shadow = Path()
+            shadow.addRoundedRect(in: CGRect(x: cx - w * 0.115, y: baseY + 4,
+                                             width: w * 0.23, height: 3),
+                                  cornerSize: CGSize(width: 1.5, height: 1.5))
+            context.fill(shadow, with: .color(tint.opacity(on ? 0.12 : 0.05)))
+
+            // 机身
+            let bodyW = w * 0.150
+            let bodyH = h * 0.105
+            let body = CGRect(x: cx - bodyW / 2, y: baseY - bodyH, width: bodyW, height: bodyH)
+            context.fill(Path(roundedRect: body, cornerRadius: bodyH * 0.30),
+                         with: .color(on ? tint : Color.secondary.opacity(0.35)))
+
+            // 两根天线
+            var antenna = Path()
+            antenna.move(to: CGPoint(x: body.minX + bodyW * 0.16, y: body.minY + 1))
+            antenna.addLine(to: CGPoint(x: body.minX - bodyW * 0.08, y: body.minY - bodyH * 0.78))
+            antenna.move(to: CGPoint(x: body.maxX - bodyW * 0.16, y: body.minY + 1))
+            antenna.addLine(to: CGPoint(x: body.maxX + bodyW * 0.08, y: body.minY - bodyH * 0.78))
+            context.stroke(antenna,
+                           with: .color(on ? tint : Color.secondary.opacity(0.30)),
+                           style: StrokeStyle(lineWidth: 2, lineCap: .round))
+
+            // 三颗指示灯
+            for index in 0..<3 {
+                let r: CGFloat = 1.5
+                let x = body.minX + bodyW * (0.26 + CGFloat(index) * 0.17)
+                let y = body.midY + 1
+                context.fill(Path(ellipseIn: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2)),
+                             with: .color(Color.white.opacity(on ? (index == 0 ? 0.95 : 0.5) : 0.45)))
+            }
         }
     }
 }
@@ -716,72 +724,28 @@ private func wifiTone(_ light: (CGFloat, CGFloat, CGFloat),
     })
 }
 
-/// 频段配色（v3.4.2 重定）：**青绿 → 青蓝 → 靛蓝，同一个冷色族**。
+/// 整页唯一的一组颜色（v3.4.3）。
 ///
-/// 旧值（v3.4.1 及以前）是 2.4G 墨绿 `(0.10,0.62,0.45)` + 5G 青 + 6G 紫：三个色相
-/// 各在一百二十度开外，一屏摆三张卡像三套皮肤的拼图；墨绿在白卡上尤其脏，绿又和
-/// 「IoT」那个草绿撞、紫又和「多链路」的紫**完全同色**（`0.44,0.36,0.88` 一字不差）。
+/// 从前每个频段一种色，一路加到五种，用户连着说「丑」。现在只有主色 + 中性灰：
+/// - `accent`：场景图的弧与机身、频段标签底、其他网络图标底；
+/// - `ink`：凡是**字**要用主色时取这一档（亮色当 11pt 小字对比只有 2.6:1）；
+/// - 关闭态一律 `Color.primary.opacity(0.05)`，不用 `systemGray4`——
+///   13% 的灰在白卡上等于没画。
 ///
-/// 现在三档只动色相 20° 左右、明度对齐，扫过去是一组，读单个又能分开：
-/// 2.4G 偏绿（穿墙、远）、5G 居中（沿用网络页拓扑的青色系，两页对得上）、6G 偏靛（最新）。
-private enum BandTint {
-    /// **亮色块**：频谱高亮、圆点、开关、徽章底、图标块。
-    static func color(_ band: String) -> Color {
-        switch band {
-        case "2.4":
-            return wifiTone((0.25, 0.78, 0.71), (0.36, 0.80, 0.75))
-        case "6":
-            return wifiTone((0.49, 0.53, 0.94), (0.60, 0.62, 0.96))
-        default:
-            return wifiTone((0.27, 0.71, 0.88), (0.31, 0.71, 0.84))
-        }
-    }
+/// 浅色 / 深色各一套：白卡上要压深、近黑卡上要提亮，一个 hex 打不了两种底。
+private enum WifiPalette {
+    /// 主色（蓝）。和系统开关的蓝接近，所以开关、标签、图形看上去是一套。
+    static let accent = wifiTone((0.15, 0.47, 0.90), (0.42, 0.66, 0.98))
 
-    /// **同族深一档**，只给文字用。
-    ///
-    /// 亮色块在白卡上好看，但当 10~17pt 的彩色**字**就糊了（#45B6E0 在白底上的对比
-    /// 只有 2.6:1）。所以凡是有字的地方取这一档，块面还是亮的。
-    static func ink(_ band: String) -> Color {
-        switch band {
-        case "2.4":
-            return wifiTone((0.04, 0.50, 0.44), (0.62, 0.94, 0.89))
-        case "6":
-            return wifiTone((0.27, 0.30, 0.72), (0.80, 0.82, 1.00))
-        default:
-            return wifiTone((0.03, 0.45, 0.60), (0.66, 0.90, 1.00))
-        }
-    }
+    /// 同一主色的深一档，只给文字。
+    static let ink = wifiTone((0.05, 0.28, 0.62), (0.72, 0.86, 1.00))
 }
 
-/// 三种附加网络的配色与图标。
+/// 三种附加网络的 SF Symbol。
 ///
-/// 频段已经把冷色族占满了（青绿 / 青蓝 / 靛），次要网络再上一个饱和橙、饱和绿，
-/// 整页就成了调色盘。这里全部降到低饱和：访客是暖赭（唯一暖色，一眼区分主次），
-/// 物联网是中性灰蓝（和 2.4G 的青绿拉开，不再撞绿），多链路是暗洋红（和 6G 的靛
-/// 分开，不再同色）。
-private enum KindTint {
-    /// 亮色块（图标底、圆点）。
-    static func color(_ kind: WifiNetGroup.Kind) -> Color {
-        switch kind {
-        case .guest: return wifiTone((0.94, 0.66, 0.24), (0.90, 0.71, 0.40))
-        case .iot: return wifiTone((0.56, 0.65, 0.72), (0.66, 0.71, 0.75))
-        case .mlo: return wifiTone((0.88, 0.48, 0.78), (0.90, 0.64, 0.84))
-        case .main: return BandTint.color("5")
-        }
-    }
-
-    /// 文字 / 图标用的深一档（同 `BandTint.ink` 的理由）。
-    static func ink(_ kind: WifiNetGroup.Kind) -> Color {
-        switch kind {
-        case .guest: return wifiTone((0.62, 0.38, 0.05), (0.98, 0.82, 0.58))
-        case .iot: return wifiTone((0.28, 0.36, 0.44), (0.82, 0.87, 0.91))
-        case .mlo: return wifiTone((0.66, 0.22, 0.54), (1.00, 0.78, 0.94))
-        case .main: return BandTint.ink("5")
-        }
-    }
-
-    /// 每一类的 SF Symbol（v3.4.2 误删过一次，CI 报 `KindTint has no member 'icon'`）。
-    static func icon(_ kind: WifiNetGroup.Kind) -> String {
+/// 只管图标，**不再管颜色**——颜色统一走 `WifiPalette`，否则又会变成一页五色。
+private enum KindIcon {
+    static func symbol(_ kind: WifiNetGroup.Kind) -> String {
         switch kind {
         case .guest: return "person.2.fill"
         case .iot: return "cpu"
@@ -1117,7 +1081,7 @@ struct WifiRadioEditorSheet: View {
         Int(channel) ?? band.channel
     }
 
-    private var tint: Color { BandTint.color(band.band) }
+    private var tint: Color { WifiPalette.accent }
 
     var body: some View {
         NavigationStack {
@@ -1191,7 +1155,7 @@ struct WifiRadioEditorSheet: View {
                             .font(.system(size: 12, weight: .semibold))
                         Text("自动").font(.system(size: 12.5, weight: channel == "auto" ? .semibold : .regular))
                     }
-                    .foregroundStyle(channel == "auto" ? BandTint.ink(band.band) : Color.secondary)
+                    .foregroundStyle(channel == "auto" ? WifiPalette.ink : Color.secondary)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 7)
                     .background {
@@ -1214,7 +1178,7 @@ struct WifiRadioEditorSheet: View {
                              selected: channel,
                              measured: band.channel,
                              tint: tint,
-                             ink: BandTint.ink(band.band)) { picked in
+                             ink: WifiPalette.ink) { picked in
                     channel = String(picked)
                 }
                 .padding(.top, 8)
@@ -1429,11 +1393,11 @@ struct WifiGroupCreateSheet: View {
         HStack(spacing: 14) {
             ZStack {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(KindTint.color(kind).opacity(0.13))
+                    .fill(WifiPalette.accent.opacity(0.12))
                     .frame(width: 52, height: 52)
-                Image(systemName: KindTint.icon(kind))
+                Image(systemName: KindIcon.symbol(kind))
                     .font(.system(size: 20, weight: .semibold))
-                    .foregroundStyle(KindTint.ink(kind))
+                    .foregroundStyle(WifiPalette.ink)
             }
             VStack(alignment: .leading, spacing: 3) {
                 Text(kind.title)
