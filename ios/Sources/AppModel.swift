@@ -2842,7 +2842,7 @@ private struct NetVap {
             }
 
             // 只有以太网当前真在用时才需要重新拉接口；走中继时改了也不该动网络。
-            guard info.uplink == .wired else { return nil }
+            guard network.uplink == .wired else { return nil }
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             for _ in 0..<2 {
                 _ = try? await execute("ifdown wan >/dev/null 2>&1; sleep 1; ifup wan >/dev/null 2>&1; sleep 5",
@@ -2877,7 +2877,7 @@ private struct NetVap {
         case .cellular:
             // 蜂窝这一格在这台机器上就是「手机 USB 热点共享」：插着就建接口连上，
             // 没插就如实说没有设备（官方 `internet_noTethering` 那句）。
-            guard let usb = info.repeater.usbUplink else {
+            guard let usb = network.repeater.usbUplink else {
                 return "没有检测到 USB Modem 或手机热点，连不了这条链路"
             }
             return await connectTethering(usb.name).error
