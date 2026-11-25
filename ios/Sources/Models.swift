@@ -552,8 +552,17 @@ struct NetClient: Identifiable, Equatable {
 
 /// 官方固件支持的设备类型。
 ///
-/// 原始值是写进 `/etc/config/gl-client` 的 `class`；中文名与顺序照官方 App
-/// 那个「设备类型」三列九宫格（2026-11-23 用户截图核对，16 项）。
+/// **rawValue 必须和官方 App 写进 `/etc/config/gl-client` 的 `class` 完全一致，
+/// 不能直接拿中文名对应的英文单词猜**（v3.3.9 修）。依据：官方 APK
+/// `assets/flutter_assets/lib/l10n/intl_zh.arb` 里 16 个类型的键名，以及
+/// `lib/arm64-v8a/libapp.so` 里实际出现的驼峰值：
+/// `client_gamepad` → `gamepad`、`client_router` → `router`、
+/// `client_homeAppliances` → `homeAppliances`。
+/// 我们以前写的是 `games` / `gateway` / `smart_appliances`，官方一个都不认——
+/// 用户在 App 里改完类型，官方软件那边就识别不了（2026-11-25 用户报）。
+/// 其余 13 项官方键名和 rawValue 本来就是同一个词，不用改。
+///
+/// 中文名与顺序照官方 App 那个「设备类型」三列九宫格（2026-11-23 用户截图核对，16 项）。
 /// 旧版这里只有 13 项、文案也旧，所以官方设成 NAS / 服务器的设备在这边显示「未知」。
 enum ClientClass: String, CaseIterable {
     /// 「默认」：交给路由器按 MAC 自己判。官方列表排第一，也是没归类时的显示。
@@ -567,9 +576,12 @@ enum ClientClass: String, CaseIterable {
     case printer
     case sound
     case television
-    case games
-    case gateway
-    case smartAppliances = "smart_appliances"
+    /// 官方值 `gamepad`（不是 `games`）。
+    case games = "gamepad"
+    /// 官方值 `router`（不是 `gateway`）。
+    case gateway = "router"
+    /// 官方值 `homeAppliances`（不是 `smart_appliances`，也不是网页 CSS 的 `smartappliances`）。
+    case smartAppliances = "homeAppliances"
     case nas
     case server
     case networkSwitch = "switch"
@@ -600,23 +612,30 @@ enum ClientClass: String, CaseIterable {
     /// 老固件/老 App 会把没认出来的设备写成 `unknown`（本机那台「COKIT智能电热蚊香」
     /// 就是），官方显示成「默认」；另外历史上还出现过驼峰、单数等几种写法，
     /// 都在这里归一到同一项，免得又冒出一个「未知」。
+    ///
+    /// v3.3.9 换了官方真值之后，下面别名里**保留我们自己以前写过的旧值**
+    /// （`games` / `gateway` / `smart_appliances`），已经在路由器上的记录还认得出来，
+    /// 用户重新选一次类型就会写成官方值。
     init?(stored raw: String) {
-        let key = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if key.isEmpty { self = .auto; return }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { self = .auto; return }
+        // 先按原样匹配：`homeAppliances` 里的 A 是大写，一 lowercased 就对不上 rawValue 了。
+        if let exact = ClientClass(rawValue: trimmed) { self = exact; return }
+        let key = trimmed.lowercased()
         if let exact = ClientClass(rawValue: key) { self = exact; return }
         switch key {
-        case "unknown", "none", "other", "others": self = .auto
-        case "smartappliances", "smart_appliance", "homeappliances", "home_appliances",
-             "appliance", "appliances": self = .smartAppliances
-        case "gamepad", "console", "game_console": self = .games
-        case "router": self = .gateway
+        case "unknown", "none", "other", "others", "auto": self = .auto
+        case "smartappliances", "smart_appliances", "smart_appliance", "homeappliances",
+             "home_appliances", "appliance", "appliances": self = .smartAppliances
+        case "games", "gamepad", "console", "game_console": self = .games
+        case "gateway", "router": self = .gateway
         case "tablet": self = .pad
         case "desktop", "pc": self = .computer
         case "wearable": self = .watch
         case "tv": self = .television
         case "speaker": self = .sound
         case "storage", "nas_server": self = .nas
-        case "switcher": self = .networkSwitch
+        case "switcher", "networkswitch", "network_switch": self = .networkSwitch
         default: return nil
         }
     }
