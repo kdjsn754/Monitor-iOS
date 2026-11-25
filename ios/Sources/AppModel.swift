@@ -3089,8 +3089,17 @@ private struct NetVap {
         // 老固件上还没有这个配置文件时先建出来，否则 `uci add` 直接失败（见 `ensureGlClientConfig`）。
         lines.append(ensureGlClientConfig)
         lines.append("S=$(uci -q show gl-client 2>/dev/null | grep -i \(shQuote(pattern)) | cut -d. -f1,2 | head -1)")
-        lines.append("[ -n \"$S\" ] && uci -q set \"$S.class=\(picked.rawValue)\"")
-        lines.append("[ -z \"$S\" ] && uci -q add gl-client client && uci -q set \"gl-client.@client[-1].mac=\(target)\" && uci -q set \"gl-client.@client[-1].class=\(picked.rawValue)\"")
+        // 「默认」在官方那套里不是写 `default` 这个值，而是**干脆不写 class**：
+        // 实测没改过类型的设备，`clients.get_list` 返回的 class 是 null；
+        // 网页后台 app.js 里的 `clientTypes` 也只有 15 项真值，没有 default，
+        // 写进去会被原样当英文显示。所以选「默认」= 删掉这条属性。
+        if picked == .auto {
+            lines.append("[ -n \"$S\" ] && uci -q delete \"$S.class\"")
+            lines.append("[ -z \"$S\" ] && uci -q add gl-client client && uci -q set \"gl-client.@client[-1].mac=\(target)\"")
+        } else {
+            lines.append("[ -n \"$S\" ] && uci -q set \"$S.class=\(picked.rawValue)\"")
+            lines.append("[ -z \"$S\" ] && uci -q add gl-client client && uci -q set \"gl-client.@client[-1].mac=\(target)\" && uci -q set \"gl-client.@client[-1].class=\(picked.rawValue)\"")
+        }
         lines.append("uci -q commit gl-client")
         // v3.3.10：官方 RPC 的 clients.set_info 在 commit 之后还会 ubus sync 一次，
         // 让官方 App / 网页后台立刻拿到新类型。我们以前只写 UCI，官方列表要等它
@@ -3104,7 +3113,9 @@ private struct NetVap {
             let sections = parseSections(try await execute(lines.joined(separator: "; "), timeout: 40))
             guard (sections["DONE"] ?? "").contains("ok") else { return "路由器没有回应，类型可能没改" }
             let written = firstLine(sections["CLS"])
-            if written != picked.rawValue {
+            // 「默认」写完之后 class 本来就该是空的，不能拿 "default" 去比。
+            let expected = picked == .auto ? "" : picked.rawValue
+            if written != expected {
                 return "回读到的类型是「\(written.isEmpty ? "空" : written)」，没写进去"
             }
             return nil

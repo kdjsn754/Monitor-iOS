@@ -39,22 +39,26 @@ struct DeviceGlyph: View {
         .frame(width: size, height: size)
     }
 
-    /// 官方 App 里「默认」那一格：一台显示器 + 一部手机压在右下角。
-    /// 比例是照官方截图量的（显示器占左三分之二、手机压右下角），
-    /// 不是 Lucide 那个 `monitor-smartphone`（那个手机太靠边、显示器太扁）。
+    /// 「默认」那一格：一台显示器 + 一部手机**并排**。
+    ///
+    /// v3.3.11：旧版把手机压在显示器右下角，两个描边的圆角框在交界处互相穿过，
+    /// 19pt 下列表里看着像一团乱线（用户 2026-11-25：「默认的图标很别扭」）。
+    /// 现在两个设备各画各的完整轮廓、中间留 2pt 空隙：显示器在左（占左三分之二），
+    /// 手机竖着在右。含义还是「多台设备 / 未归类」，但线不再打架。
+    /// 只改这一条手绘路径，15 个官方字形和其余代码一行没动。
     static func defaultMark(into p: inout Path, scale k: CGFloat) {
-        // 显示器
-        p.addRoundedRect(in: CGRect(x: 1.6 * k, y: 3.4 * k, width: 14.2 * k, height: 10.8 * k),
+        // 显示器（左）
+        p.addRoundedRect(in: CGRect(x: 1.5 * k, y: 5.5 * k, width: 12 * k, height: 9 * k),
                          cornerSize: CGSize(width: 1.6 * k, height: 1.6 * k),
                          style: .continuous)
         // 底座
-        p.move(to: pt(8.7, 14.2, k))
-        p.addLine(to: pt(8.7, 17.3, k))
-        p.move(to: pt(5.7, 17.3, k))
-        p.addLine(to: pt(11.7, 17.3, k))
-        // 手机（压在显示器右下角）
-        p.addRoundedRect(in: CGRect(x: 13.4 * k, y: 10.1 * k, width: 8.6 * k, height: 10.7 * k),
-                         cornerSize: CGSize(width: 1.6 * k, height: 1.6 * k),
+        p.move(to: pt(7.5, 14.5, k))
+        p.addLine(to: pt(7.5, 17.8, k))
+        p.move(to: pt(5, 17.8, k))
+        p.addLine(to: pt(10, 17.8, k))
+        // 手机（右，与显示器分开）
+        p.addRoundedRect(in: CGRect(x: 15.5 * k, y: 3.5 * k, width: 7 * k, height: 14 * k),
+                         cornerSize: CGSize(width: 1.5 * k, height: 1.5 * k),
                          style: .continuous)
     }
 

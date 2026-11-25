@@ -580,6 +580,16 @@ enum ClientClass: String, CaseIterable {
     // v3.3.9 曾按 language pack 的 key 后缀猜成 gamepad / router / homeAppliances，
     // 真机验证这三种都不是 UCI 里实际写入的值（官方 App 把 iPhone 改成「智能家电」
     // 后写进 gl-client.class 的是 smartappliances），故改回官方接受的值。
+    //
+    // v3.3.11 补上权威出处：路由器网页后台的前端包里有一张 `clientTypes` 表
+    // （`/www/js/app.*.js`，解压后搜 `clientTypes`），15 项 value 是
+    // computer / phone / pad / camera / watch / laptop / printer / sound /
+    // television / **smartappliances** / **games** / **gateway** / nas / server / switch。
+    // 注意 label 和 value 不是一回事：智能家电那项 label 是 `smart_appliances`（i18n 键）、
+    // value 才是 `smartappliances`。图标名直接由 value 拼成 `icon-<value>`，
+    // iconfont 里有 icon-smartappliances / icon-games / icon-gateway 三个字形。
+    // 也就是说这三个值**没有任何映射差异**，网页后台拿到就能显示；
+    // 表里同样**没有 default**，所以「默认」要删属性而不是写值（见 setClientClass）。
     case games = "games"
     case gateway = "gateway"
     case smartAppliances = "smartappliances"
