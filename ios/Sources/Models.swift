@@ -576,12 +576,13 @@ enum ClientClass: String, CaseIterable {
     case printer
     case sound
     case television
-    /// 官方值 `gamepad`（不是 `games`）。
-    case games = "gamepad"
-    /// 官方值 `router`（不是 `gateway`）。
-    case gateway = "router"
-    /// 官方值 `homeAppliances`（不是 `smart_appliances`，也不是网页 CSS 的 `smartappliances`）。
-    case smartAppliances = "homeAppliances"
+    // v3.3.10：写入值以官方 App 实测为准。
+    // v3.3.9 曾按 language pack 的 key 后缀猜成 gamepad / router / homeAppliances，
+    // 真机验证这三种都不是 UCI 里实际写入的值（官方 App 把 iPhone 改成「智能家电」
+    // 后写进 gl-client.class 的是 smartappliances），故改回官方接受的值。
+    case games = "games"
+    case gateway = "gateway"
+    case smartAppliances = "smartappliances"
     case nas
     case server
     case networkSwitch = "switch"
@@ -613,13 +614,13 @@ enum ClientClass: String, CaseIterable {
     /// 就是），官方显示成「默认」；另外历史上还出现过驼峰、单数等几种写法，
     /// 都在这里归一到同一项，免得又冒出一个「未知」。
     ///
-    /// v3.3.9 换了官方真值之后，下面别名里**保留我们自己以前写过的旧值**
-    /// （`games` / `gateway` / `smart_appliances`），已经在路由器上的记录还认得出来，
-    /// 用户重新选一次类型就会写成官方值。
+    /// v3.3.9 曾把写入值猜成 `gamepad` / `router` / `homeAppliances`，v3.3.10 按
+    /// 官方 App 实测改回 `games` / `gateway` / `smartappliances`。下面别名把
+    /// 历史上出现过的写法全收进来，路由器上已有的记录照旧认得出来。
     init?(stored raw: String) {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { self = .auto; return }
-        // 先按原样匹配：`homeAppliances` 里的 A 是大写，一 lowercased 就对不上 rawValue 了。
+        // 先按原样匹配，再试小写；别名里保留历史大小写写法。
         if let exact = ClientClass(rawValue: trimmed) { self = exact; return }
         let key = trimmed.lowercased()
         if let exact = ClientClass(rawValue: key) { self = exact; return }

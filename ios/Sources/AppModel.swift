@@ -3092,6 +3092,10 @@ private struct NetVap {
         lines.append("[ -n \"$S\" ] && uci -q set \"$S.class=\(picked.rawValue)\"")
         lines.append("[ -z \"$S\" ] && uci -q add gl-client client && uci -q set \"gl-client.@client[-1].mac=\(target)\" && uci -q set \"gl-client.@client[-1].class=\(picked.rawValue)\"")
         lines.append("uci -q commit gl-client")
+        // v3.3.10：官方 RPC 的 clients.set_info 在 commit 之后还会 ubus sync 一次，
+        // 让官方 App / 网页后台立刻拿到新类型。我们以前只写 UCI，官方列表要等它
+        // 自己重载才认，补上这一步。sync 失败不影响配置本身，所以吞掉错误。
+        lines.append("ubus -t 5 call gl-clients sync >/dev/null 2>&1")
         // 回读：段存在就读段里的值，新建的读最后一段。读到什么才算数，不听 exit code。
         lines.append("echo @@CLS; [ -n \"$S\" ] && uci -q get \"$S.class\"; [ -z \"$S\" ] && uci -q get \"gl-client.@client[-1].class\"")
         lines.append("echo @@DONE ok")
