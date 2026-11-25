@@ -779,6 +779,16 @@ private enum KindTint {
         case .main: return BandTint.ink("5")
         }
     }
+
+    /// 每一类的 SF Symbol（v3.4.2 误删过一次，CI 报 `KindTint has no member 'icon'`）。
+    static func icon(_ kind: WifiNetGroup.Kind) -> String {
+        switch kind {
+        case .guest: return "person.2.fill"
+        case .iot: return "cpu"
+        case .mlo: return "square.stack.3d.up.fill"
+        case .main: return "wifi"
+        }
+    }
 }
 
 // MARK: - 网络编辑
