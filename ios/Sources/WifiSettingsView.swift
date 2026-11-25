@@ -44,8 +44,8 @@ import UIKit
 ///   色相只差二十来度，明度对齐，扫过去是一组；
 /// - **次要网络全部降饱和**——访客暖赭（唯一暖色，用来分主次）、物联网中性灰蓝、
 ///   多链路暗洋红，都不与频段撞；
-/// - **每个色都有浅色 / 深色两套值**（`wifiTone`）：白卡上用压深的，近黑卡上用提亮的，
-///   不再一套 hex 打天下；
+/// - **亮色系 + 两档**（用户同日 23:53：「要用亮色系」）：色块取亮的一档（400 级，
+///   薄荷绿 / 天青 / 亮靛），文字取同色相深一档（`ink`），浅色 / 深色各有一套值；
 /// - 顺手把「关闭态」的灰从 `systemGray4` 换到 `Color.primary.opacity(…)`，浅色下
 ///   那些 13% 灰底原先几乎看不见。 
 struct WifiSettingsView: View {
@@ -166,12 +166,12 @@ struct WifiSettingsView: View {
                 .frame(width: 5, height: 5)
             Text(shortBand(band.band))
                 .font(.system(size: 10.5, weight: .semibold))
-                .foregroundStyle(on ? tint : Color.secondary)
+                .foregroundStyle(on ? BandTint.ink(band.band) : Color.secondary)
         }
         .padding(.horizontal, 7)
         .padding(.vertical, 3)
         .background {
-            Capsule().fill((on ? tint : Color(.systemGray4)).opacity(0.14))
+            Capsule().fill((on ? tint : Color(.systemGray4)).opacity(0.18))
         }
     }
 
@@ -247,15 +247,15 @@ struct WifiSettingsView: View {
         return VStack(spacing: -1) {
             Text(band.band.isEmpty ? "?" : band.band)
                 .font(.system(size: 17, weight: .bold))
-                .foregroundStyle(on ? tint : Color.secondary)
+                .foregroundStyle(on ? BandTint.ink(band.band) : Color.secondary)
             Text("GHz")
                 .font(.system(size: 8, weight: .semibold))
-                .foregroundStyle((on ? tint : Color.secondary).opacity(0.75))
+                .foregroundStyle((on ? BandTint.ink(band.band) : Color.secondary).opacity(0.8))
         }
         .frame(width: 48, height: 42)
         .background {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill((on ? tint : Color(.systemGray4)).opacity(0.12))
+                .fill((on ? tint : Color(.systemGray4)).opacity(0.16))
         }
     }
 
@@ -373,11 +373,11 @@ struct WifiSettingsView: View {
                 HStack(alignment: .center, spacing: 12) {
                     ZStack {
                         RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(exists && on ? tint.opacity(0.13) : Color.primary.opacity(0.06))
+                            .fill(exists && on ? tint.opacity(0.16) : Color.primary.opacity(0.06))
                             .frame(width: 42, height: 42)
                         Image(systemName: exists ? KindTint.icon(group.kind) : "plus")
                             .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(exists && on ? tint : Color.secondary)
+                            .foregroundStyle(exists && on ? KindTint.ink(group.kind) : Color.secondary)
                     }
 
                     VStack(alignment: .leading, spacing: 3) {
@@ -435,12 +435,12 @@ struct WifiSettingsView: View {
                 let lit = member.ssidOn && !member.radioOff
                 Text(shortBand(member.band))
                     .font(.system(size: 9.5, weight: .semibold))
-                    .foregroundStyle(lit ? BandTint.color(member.band) : Color.secondary)
+                    .foregroundStyle(lit ? BandTint.ink(member.band) : Color.secondary)
                     .padding(.horizontal, 5)
                     .padding(.vertical, 1.5)
                     .background {
                         Capsule()
-                            .fill(lit ? BandTint.color(member.band).opacity(0.16) : Color.primary.opacity(0.07))
+                            .fill(lit ? BandTint.color(member.band).opacity(0.19) : Color.primary.opacity(0.07))
                     }
             }
             if group.clients > 0 {
@@ -605,7 +605,10 @@ private struct ChannelRuler: View {
     let selected: String
     /// 运行态实测落点，自动模式下用浅色标出来。
     let measured: Int
+    /// 柱子 / 选中的块用亮色。
     let tint: Color
+    /// 柱底下的信道号用深一档（8pt 亮色字在白卡上读不出来）。
+    var ink: Color?
     let onPick: (Int) -> Void
 
     var body: some View {
@@ -623,7 +626,7 @@ private struct ChannelRuler: View {
                             .frame(height: isOn ? 32 : 22)
                         Text("\(channel)")
                             .font(.system(size: 8, weight: isOn ? .bold : .regular))
-                            .foregroundStyle(isOn ? tint : Color.secondary)
+                            .foregroundStyle(isOn ? (ink ?? tint) : Color.secondary)
                             .lineLimit(1)
                             .minimumScaleFactor(0.7)
                     }
@@ -700,8 +703,11 @@ private struct WifiSaveButton: View {
 /// 浅色 / 深色两套色值。
 ///
 /// **为什么不用同一个 hex**：卡片底一边是白、一边是近黑，同一个颜色在一侧必然发灰、
-/// 另一侧发跳。浅色下要压深压饱和才够对比（白底上过 4.5:1），深色下要提亮降饱和，
-/// 否则小字糊在黑卡上。
+/// 另一侧发跳。
+///
+/// **为什么一个色要两档**（v3.4.2）：用户要「亮色系」，亮色块铺在白卡上很清爽，但同样
+/// 的亮色当 10~17pt 的**字**就糊了——`#45B5E0` 在白底上对比只有 2.6:1。所以块面用
+/// `color()`，凡是有字的用 `ink()`（同色相深一档）。
 private func wifiTone(_ light: (CGFloat, CGFloat, CGFloat),
                       _ dark: (CGFloat, CGFloat, CGFloat)) -> Color {
     Color(UIColor { trait in
@@ -719,14 +725,30 @@ private func wifiTone(_ light: (CGFloat, CGFloat, CGFloat),
 /// 现在三档只动色相 20° 左右、明度对齐，扫过去是一组，读单个又能分开：
 /// 2.4G 偏绿（穿墙、远）、5G 居中（沿用网络页拓扑的青色系，两页对得上）、6G 偏靛（最新）。
 private enum BandTint {
+    /// **亮色块**：频谱高亮、圆点、开关、徽章底、图标块。
     static func color(_ band: String) -> Color {
         switch band {
         case "2.4":
-            return wifiTone((0.04, 0.49, 0.47), (0.36, 0.80, 0.75))
+            return wifiTone((0.25, 0.78, 0.71), (0.36, 0.80, 0.75))
         case "6":
-            return wifiTone((0.29, 0.31, 0.72), (0.60, 0.60, 0.96))
+            return wifiTone((0.49, 0.53, 0.94), (0.60, 0.62, 0.96))
         default:
-            return wifiTone((0.06, 0.49, 0.60), (0.31, 0.71, 0.84))
+            return wifiTone((0.27, 0.71, 0.88), (0.31, 0.71, 0.84))
+        }
+    }
+
+    /// **同族深一档**，只给文字用。
+    ///
+    /// 亮色块在白卡上好看，但当 10~17pt 的彩色**字**就糊了（#45B6E0 在白底上的对比
+    /// 只有 2.6:1）。所以凡是有字的地方取这一档，块面还是亮的。
+    static func ink(_ band: String) -> Color {
+        switch band {
+        case "2.4":
+            return wifiTone((0.04, 0.50, 0.44), (0.62, 0.94, 0.89))
+        case "6":
+            return wifiTone((0.27, 0.30, 0.72), (0.80, 0.82, 1.00))
+        default:
+            return wifiTone((0.03, 0.45, 0.60), (0.66, 0.90, 1.00))
         }
     }
 }
@@ -738,21 +760,23 @@ private enum BandTint {
 /// 物联网是中性灰蓝（和 2.4G 的青绿拉开，不再撞绿），多链路是暗洋红（和 6G 的靛
 /// 分开，不再同色）。
 private enum KindTint {
+    /// 亮色块（图标底、圆点）。
     static func color(_ kind: WifiNetGroup.Kind) -> Color {
         switch kind {
-        case .guest: return wifiTone((0.62, 0.42, 0.13), (0.90, 0.71, 0.40))
-        case .iot: return wifiTone((0.30, 0.35, 0.40), (0.66, 0.71, 0.75))
-        case .mlo: return wifiTone((0.58, 0.28, 0.52), (0.90, 0.64, 0.84))
+        case .guest: return wifiTone((0.94, 0.66, 0.24), (0.90, 0.71, 0.40))
+        case .iot: return wifiTone((0.56, 0.65, 0.72), (0.66, 0.71, 0.75))
+        case .mlo: return wifiTone((0.88, 0.48, 0.78), (0.90, 0.64, 0.84))
         case .main: return BandTint.color("5")
         }
     }
 
-    static func icon(_ kind: WifiNetGroup.Kind) -> String {
+    /// 文字 / 图标用的深一档（同 `BandTint.ink` 的理由）。
+    static func ink(_ kind: WifiNetGroup.Kind) -> Color {
         switch kind {
-        case .guest: return "person.2.fill"
-        case .iot: return "cpu"
-        case .mlo: return "square.stack.3d.up.fill"
-        case .main: return "wifi"
+        case .guest: return wifiTone((0.62, 0.38, 0.05), (0.98, 0.82, 0.58))
+        case .iot: return wifiTone((0.28, 0.36, 0.44), (0.82, 0.87, 0.91))
+        case .mlo: return wifiTone((0.66, 0.22, 0.54), (1.00, 0.78, 0.94))
+        case .main: return BandTint.ink("5")
         }
     }
 }
@@ -1157,11 +1181,11 @@ struct WifiRadioEditorSheet: View {
                             .font(.system(size: 12, weight: .semibold))
                         Text("自动").font(.system(size: 12.5, weight: channel == "auto" ? .semibold : .regular))
                     }
-                    .foregroundStyle(channel == "auto" ? tint : Color.secondary)
+                    .foregroundStyle(channel == "auto" ? BandTint.ink(band.band) : Color.secondary)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 7)
                     .background {
-                        Capsule().fill(channel == "auto" ? tint.opacity(0.13) : Color(.tertiarySystemFill))
+                        Capsule().fill(channel == "auto" ? tint.opacity(0.18) : Color(.tertiarySystemFill))
                     }
                     .contentShape(Capsule())
                 }
@@ -1179,7 +1203,8 @@ struct WifiRadioEditorSheet: View {
                 ChannelRuler(channels: channelChoices,
                              selected: channel,
                              measured: band.channel,
-                             tint: tint) { picked in
+                             tint: tint,
+                             ink: BandTint.ink(band.band)) { picked in
                     channel = String(picked)
                 }
                 .padding(.top, 8)
@@ -1398,7 +1423,7 @@ struct WifiGroupCreateSheet: View {
                     .frame(width: 52, height: 52)
                 Image(systemName: KindTint.icon(kind))
                     .font(.system(size: 20, weight: .semibold))
-                    .foregroundStyle(KindTint.color(kind))
+                    .foregroundStyle(KindTint.ink(kind))
             }
             VStack(alignment: .leading, spacing: 3) {
                 Text(kind.title)
