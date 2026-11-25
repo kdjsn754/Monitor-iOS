@@ -2855,16 +2855,6 @@ private struct NetVap {
         }
     }
 
-    /// 点分十进制的 IPv4 校验（只查形状，不查是不是合法公网地址）。
-    private func isIPv4(_ text: String) -> Bool {
-        let parts = text.split(separator: ".", omittingEmptySubsequences: false)
-        guard parts.count == 4 else { return false }
-        return parts.allSatisfy { part in
-            guard !part.isEmpty, part.count <= 3, let number = Int(part) else { return false }
-            return (0...255).contains(number)
-        }
-    }
-
     /// 切换上网方式：中继 / 以太网。
     ///
     /// **两条链路互斥**：官方固件给 `wan` 和 `wwan` 两条接口都留着默认路由，

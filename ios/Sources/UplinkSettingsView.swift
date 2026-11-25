@@ -109,17 +109,14 @@ struct UplinkSettingsView: View {
                     SheetOverlayCard {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("切换上网方式").font(.headline)
-                            Text(target == .repeater
-                                 ? "中继会重新连接上游网络，断开十几秒。"
-                                 : "有线口没插网线时切过去，路由器就没有网络了。")
+                            Text(modeHint(target))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                         HStack(spacing: 10) {
                             SheetOverlayButton(title: "取消") { pendingMode = nil }
-                            SheetOverlayButton(title: target == .repeater ? "切到中继" : "切到以太网",
-                                               tint: .blue) {
+                            SheetOverlayButton(title: modeActionTitle(target), tint: .blue) {
                                 Task { await applyMode(target) }
                             }
                         }
@@ -391,6 +388,26 @@ struct UplinkSettingsView: View {
     }
 
     // MARK: - 方式条
+
+    /// 切换确认弹层里那句解释（三种方式各说各的后果）。
+    private func modeHint(_ target: UplinkMode) -> String {
+        switch target {
+        case .repeater:
+            return "中继会重新连接上游网络，断开十几秒。"
+        case .wired:
+            return "有线口没插网线时切过去，路由器就没有网络了。"
+        case .cellular:
+            return "会通过数据线用手机的网络，中继会断开。"
+        }
+    }
+
+    private func modeActionTitle(_ target: UplinkMode) -> String {
+        switch target {
+        case .repeater: return "切到中继"
+        case .wired: return "切到以太网"
+        case .cellular: return "切到热点共享"
+        }
+    }
 
     private var modeBar: some View {
         HStack(spacing: 2) {
