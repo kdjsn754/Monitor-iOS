@@ -1578,6 +1578,14 @@ private struct NetVap {
         if info.lanMask.isEmpty, let value = net["network.lan.netmask"] { info.lanMask = value }
         if info.uplinkProto.isEmpty { info.uplinkProto = net["network.wan.proto"] ?? "" }
 
+        // 以太网的「怎么拿地址」（v3.3.13）：官方 App 有一整页管这个，
+        // 数据源就是 `network.wan` 这几个键，中继在用时也照样能读能改。
+        info.wanProto = net["network.wan.proto"] ?? "dhcp"
+        info.wanIP = net["network.wan.ipaddr"] ?? ""
+        info.wanMask = net["network.wan.netmask"] ?? ""
+        info.wanGateway = net["network.wan.gateway"] ?? ""
+        info.wanDNS = net["network.wan.dns"] ?? ""
+
         let dhcp = uciValues(sections["DHCPCFG"])
         info.dhcpStart = dhcp["dhcp.lan.start"] ?? info.dhcpStart
         info.dhcpLimit = dhcp["dhcp.lan.limit"] ?? info.dhcpLimit
@@ -2757,6 +2765,106 @@ private struct NetVap {
         }
     }
 
+    /// 以太网的「怎么拿地址」（官方 `ethernet_protocol_set_page.dart` 那一页）。
+    ///
+    /// - `proto = dhcp`：由上级分配，静态那几项一起删干净。留着不删的话，
+    ///   哪天切回 static 会把上次的旧地址又捡回来，用户看着像「改了没生效」。
+    /// - `proto = static`：`ipaddr` / `netmask` / `gateway` 必填，`dns` 选填。
+    ///
+    /// 写完**不是**就报成功：如果以太网正是当前出口，得把 `wan` 重新拉起来
+    /// （还是 v3.2.3 那条时序——写配置一条命令、隔两秒起接口另一条），
+    /// 否则中继在用时改的只是纸面配置，切过来才发现不对。
+    @discardableResult
+    func applyEthernetConfig(proto: String, ip: String, mask: String,
+                             gateway: String, dns: String) async -> String? {
+        guard connected else { return "还没连上路由器" }
+        let mode = (proto == "static") ? "static" : "dhcp"
+        let ipv4 = ip.trimmingCharacters(in: .whitespaces)
+        let maskv4 = mask.trimmingCharacters(in: .whitespaces)
+        let gatewayv4 = gateway.trimmingCharacters(in: .whitespaces)
+        let dnsv4 = dns.trimmingCharacters(in: .whitespaces)
+            .split(whereSeparator: { $0 == " " || $0 == "," })
+            .map(String.init)
+            .filter { !$0.isEmpty }
+
+        if mode == "static" {
+            for (label, value) in [("IP 地址", ipv4), ("子网掩码", maskv4), ("默认网关", gatewayv4)] {
+                guard isIPv4(value) else {
+                    return "\(label)「\(value.isEmpty ? "空" : value)」不是合法的 IPv4 地址"
+                }
+            }
+            for one in dnsv4 where !isIPv4(one) {
+                return "DNS「\(one)」不是合法的 IPv4 地址"
+            }
+        }
+
+        var lines: [String] = ["uci -q set network.wan.proto=\(shQuote(mode))"]
+        if mode == "static" {
+            lines.append("uci -q set network.wan.ipaddr=\(shQuote(ipv4))")
+            lines.append("uci -q set network.wan.netmask=\(shQuote(maskv4))")
+            lines.append("uci -q set network.wan.gateway=\(shQuote(gatewayv4))")
+            if dnsv4.isEmpty {
+                lines.append("uci -q delete network.wan.dns")
+            } else {
+                lines.append("uci -q set network.wan.dns=\(shQuote(dnsv4.joined(separator: " ")))")
+            }
+        } else {
+            // DHCP 时把静态那几项清掉，见上面的注释。
+            lines.append("uci -q delete network.wan.ipaddr")
+            lines.append("uci -q delete network.wan.netmask")
+            lines.append("uci -q delete network.wan.gateway")
+            lines.append("uci -q delete network.wan.dns")
+        }
+        lines.append("uci -q commit network")
+        lines.append("echo @@WROTE")
+
+        do {
+            guard try await execute(lines.joined(separator: "; "), timeout: 40).contains("@@WROTE") else {
+                return "配置没写进去，请再试一次"
+            }
+            // 回读：读到什么才算数（`uci get` 不认 exit code）。
+            let readback = (try? await execute([
+                "echo @@P; uci -q get network.wan.proto",
+                "echo @@IP; uci -q get network.wan.ipaddr",
+                "echo @@MK; uci -q get network.wan.netmask",
+                "echo @@GW; uci -q get network.wan.gateway",
+                "echo @@DN; uci -q get network.wan.dns"
+            ].joined(separator: "; "), timeout: 30)) ?? ""
+            let got = parseSections(readback)
+            func value(_ key: String) -> String {
+                (got[key] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            guard value("P") == mode else {
+                return "协议没写进去（读回来是「\(value("P"))」）"
+            }
+            if mode == "static", value("IP") != ipv4 {
+                return "IP 没写进去（读回来是「\(value("IP"))」）"
+            }
+
+            // 只有以太网当前真在用时才需要重新拉接口；走中继时改了也不该动网络。
+            guard info.uplink == .wired else { return nil }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            for _ in 0..<2 {
+                _ = try? await execute("ifdown wan >/dev/null 2>&1; sleep 1; ifup wan >/dev/null 2>&1; sleep 5",
+                                       timeout: 40)
+                if await isInterfaceUp("wan") { return nil }
+            }
+            return "配置已保存，但 WAN 口还没拿到地址——检查网线是否插在 WAN 口"
+        } catch {
+            return describe(error)
+        }
+    }
+
+    /// 点分十进制的 IPv4 校验（只查形状，不查是不是合法公网地址）。
+    private func isIPv4(_ text: String) -> Bool {
+        let parts = text.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4 else { return false }
+        return parts.allSatisfy { part in
+            guard !part.isEmpty, part.count <= 3, let number = Int(part) else { return false }
+            return (0...255).contains(number)
+        }
+    }
+
     /// 切换上网方式：中继 / 以太网。
     ///
     /// **两条链路互斥**：官方固件给 `wan` 和 `wwan` 两条接口都留着默认路由，
@@ -2767,7 +2875,12 @@ private struct NetVap {
         guard connected else { return "还没连上路由器" }
         switch mode {
         case .cellular:
-            return "没有检测到 USB Modem 或手机热点，连不了这条链路"
+            // 蜂窝这一格在这台机器上就是「手机 USB 热点共享」：插着就建接口连上，
+            // 没插就如实说没有设备（官方 `internet_noTethering` 那句）。
+            guard let usb = info.repeater.usbUplink else {
+                return "没有检测到 USB Modem 或手机热点，连不了这条链路"
+            }
+            return await connectTethering(usb.name).error
         case .repeater:
             return await switchUplink(to: "wwan", from: "wan", title: "中继")
         case .wired:

@@ -174,6 +174,35 @@ struct NetworkInfo {
     /// 物理 WAN 口插没插线（和「是否在用」无关：中继时它可能空着）。
     var wanCable = false
 
+    // ---- 以太网（WAN 口）的**配置**，不只是状态 ----
+    //
+    // 官方 App 把以太网的「怎么拿地址」做成一整页（`ethernet_settings_page.dart` /
+    // `ethernet_protocol_set_page.dart`）：DHCP 或手动配置静态 IP，再填 IP / 掩码 /
+    // 网关 / DNS。我们以前只读状态、不给改，用户说「其他几个模式没参考官方改」。
+    // 这台机器的固件里 `/lib/netifd/proto/` 没有 `pppoe.sh`，所以只有这两档。
+    /// `network.wan.proto`：`dhcp` / `static`。
+    var wanProto = "dhcp"
+    var wanIP = ""
+    var wanMask = ""
+    var wanGateway = ""
+    /// `network.wan.dns`，uci 里是空格分隔的一串。
+    var wanDNS = ""
+
+    /// 以太网怎么拿地址，官方那两档（`internet_DHCPTip` / `internet_manuallySetStaticIP`）。
+    var wanProtoLabel: String { wanProto == "static" ? "静态 IP" : "DHCP" }
+
+    /// 静态 IP 的三个必填项齐不齐。缺一个就保存不了——官方也是这三项必填。
+    var wanStaticComplete: Bool {
+        !wanIP.isEmpty && !wanMask.isEmpty && !wanGateway.isEmpty
+    }
+
+    /// DNS 串拆成数组（`1.1.1.1 8.8.8.8` → 两条）。
+    var wanDNSServers: [String] {
+        wanDNS.split(whereSeparator: { $0 == " " || $0 == "," })
+            .map(String.init)
+            .filter { !$0.isEmpty }
+    }
+
     // ---- 局域网 ----
     var lanIP = ""
     var lanMask = ""

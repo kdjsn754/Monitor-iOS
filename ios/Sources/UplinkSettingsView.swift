@@ -54,6 +54,9 @@ struct UplinkSettingsView: View {
     @State private var pendingJoin: RepeaterSurvey?
     @State private var joinKey = ""
     @State private var joinReveal = false
+    /// 「现在连着、网络也通」时又去点重连／点当前网络：不执行，只把原因摆出来。
+    /// 用户 2026-11-25 明确要求：这种状态下不要触发重连，点重连也不行，弹个提示。
+    @State private var noReconnectReason: String?
 
     private var info: NetworkInfo { model.network }
     private var rep: RepeaterInfo { info.repeater }
@@ -203,6 +206,26 @@ struct UplinkSettingsView: View {
                     }
                 }
             }
+
+            // 已经连着、而且真的通：重连一律不执行，把原因说清楚。
+            if let reason = noReconnectReason {
+                SheetOverlay(onDismiss: { noReconnectReason = nil }) {
+                    SheetOverlayCard {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("无需重新连接").font(.headline)
+                            Text(reason)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        HStack(spacing: 10) {
+                            SheetOverlayButton(title: "知道了", tint: .blue) {
+                                noReconnectReason = nil
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -319,8 +342,41 @@ struct UplinkSettingsView: View {
     }
 
     /// 「其他网络」里要列的那些：已保存、但**现在没在用**的。
+    ///
+    /// 2026-11-25：把当前这个 AP 也滤掉。以前只滤 `selected='1'`，而扫描列表里
+    /// 还会出现同一个 SSID，点一下就走了一遍 `connect`——用户的感受就是
+    /// 「点一下已连接的网络，他就重连去了」。
+    ///
+    /// 判「同一个 AP」用的是 BSSID：同一台路由器的 2.4G / 5G 常是同名两条，
+    /// 那种要留着——换频段是合法操作。
     private var otherSaved: [RepeaterSavedNetwork] {
-        rep.saved.filter { !$0.selected }
+        rep.saved.filter { item in
+            guard !item.ssid.isEmpty, !item.selected else { return false }
+            return !isSameAccessPoint(ssid: item.ssid, bssid: item.bssid)
+        }
+    }
+
+    /// 这条路现在是不是「已连上、而且互联网是通的」。
+    ///
+    /// 只有两只都成立才算数：`rep.connected` 是无线链路，`info.uplinkOK`
+    /// 是默认路由真在这条线上。`connected` 但没网的时候仍然允许重连——
+    /// 那正是用户需要点一下的时候。
+    private var linkIsHealthy: Bool { rep.connected && info.uplinkOK }
+
+    /// 这一条是不是当前正在用的网络。
+    private func isCurrentNetwork(_ ssid: String) -> Bool {
+        !ssid.isEmpty && ssid == rep.ssid && rep.connected
+    }
+
+    /// 这一条是不是**当前正连着的那个 AP**（不是「同一台路由器的另一个频段」）。
+    ///
+    /// BSSID 读不到的时候退回 SSID 比较——宁可多挡一次（弹提示），
+    /// 也别把「点一下已连接的网络就断开重连」放出去。
+    private func isSameAccessPoint(ssid: String, bssid: String) -> Bool {
+        guard isCurrentNetwork(ssid) else { return false }
+        let tuned = rep.currentBSSID.isEmpty ? rep.bssid : rep.currentBSSID
+        guard !tuned.isEmpty, !bssid.isEmpty else { return true }
+        return bssid == tuned
     }
 
     private var signalText: String {
@@ -574,10 +630,11 @@ struct UplinkSettingsView: View {
     }
 
     private func surveyRow(_ item: RepeaterSurvey) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: item.secured ? "lock.fill" : "wifi")
+        let current = isSameAccessPoint(ssid: item.ssid, bssid: item.bssid)
+        return HStack(spacing: 10) {
+            Image(systemName: current ? "wifi" : (item.secured ? "lock.fill" : "wifi"))
                 .font(.system(size: 11))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(current ? NetPalette.wan : Color.secondary)
                 .frame(width: 16)
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.ssid)
@@ -589,10 +646,18 @@ struct UplinkSettingsView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer(minLength: 8)
-            Text(item.signal != 0 ? "\(item.signal) dBm · \(signalGrade(item.signal))" : "—")
-                .font(.system(size: 12.5))
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
+            if current {
+                // 当前就连着这一个：右边写「已连接」，不再显示信号——
+                // 点它也不会重连（`pick` 里挡），写清楚比让用户猜好。
+                Text("已连接")
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(NetPalette.wan)
+            } else {
+                Text(item.signal != 0 ? "\(item.signal) dBm · \(signalGrade(item.signal))" : "—")
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
         }
         .padding(.vertical, UI.rowPadding)
         .contentShape(Rectangle())
@@ -600,26 +665,71 @@ struct UplinkSettingsView: View {
 
     // MARK: - 以太网面板
 
+    /// 以太网（官方 `internet_ethernet` 那一套）。
+    ///
+    /// 2026-11-25 之前这一卡只有「协商速率 / 协议」两行加一颗切换按钮，
+    /// 用户说「其他几个模式没参考官方改」。官方是**先看状态、再配地址**，
+    /// 配置在单独一页（`ethernet_settings_page.dart`）。现在对齐：
+    ///
+    /// | 本卡 | 官方 |
+    /// | --- | --- |
+    /// | 端口 / 协商速率 | `internet_networkPortManagement` |
+    /// | 地址获取（DHCP / 静态 IP） | `internet_DHCPTip` / `internet_manuallySetStaticIP` |
+    /// | IP / 网关 | 同上 |
+    /// | 「以太网设置 ›」 | `ethernet_protocol_set_page` |
     @ViewBuilder
     private var wiredPanel: some View {
         CardPanel("以太网", icon: "cable.connector", trailing: wiredStateLabel) {
             HStack(alignment: .top, spacing: 12) {
+                MetricCell(label: "端口", value: info.wanPort?.name ?? "—")
                 MetricCell(label: "协商速率", value: info.bestPortLabel)
+            }
+            .padding(.vertical, UI.rowPadding)
+
+            CardRule()
+            HStack(alignment: .top, spacing: 12) {
+                MetricCell(label: "地址获取", value: info.wanProtoLabel, valueWeight: .semibold)
                 MetricCell(label: "协议", value: info.uplink == .wired ? info.protoLabel : "—")
             }
             .padding(.vertical, UI.rowPadding)
-            CardRule()
-            HStack(alignment: .top, spacing: 12) {
-                MetricCell(label: "端口", value: wanPortText)
-                MetricCell(label: "地址", value: info.uplink == .wired ? emptyDash(info.uplinkIP) : "—")
+
+            if info.uplink == .wired {
+                CardRule()
+                HStack(alignment: .top, spacing: 12) {
+                    MetricCell(label: "IP 地址", value: emptyDash(info.uplinkIP))
+                    MetricCell(label: "网关", value: emptyDash(info.uplinkGateway))
+                }
+                .padding(.vertical, UI.rowPadding)
             }
-            .padding(.vertical, UI.rowPadding)
+
+            CardRule()
+            NavigationLink {
+                EthernetSettingsView()
+            } label: {
+                HStack(spacing: 9) {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 13, weight: .medium))
+                        .frame(width: 18, alignment: .leading)
+                        .foregroundStyle(.blue)
+                    Text("以太网设置").font(UI.row())
+                    Spacer(minLength: 8)
+                    Text(info.wanProtoLabel)
+                        .font(UI.label())
+                        .foregroundStyle(.secondary)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.vertical, UI.rowPadding)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
 
             if info.uplink != .wired {
                 primaryButton("切换到以太网上网", icon: "arrow.right", enabled: info.wanCable) {
                     pendingMode = .wired
                 }
-                .padding(.top, 4)
+                .padding(.top, 10)
                 .padding(.bottom, 4)
             }
         }
@@ -631,52 +741,139 @@ struct UplinkSettingsView: View {
         return info.wanCable ? "已插网线，未联网" : "未插网线"
     }
 
-    private var wanPortText: String {
-        guard let port = info.wanPort else { return "—" }
-        return "\(port.name) · \(port.up ? "已连接" : "未插线")"
-    }
-
     // MARK: - 蜂窝面板
 
+    /// 蜂窝 / 热点共享（官方 `internet_cellular` + `internet_tethering` 两组）。
+    ///
+    /// 这台机器没有 Modem 口，所以页面的主体是「手机 USB 热点共享」这条路。
+    /// 2026-11-25 之前这里有三个问题：
+    /// 1. 没插设备时只写一行「没有检测到 USB Modem 或手机热点」，**不告诉用户怎么弄**；
+    ///    官方写的是「插入智能手机或 USB Modem 即可启动」（`internet_noTethering`）。
+    /// 2. 不显示连的是哪台手机、走哪个网卡、拿了什么地址——官方有
+    ///    `internet_currentClient`（当前客户端）。
+    /// 3. 连接按钮叫「连接热点共享」，看不出是数据线共享还是插卡 Modem。
+    ///
+    /// 现在按「有设备 / 没设备」两种形态分别画，一屏说清。
+    @ViewBuilder
     private var cellularPanel: some View {
-        CardPanel("蜂窝网络", icon: "antenna.radiowaves.left.and.right",
+        // 这台机器的「蜂窝」这一格实际只有两条路：手机 USB 热点共享（常用）、
+        // 插 SIM 卡的 USB Modem（没这个硬件）。标题按实际在用的那条写，
+        // 不要把两件事塞进一个叫「蜂窝网络」的框里。
+        CardPanel(rep.modemPresent ? "蜂窝网络" : "热点共享",
+                  icon: rep.modemPresent ? "antenna.radiowaves.left.and.right" : "personalhotspot",
                   trailing: cellularTrailing) {
-            HStack(spacing: 10) {
-                Image(systemName: rep.modemPresent ? "antenna.radiowaves.left.and.right" : "personalhotspot")
-                    .font(.system(size: 15))
+            if let usb = rep.usbUplink {
+                tetheredBody(usb)
+            } else {
+                cellularEmpty
+            }
+
+            if rep.modemPresent { modemBody }
+
+            // 没有 USB 设备时，这里给一条能点的出路：去官方那套流程的等价动作。
+            if rep.usbUplink == nil, !rep.modemPresent {
+                Text("数据线连上手机后，手机上打开「USB 网络共享」，这一页会自动出现这台手机。")
+                    .font(UI.label())
                     .foregroundStyle(.secondary)
-                Text(cellularTitle)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.bottom, 10)
+            }
+        }
+    }
+
+    /// 插着手机（USB 网卡在）：显示是谁、哪个网卡、什么地址，再给连/断。
+    @ViewBuilder
+    private func tetheredBody(_ usb: UsbUplink) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "personalhotspot")
+                .font(.system(size: 15))
+                .foregroundStyle(tetherOn ? NetPalette.wan : Color.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(usb.label)
                     .font(UI.row())
                     .lineLimit(1)
-                    .minimumScaleFactor(0.85)
-                Spacer(minLength: 0)
+                Text(usb.connected ? "已经分到地址" : "已插上，还没分到地址")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
             }
-            .padding(.vertical, 12)
+            Spacer(minLength: 8)
+            if tetherOn {
+                Text("使用中")
+                    .font(UI.label())
+                    .foregroundStyle(NetPalette.wan)
+            }
+        }
+        .padding(.vertical, 12)
 
-            if let usb = rep.usbUplink, !rep.modemPresent {
-                CardRule()
-                HStack(alignment: .top, spacing: 12) {
-                    MetricCell(label: "接口", value: usb.name)
-                    MetricCell(label: "地址", value: usb.ip.isEmpty ? "—" : usb.ip)
-                }
-                .padding(.vertical, UI.rowPadding)
-                CardRule()
-                if tetherOn {
-                    Button {
-                        pendingTetherOff = true
-                    } label: {
-                        actionRow("断开热点共享", icon: "xmark.circle",
-                                  tint: Color(red: 0.85, green: 0.25, blue: 0.22))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(busy)
-                } else {
-                    primaryButton("连接热点共享", icon: "arrow.right") {
-                        Task { await connectTether(usb) }
-                    }
-                    .padding(.vertical, 10)
-                }
+        CardRule()
+        HStack(alignment: .top, spacing: 12) {
+            MetricCell(label: "接口", value: usb.name)
+            MetricCell(label: "地址", value: usb.ip.isEmpty ? "—" : usb.ip)
+        }
+        .padding(.vertical, UI.rowPadding)
+
+        if !usb.manufacturer.isEmpty || !usb.product.isEmpty {
+            CardRule()
+            HStack(alignment: .top, spacing: 12) {
+                MetricCell(label: "厂商", value: usb.manufacturer.isEmpty ? "—" : usb.manufacturer)
+                MetricCell(label: "型号", value: usb.product.isEmpty ? "—" : usb.product)
             }
+            .padding(.vertical, UI.rowPadding)
+        }
+
+        CardRule()
+        if tetherOn {
+            Button {
+                pendingTetherOff = true
+            } label: {
+                actionRow("断开热点共享", icon: "xmark.circle",
+                          tint: Color(red: 0.85, green: 0.25, blue: 0.22))
+            }
+            .buttonStyle(.plain)
+            .disabled(busy)
+        } else {
+            primaryButton("连接这条热点共享", icon: "arrow.right") {
+                Task { await connectTether(usb) }
+            }
+            .padding(.top, 10)
+            .padding(.bottom, 4)
+        }
+    }
+
+    /// 什么都没插：照官方那句写清楚「插上就能用」，别只报一句「没检测到」。
+    private var cellularEmpty: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "personalhotspot")
+                .font(.system(size: 26))
+                .foregroundStyle(.tertiary)
+                .frame(width: 34)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("没有检测到热点共享设备")
+                    .font(UI.row())
+                Text("插入智能手机或 USB Modem 即可启动。")
+                    .font(UI.label())
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 12)
+    }
+
+    /// 插了 SIM 卡 Modem：这台机器没这个硬件，真插上了也只报能读到的三项。
+    private var modemBody: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            CardRule()
+            HStack(alignment: .top, spacing: 12) {
+                MetricCell(label: "Modem", value: "已插入")
+                MetricCell(label: "SIM 卡", value: "已检测")
+            }
+            .padding(.vertical, UI.rowPadding)
+            Text("SIM 卡、APN、频段这些要在固件支持 Modem 的机型上才有；这台按官方接口读不到就不编。")
+                .font(UI.label())
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.bottom, 10)
         }
     }
 
@@ -688,12 +885,6 @@ struct UplinkSettingsView: View {
         if rep.modemPresent { return "已插入" }
         guard let usb = rep.usbUplink else { return "未检测到" }
         return usb.connected ? "已连接" : "未连接"
-    }
-
-    private var cellularTitle: String {
-        if rep.modemPresent { return "检测到 USB Modem" }
-        guard let usb = rep.usbUplink else { return "没有检测到 USB Modem 或手机热点" }
-        return usb.connected ? "\(usb.label)（手机热点）" : "检测到 \(usb.label)（手机热点）"
     }
 
     // MARK: - 小工具
@@ -812,7 +1003,16 @@ struct UplinkSettingsView: View {
     ///
     /// 老版是「把值填进上面的表单，再自己滚上去点保存」——用户 2026-11-17
     /// 说「点了不起作用」就是这个。现在点一下只有两种结果：连上了，或者弹出密码框。
+    ///
+    /// 2026-11-25：点的是**当前已经连着的那一个**时什么都不做，只弹提示。
     private func pick(_ item: RepeaterSurvey) async {
+        // 点的是当前这个 AP（不是同名另一个频段）才挡；换频段照常执行。
+        if isSameAccessPoint(ssid: item.ssid, bssid: item.bssid) {
+            noReconnectReason = linkIsHealthy
+                ? "「\(item.ssid)」就是当前连着的网络，网络也正常。重复连接会先断开再连，中间会断网十几秒，所以这次没有执行。"
+                : "「\(item.ssid)」正在连接中。想重建连接的话，先点「重新连接」。"
+            return
+        }
         if let saved = rep.saved.first(where: { $0.ssid == item.ssid && !$0.key.isEmpty }) {
             await switchTo(saved, band: item.band)
             return
@@ -846,6 +1046,12 @@ struct UplinkSettingsView: View {
     }
 
     private func switchTo(_ item: RepeaterSavedNetwork, band: String? = nil) async {
+        // 切到「当前正连着、网络也通」的那一个 AP = 无意义的重连：不执行。
+        if item.ssid == rep.ssid, linkIsHealthy,
+           isSameAccessPoint(ssid: item.ssid, bssid: item.bssid) {
+            noReconnectReason = "「\(item.ssid)」就是当前连着的网络，网络也正常。重复连接会先断开再连，中间会断网十几秒，所以这次没有执行。"
+            return
+        }
         guard !busy else { return }
         busy = true
         errorText = nil
@@ -866,7 +1072,15 @@ struct UplinkSettingsView: View {
     }
 
     /// 用当前参数重连一次（不动任何设置）。
+    ///
+    /// 2026-11-25：链路健康时**不执行**。用户原话「已经连接上且互联网是通的
+    /// 就不要触发重新连接了，点重连也不行，直接弹个提示」——重连会先断开，
+    /// 白白断十几秒，对已通的链路纯属伤害。
     private func reconnect() async {
+        if linkIsHealthy {
+            noReconnectReason = "中继已经连着「\(rep.ssid.isEmpty ? "上级网络" : rep.ssid)」，互联网也是通的。重新连接会先断开再连，中间会断网十几秒。真要重建连接，可以先切到别的网络再切回来。"
+            return
+        }
         guard !busy else { return }
         busy = true
         errorText = nil
@@ -965,6 +1179,12 @@ struct UplinkSettingsView: View {
         model.notice = Notice(kind: .ok, title: "已连接热点共享",
                               detail: outcome.note ?? usb.label)
         await model.manualRefresh()
+        // 接口连通 ≠ 成为出口：多 WAN 按 metric 排队（中继 20 / 热点共享 30），
+        // 中继还在连的时候出口仍然是中继。不说清楚，用户会以为「切过去了但没网」。
+        if model.network.uplink != .tethering, model.network.uplink != .none {
+            model.notice = Notice(kind: .info, title: "已连通，出口还在\(model.network.uplink.title)",
+                                  detail: "中继还连着，默认路由排在前面。要改走手机，去「中继设置」把「启用中继」关掉。")
+        }
     }
 
     private func disconnectTether() async {
