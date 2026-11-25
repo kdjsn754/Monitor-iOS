@@ -1,253 +1,486 @@
 import SwiftUI
 
-/// 无线设置（二级页，v3.2.5）。
+/// 无线（二级页）。
 ///
 /// **入口**：网络页「无线」卡右上角的「更多」。
-/// 那张卡只回答「现在开着哪些网络、几台设备」（用户 2026-11-18：只显示已开启的），
-/// 开 / 关、改名改密码、调信道频宽这些事都收到这一页来。
 ///
-/// 结构与官方 GL 无线页对齐（字段表就是 `/www/i18n/gl-sdk4-ui-wireless.zh-cn.json`
-/// 那份文案）：主网络（每频段一行、独立开关）→ 访客 → IoT → 多链路 → 无线配置（按频段）。
-/// **不搬官方那些灰色说明文字**（2026-10-31 的规矩：页面上不放解释性小字）。
+/// ## v3.4.1 重做（用户 2026-11-25：「无线页也参考官方重做，布局也重做不要参考
+/// 官方布局，你自己设计要图形化」）
 ///
-/// 能改的项：名称 / 密码 / 安全性（WPA2 · 混合 · WPA3 · 无密码）/ 隐藏 / 随机 BSSID /
-/// 各频段开关 / 信道 / 频宽 / 发射功率 / 5G 的 DFS。
+/// 之前这一页是 `Form` + 五张系统分区表：主网络两行、访客一行、IoT 一行、多链路
+/// 一行、无线配置两行，全是「标题 + 灰字 + 开关」的文字行。用户要的是图形化，
+/// 所以版式整个换掉，**信息结构仍然按官方那套**（`/www/i18n/gl-sdk4-ui-wireless`
+/// 的分组：主网络 / 访客 / IoT / 多链路 / 无线配置），只是把它画出来：
+///
+/// | 区域 | 画法 |
+/// | --- | --- |
+/// | 顶部 | 无线波纹 + 「几个频段在广播 / 几台设备」+ 每个频段的色点胶囊 |
+/// | 每个频段一张卡 | 频段徽章（2.4 / 5）+ SSID + 开关 + **频谱条** + 三项参数胶囊 |
+/// | 频谱条 | 按这一频段可用信道画刻度，高亮当前信道、宽度按频宽占位 |
+/// | 其他网络 | 彩色图标块 + 频段圆点 + 开关（访客 / IoT / 多链路） |
+/// | 编辑页 | 安全性四个胶囊、频段开关、密码框；无线参数页是「信道标尺 + 频宽块 + 功率格」 |
+///
+/// **能不能改得动，靠的是通道不是界面**：所有写入都走 `AppModel.saveWifiGroup` /
+/// `createWifiGroup` / `saveRadioSettings`，写完回读 `uci`，对得上才算成功，最后
+/// `wifi reload` 生效（那一步会断线，见 `reloadWireless`）。
+///
+/// 这一版顺手修掉一个会「改坏」的老毛病：编辑页以前不管用户动没动安全性，
+/// 保存时都把 `encryption` 写一遍。原值是认不出的老组合（`owe` / `wpa3` 之类）时，
+/// 只改个名字也会被压成 WPA2/WPA3 混合——现在没动过就不写。
 ///
 /// **没做的两项**（原因写进第 5 节）：无线模式 `hwmode` 与使用环境（室内/户外）。
-/// 前者写错会让 MTK 驱动直接不认这个频段，后者在固件里没有 uci 落点
-/// （官方走 RPC 直调驱动，SSH 这条路够不着）。
+/// 前者这台固件没有 `hwmode` 这个键，制式写在 `htmode` 前缀里，写错会让 MTK 驱动
+/// 直接不认这个频段；后者在固件里没有 uci 落点（官方走 RPC 直调驱动）。
 struct WifiSettingsView: View {
     @Environment(AppModel.self) private var model: AppModel
 
     @State private var editingGroup: WifiNetGroup?
     @State private var editingRadio: WifiBandInfo?
     @State private var creatingKind: WifiNetGroup.Kind?
+    /// 单个频段开关正在写的时候，把那一颗开关换成转圈。
+    @State private var busyBands: Set<String> = []
+    /// 访客 / IoT / 多链路整组开关。
     @State private var busyGroups: Set<String> = []
+    @State private var errorText: String?
 
     private var info: NetworkInfo { model.network }
     private var groups: [WifiNetGroup] { info.wifiGroups }
-
     private var mainGroup: WifiNetGroup? { groups.first { $0.kind == .main } }
+    private var bands: [WifiBandInfo] { info.bands }
+
+    /// 主网络之外的组，按「访客 → IoT → 多链路」排。多链路这台机器不支持就整条不出现。
+    private var sideGroups: [WifiNetGroup] {
+        groups
+            .filter { $0.kind != .main }
+            .filter { $0.kind != .mlo || info.mloSupported }
+            .sorted { sideOrder($0.kind) < sideOrder($1.kind) }
+    }
+
+    private func sideOrder(_ kind: WifiNetGroup.Kind) -> Int {
+        switch kind {
+        case .guest: return 0
+        case .iot: return 1
+        case .mlo: return 2
+        case .main: return -1
+        }
+    }
 
     var body: some View {
-        Form {
-            mainSection
-            sideSection(.guest)
-            sideSection(.iot)
-            if info.mloSupported { sideSection(.mlo) }
-            radioSection
+        ScrollView {
+            VStack(spacing: UI.cardSpacing) {
+                heroCard
+
+                if bands.isEmpty {
+                    emptyCard
+                } else {
+                    ForEach(bands) { band in
+                        bandCard(band)
+                    }
+                }
+
+                networksCard
+
+                if let errorText { WifiErrorNote(text: errorText) { self.errorText = nil } }
+            }
+            .padding(.horizontal, UI.pagePadding)
+            .padding(.top, 12)
+            // 底栏是浮在内容上的玻璃条：不留这一截，最后一张卡会被它盖住。
+            .padding(.bottom, 44)
         }
-        .themedFormBackground()
+        .scrollBounceBehavior(.basedOnSize)
+        .themedScrollBackground()
         .primaryButtons()
         .navigationTitle("无线")
         .navigationBarTitleDisplayMode(.inline)
         .sheet(item: $editingGroup) { group in
             WifiGroupEditorSheet(group: group)
-                .presentationBackground(Color.clear)
         }
         .sheet(item: $editingRadio) { band in
             WifiRadioEditorSheet(band: band)
-                .presentationBackground(Color.clear)
         }
         .sheet(isPresented: Binding(get: { creatingKind != nil },
                                     set: { if !$0 { creatingKind = nil } })) {
             if let kind = creatingKind {
                 WifiGroupCreateSheet(kind: kind)
-                    .presentationBackground(Color.clear)
             }
         }
     }
 
-    // MARK: - 主网络
+    // MARK: - 顶部：现在开着几个频段
 
-    /// 主网络按频段各一行：左边点进编辑，右边是这一频段自己的开关。
-    /// 「5G 开、2.4G 关」是这台机器最常见的状态，整组一个开关表达不了。
-    @ViewBuilder
-    private var mainSection: some View {
-        Section("主网络") {
-            if let main = mainGroup, !main.members.isEmpty {
-                ForEach(main.members) { member in
-                    HStack(spacing: 10) {
-                        Button {
-                            editingGroup = main
-                        } label: {
-                            HStack(spacing: 8) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(member.bandName)
-                                    Text(member.ssid.isEmpty ? "—" : member.ssid)
-                                        .font(.system(size: 12))
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
-                                }
-                                Spacer(minLength: 4)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(!main.editable)
+    /// 顶上那一块：左边是无线波纹（弧数跟着开着的频段数走），右边一句结论。
+    private var heroCard: some View {
+        let live = bands.filter { $0.up }
+        let clients = bands.reduce(0) { $0 + $1.clients }
+        return HStack(alignment: .center, spacing: 14) {
+            WifiWaveGlyph(lit: live.isEmpty ? 0 : min(live.count, 3),
+                          color: live.isEmpty ? Color(.systemGray3) : NetPalette.wifi)
+                .frame(width: 86, height: 64)
+                .accessibilityHidden(true)
 
-                        bandToggle(member, group: main)
-                    }
-                    .adaptiveRowBackground()
-                }
-
-                Button("修改主网络") { editingGroup = main }
-                    .adaptiveRowBackground()
-                    .disabled(!main.editable)
-            } else {
-                Text("—")
+            VStack(alignment: .leading, spacing: 5) {
+                Text(live.isEmpty ? "无线已关闭" : "\(live.count) 个频段在广播")
+                    .font(UI.title(.semibold))
+                    .foregroundStyle(.primary)
+                Text(clients > 0 ? "\(clients) 台设备连着" : "暂时没有设备连着")
+                    .font(UI.label())
                     .foregroundStyle(.secondary)
-                    .adaptiveRowBackground()
-            }
-        }
-    }
-
-    // MARK: - 访客 / IoT / 多链路
-
-    @ViewBuilder
-    private func sideSection(_ kind: WifiNetGroup.Kind) -> some View {
-        let group = groups.first { $0.kind == kind }
-        Section {
-            if let group, !group.members.isEmpty {
-                HStack(spacing: 10) {
-                    Button {
-                        editingGroup = group
-                    } label: {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(group.ssid.isEmpty ? "—" : group.ssid)
-                                .foregroundStyle(group.isOn ? Color.primary : Color.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                            Text(group.isOn ? group.bandSummary : "未启用")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
+                if !bands.isEmpty {
+                    HStack(spacing: 6) {
+                        ForEach(bands) { band in
+                            bandPill(band)
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
-                    .disabled(!group.editable)
-
-                    if busyGroups.contains(kind.rawValue) {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Toggle("", isOn: groupBinding(group))
-                            .labelsHidden()
-                            .blueSwitch()
-                            .disabled(!group.editable)
-                    }
-                }
-                .adaptiveRowBackground()
-
-                Button("详细设置") { editingGroup = group }
-                    .adaptiveRowBackground()
-                    .disabled(!group.editable)
-            } else if kind == .mlo {
-                Text("—")
-                    .foregroundStyle(.secondary)
-                    .adaptiveRowBackground()
-            } else {
-                Button("添加\(kind.title)") { creatingKind = kind }
-                    .adaptiveRowBackground()
-            }
-        } header: {
-            Text(kind.title)
-        }
-    }
-
-    // MARK: - 无线配置（按频段）
-
-    /// 信道 / 频宽 / 功率都是 **radio 段**上的，同一个频段的所有网络共用一份，
-    /// 所以它不挂在某个网络下面，而是单独一块。频段清单取主网络的成员——
-    /// 那两个 `wifi-iface` 正好各代表一个 radio。
-    @ViewBuilder
-    private var radioSection: some View {
-        Section("无线配置") {
-            let bands = mainGroup?.members ?? []
-            if bands.isEmpty {
-                Text("—")
-                    .foregroundStyle(.secondary)
-                    .adaptiveRowBackground()
-            } else {
-                ForEach(bands) { band in
-                    Button {
-                        editingRadio = band
-                    } label: {
-                        HStack(spacing: 8) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(band.bandName)
-                                Text("\(band.channelSettingLabel) · \(band.powerLabel)")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer(minLength: 4)
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.tertiary)
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .adaptiveRowBackground()
+                    .padding(.top, 2)
                 }
             }
+
+            Spacer(minLength: 0)
+        }
+        .cardSurface()
+    }
+
+    private func bandPill(_ band: WifiBandInfo) -> some View {
+        let on = band.up
+        let tint = BandTint.color(band.band)
+        return HStack(spacing: 4) {
+            Circle()
+                .fill(on ? tint : Color(.systemGray3))
+                .frame(width: 5, height: 5)
+            Text(shortBand(band.band))
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(on ? tint : Color.secondary)
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background {
+            Capsule().fill((on ? tint : Color(.systemGray4)).opacity(0.14))
         }
     }
 
-    // MARK: - 开关
+    private var emptyCard: some View {
+        CardPanel("读不到无线配置", icon: "wifi.slash") {
+            Text("这一拍没取到频段信息，下拉刷新一次。")
+                .font(UI.row())
+                .foregroundStyle(.secondary)
+                .padding(.vertical, 6)
+        }
+    }
 
-    /// 单个频段的开关：只动这一条 `wifi-iface`。
+    // MARK: - 每个频段一张卡
+
+    /// 一个频段 = 一张卡：频段徽章、主 SSID、开关、频谱条、三项参数。
     ///
-    /// 关掉的正是手机此刻连着的那一路时会立刻失联——`saveWifiGroup` 里拦了，
-    /// 这里只负责按住开关、等结果。
-    private func bandToggle(_ member: WifiBandInfo, group: WifiNetGroup) -> some View {
+    /// 参数（信道 / 频宽 / 功率）挂在 radio 上，这一频段的**所有**网络共用一份，
+    /// 所以它不跟着某个 SSID 走，而是单独一行，点开就是无线参数页（与官方
+    /// 「以下配置将应用到所有 X 频段的网络」同一件事）。
+    private func bandCard(_ band: WifiBandInfo) -> some View {
+        let tint = BandTint.color(band.band)
+        let on = band.ssidOn && !band.radioOff
+
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .center, spacing: 11) {
+                bandBadge(band, on: on)
+
+                Button {
+                    if let mainGroup { editingGroup = mainGroup }
+                } label: {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(band.ssid.isEmpty ? "—" : band.ssid)
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(on ? Color.primary : Color.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Text(bandSubline(band))
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(mainGroup?.editable != true)
+
+                bandSwitch(band)
+            }
+
+            WifiSpectrum(channels: spectrumChannels(band),
+                         highlight: band.channel,
+                         slots: spectrumSlots(band.width),
+                         tint: on ? tint : Color(.systemGray3))
+                .frame(height: 28)
+                .padding(.top, 12)
+                .opacity(on ? 1 : 0.55)
+                .accessibilityHidden(true)
+
+            HStack(spacing: 8) {
+                paramChip("信道", band.channelSettingLabel, band: band)
+                paramChip("频宽", band.width.isEmpty ? "—" : "\(band.width) MHz", band: band)
+                paramChip("功率", band.powerLabel, band: band)
+            }
+            .padding(.top, 10)
+        }
+        .cardSurface()
+    }
+
+    private func bandBadge(_ band: WifiBandInfo, on: Bool) -> some View {
+        let tint = BandTint.color(band.band)
+        return VStack(spacing: -1) {
+            Text(band.band.isEmpty ? "?" : band.band)
+                .font(.system(size: 17, weight: .bold))
+                .foregroundStyle(on ? tint : Color.secondary)
+            Text("GHz")
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundStyle((on ? tint : Color.secondary).opacity(0.75))
+        }
+        .frame(width: 48, height: 42)
+        .background {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill((on ? tint : Color(.systemGray4)).opacity(0.12))
+        }
+    }
+
+    private func bandSubline(_ band: WifiBandInfo) -> String {
+        var parts: [String] = []
+        if band.radioOff {
+            parts.append("频段已关闭")
+        } else if !band.ssidOn {
+            parts.append("网络已关闭")
+        }
+        if !band.encryption.isEmpty { parts.append(band.securityLabel) }
+        if band.hidden { parts.append("隐藏") }
+        if band.clients > 0 { parts.append("\(band.clients) 台") }
+        return parts.isEmpty ? "—" : parts.joined(separator: " · ")
+    }
+
+    /// 信道 / 频宽 / 功率：三颗等宽的小胶囊，点哪一颗都进同一页（无线参数）。
+    private func paramChip(_ title: String, _ value: String, band: WifiBandInfo) -> some View {
+        Button {
+            editingRadio = band
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(band.editable ? Color.primary : Color.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
+            .background {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.primary.opacity(0.05))
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(!band.editable)
+    }
+
+    /// 频率刻度上的候选信道。当前信道一定要在里面（可能停在 DFS 信道上），
+    /// 否则频谱条上会找不到高亮，看着像「没信号」。
+    private func spectrumChannels(_ band: WifiBandInfo) -> [Int] {
+        var list = band.channelOptions
+        if band.channel > 0, !list.contains(band.channel) {
+            list.append(band.channel)
+            list.sort()
+        }
+        return list
+    }
+
+    /// 频宽在频谱条上占几格（20M 一格、40M 两格、80M 四格、160M 八格）。
+    private func spectrumSlots(_ width: String) -> Int {
+        switch width {
+        case "160": return 8
+        case "80": return 4
+        case "40": return 2
+        default: return 1
+        }
+    }
+
+    private func bandSwitch(_ band: WifiBandInfo) -> some View {
         Group {
-            if busyGroups.contains(member.id) {
+            if busyBands.contains(band.id) {
                 ProgressView()
                     .controlSize(.small)
                     .frame(width: 51, height: 31)
             } else {
-                Toggle("", isOn: Binding(get: { member.ssidOn }, set: { value in
-                    guard !busyGroups.contains(member.id) else { return }
-                    busyGroups.insert(member.id)
-                    Task {
-                        var map: [String: Bool] = [:]
-                        for item in group.members { map[item.band] = item.ssidOn }
-                        map[member.band] = value
-                        let problem = await model.saveWifiGroup(group, ssid: group.ssid,
-                                                                key: group.key, hidden: group.hidden,
-                                                                bandOn: map)
-                        busyGroups.remove(member.id)
-                        if let problem {
-                            model.notice = Notice(kind: .fail, title: "没切换成功", detail: problem)
-                        } else {
-                            await model.manualRefresh()
-                        }
-                    }
+                Toggle("", isOn: Binding(get: { band.ssidOn && !band.radioOff }, set: { value in
+                    setBand(band, on: value)
                 }))
                 .labelsHidden()
                 .blueSwitch()
-                .disabled(!member.editable)
+                .disabled(!band.editable)
             }
         }
         .frame(width: 51)
     }
 
-    /// 整组开关（访客 / IoT / 多链路）。开的时候所有频段一起开。
+    // MARK: - 其他网络
+
+    private var networksCard: some View {
+        let live = sideGroups.filter { $0.isOn }.count
+        return CardPanel("其他网络", icon: "square.grid.2x2",
+                         trailing: live > 0 ? "\(live) 个已开启" : "都没开") {
+            VStack(spacing: 0) {
+                ForEach(Array(sideGroups.enumerated()), id: \.element.id) { index, group in
+                    if index > 0 { CardRule() }
+                    networkRow(group)
+                }
+            }
+        }
+    }
+
+    /// 一行一个组：彩色图标块 + 标题 + SSID + 频段圆点 + 开关。
+    /// 没有成员段的组画成「添加」，点进去就是创建页；多链路没有模板段，只画一条占位。
+    private func networkRow(_ group: WifiNetGroup) -> some View {
+        let exists = !group.members.isEmpty
+        let on = group.isOn
+        let tint = KindTint.color(group.kind)
+        let canCreate = group.kind == .guest || group.kind == .iot
+
+        return HStack(alignment: .center, spacing: 12) {
+            Button {
+                if exists {
+                    editingGroup = group
+                } else if canCreate {
+                    creatingKind = group.kind
+                }
+            } label: {
+                HStack(alignment: .center, spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill((exists && on ? tint : Color(.systemGray4)).opacity(0.13))
+                            .frame(width: 42, height: 42)
+                        Image(systemName: exists ? KindTint.icon(group.kind) : "plus")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(exists && on ? tint : Color.secondary)
+                    }
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(exists ? group.kind.title : "添加\(group.kind.title)")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(exists ? Color.primary : Color.secondary)
+                            .lineLimit(1)
+
+                        if exists {
+                            Text(group.ssid.isEmpty ? "—" : group.ssid)
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            bandDots(group)
+                        } else {
+                            Text(canCreate ? "还没有这个网络" : "这台路由器没有这一组")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(exists && !group.editable)
+
+            if exists {
+                if busyGroups.contains(group.kind.rawValue) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(width: 51)
+                } else {
+                    Toggle("", isOn: groupBinding(group))
+                        .labelsHidden()
+                        .blueSwitch()
+                        .disabled(!group.editable)
+                }
+            } else {
+                Image(systemName: canCreate ? "chevron.right" : "minus")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 51)
+            }
+        }
+        .padding(.vertical, 10)
+    }
+
+    /// 组里哪几个频段在广播：亮色 = 开，灰 = 关。
+    private func bandDots(_ group: WifiNetGroup) -> some View {
+        HStack(spacing: 4) {
+            ForEach(group.members) { member in
+                let lit = member.ssidOn && !member.radioOff
+                Text(shortBand(member.band))
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(lit ? BandTint.color(member.band) : Color.secondary)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1.5)
+                    .background {
+                        Capsule()
+                            .fill((lit ? BandTint.color(member.band) : Color(.systemGray4)).opacity(0.16))
+                    }
+            }
+            if group.clients > 0 {
+                Text("\(group.clients) 台")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.top, 1)
+    }
+
+    // MARK: - 写：开关
+
+    /// 单个频段的开关：只动这一条 `wifi-iface`（整组的两条名字密码一样，只切一条）。
+    ///
+    /// 关掉的正是手机此刻连着的那一路时会立刻失联——`saveWifiGroup` 里拦了，
+    /// 这里只负责按住开关、等结果。
+    private func setBand(_ band: WifiBandInfo, on: Bool) {
+        guard !busyBands.contains(band.id), let group = mainGroup else { return }
+        busyBands.insert(band.id)
+        errorText = nil
+        Task {
+            var map: [String: Bool] = [:]
+            for member in group.members { map[member.band] = member.ssidOn }
+            map[band.band] = on
+            let problem = await model.saveWifiGroup(group,
+                                                    ssid: group.ssid,
+                                                    key: group.key,
+                                                    hidden: group.hidden,
+                                                    bandOn: map)
+            busyBands.remove(band.id)
+            if let problem {
+                errorText = problem
+                model.notice = Notice(kind: .fail, title: "没切换成功", detail: problem)
+            } else {
+                await model.manualRefresh()
+            }
+        }
+    }
+
+    /// 整组开关（访客 / IoT / 多链路）：开的时候所有频段一起开。
     private func groupBinding(_ group: WifiNetGroup) -> Binding<Bool> {
         Binding(get: { group.isOn }, set: { value in
             guard !busyGroups.contains(group.kind.rawValue) else { return }
             busyGroups.insert(group.kind.rawValue)
+            errorText = nil
             Task {
                 var map: [String: Bool] = [:]
                 for member in group.members { map[member.band] = value }
-                let problem = await model.saveWifiGroup(group, ssid: group.ssid,
-                                                        key: group.key, hidden: group.hidden,
+                let problem = await model.saveWifiGroup(group,
+                                                        ssid: group.ssid,
+                                                        key: group.key,
+                                                        hidden: group.hidden,
                                                         bandOn: map)
                 busyGroups.remove(group.kind.rawValue)
                 if let problem {
+                    errorText = problem
                     model.notice = Notice(kind: .fail, title: "没切换成功", detail: problem)
                 } else {
                     await model.manualRefresh()
@@ -255,14 +488,239 @@ struct WifiSettingsView: View {
             }
         })
     }
+
+    // MARK: - 小工具
+
+    private func shortBand(_ raw: String) -> String {
+        switch raw {
+        case "": return "无线"
+        case "2.4": return "2.4G"
+        case "S1G": return "Sub-1G"
+        default: return raw + "G"
+        }
+    }
+}
+
+// MARK: - 图形件
+
+/// 无线波纹：底部一个圆点，向上三圈弧。亮起的弧数跟着「开着几个频段」走。
+///
+/// 用 `Canvas` 一次画完（同网络页的 `TopoFork`），滚动时只做位移合成，
+/// 不会因为几个 `Path` 叠在一起掉帧。
+private struct WifiWaveGlyph: View {
+    let lit: Int
+    let color: Color
+
+    var body: some View {
+        Canvas { context, size in
+            let base = CGPoint(x: size.width / 2, y: size.height - 5)
+            let radii: [CGFloat] = [size.height * 0.30,
+                                    size.height * 0.52,
+                                    size.height * 0.74]
+            for (index, radius) in radii.enumerated() {
+                var path = Path()
+                path.addArc(center: base, radius: radius,
+                            startAngle: .degrees(215), endAngle: .degrees(325),
+                            clockwise: false)
+                let on = index < lit
+                context.stroke(path,
+                               with: .color(color.opacity(on ? 0.9 - Double(index) * 0.18 : 0.16)),
+                               style: StrokeStyle(lineWidth: 3, lineCap: .round))
+            }
+            var dot = Path()
+            dot.addEllipse(in: CGRect(x: base.x - 4, y: base.y - 4, width: 8, height: 8))
+            context.fill(dot, with: .color(color.opacity(lit > 0 ? 1 : 0.32)))
+        }
+    }
+}
+
+/// 频谱条：按这一频段可用信道画等距刻度，把当前信道（和频宽）高亮出来。
+///
+/// `ghost` 是「自动」——自动选信道时运行态会落在一个具体信道上，那条高亮用浅色，
+/// 表示「现在在这儿，但不是你钉的」。
+private struct WifiSpectrum: View {
+    let channels: [Int]
+    let highlight: Int
+    /// 高亮占几格（20M = 1、40M = 2、80M = 4、160M = 8）。
+    let slots: Int
+    let tint: Color
+    var ghost = false
+
+    var body: some View {
+        GeometryReader { geo in
+            let count = max(channels.count, 1)
+            let slot = geo.size.width / CGFloat(count)
+            let index = channels.firstIndex(of: highlight)
+            let window = min(slot * CGFloat(max(slots, 1)), geo.size.width)
+            let rawX = index.map { slot * (CGFloat($0) + 0.5) - window / 2 } ?? 0
+            let x = min(max(rawX, 0), max(geo.size.width - window, 0))
+
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(Color.primary.opacity(0.05))
+
+                HStack(spacing: 0) {
+                    ForEach(channels, id: \.self) { _ in
+                        Rectangle()
+                            .fill(Color.primary.opacity(0.12))
+                            .frame(width: 1, height: 9)
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+
+                if index != nil {
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(tint.opacity(ghost ? 0.22 : 0.85))
+                        .frame(width: window, height: 20)
+                        .offset(x: x)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
+/// 信道标尺：一条一根，点哪根选哪个信道。比系统 `Picker` 直观——
+/// 一眼能看出「我钉在 149，旁边还有 153 / 157 / 161」。
+private struct ChannelRuler: View {
+    let channels: [Int]
+    /// 当前选中的值（`auto` 或信道号）。
+    let selected: String
+    /// 运行态实测落点，自动模式下用浅色标出来。
+    let measured: Int
+    let tint: Color
+    let onPick: (Int) -> Void
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 3) {
+            ForEach(channels, id: \.self) { channel in
+                let isOn = selected == String(channel)
+                let isMeasured = channel == measured
+                Button {
+                    onPick(channel)
+                } label: {
+                    VStack(spacing: 4) {
+                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            .fill(isOn ? tint
+                                  : (isMeasured ? tint.opacity(0.26) : Color(.systemGray4)))
+                            .frame(height: isOn ? 32 : 22)
+                        Text("\(channel)")
+                            .font(.system(size: 8, weight: isOn ? .bold : .regular))
+                            .foregroundStyle(isOn ? tint : Color.secondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .frame(height: 50)
+        .animation(.easeInOut(duration: 0.15), value: selected)
+    }
+}
+
+/// 页面 / 弹层共用的错误条。
+private struct WifiErrorNote: View {
+    let text: String
+    let onClose: () -> Void
+
+    var body: some View {
+        let red = Color(red: 0.85, green: 0.25, blue: 0.22)
+        return HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 13))
+                .foregroundStyle(red)
+            Text(text)
+                .font(.system(size: 13))
+                .foregroundStyle(red)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(red.opacity(0.7))
+                    .padding(2)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(14)
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(red.opacity(0.08))
+        }
+    }
+}
+
+/// 编辑页底部那颗整宽保存按钮（蓝底白字，第④类）。
+private struct WifiSaveButton: View {
+    let title: String
+    let busy: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                if busy { ProgressView().controlSize(.small).tint(.white) }
+                Text(busy ? "保存中…" : title)
+                    .font(.system(size: 15.5, weight: .semibold))
+            }
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .frame(height: 48)
+            .background {
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .fill(busy ? Color(.systemGray3) : NetPalette.wan)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(busy)
+    }
+}
+
+/// 频段配色：2.4G 绿松、5G 青、6G 紫（与网络页拓扑同一个色系，`NetPalette.wifi` 就是 5G）。
+private enum BandTint {
+    static func color(_ band: String) -> Color {
+        switch band {
+        case "2.4": return Color(red: 0.10, green: 0.62, blue: 0.45)
+        case "6": return Color(red: 0.44, green: 0.36, blue: 0.88)
+        default: return NetPalette.wifi
+        }
+    }
+}
+
+/// 三种附加网络的配色与图标。
+private enum KindTint {
+    static func color(_ kind: WifiNetGroup.Kind) -> Color {
+        switch kind {
+        case .guest: return Color(red: 0.93, green: 0.55, blue: 0.16)
+        case .iot: return Color(red: 0.20, green: 0.62, blue: 0.42)
+        case .mlo: return Color(red: 0.44, green: 0.36, blue: 0.88)
+        case .main: return NetPalette.wifi
+        }
+    }
+
+    static func icon(_ kind: WifiNetGroup.Kind) -> String {
+        switch kind {
+        case .guest: return "person.2.fill"
+        case .iot: return "cpu"
+        case .mlo: return "square.stack.3d.up.fill"
+        case .main: return "wifi"
+        }
+    }
 }
 
 // MARK: - 网络编辑
 
-/// 一组无线网络的编辑页：名称 / 安全性 / 密码 / 隐藏 / 随机 BSSID / 各频段开关。
+/// 一组无线网络的编辑页：名称 / 安全性 / 密码 / 各频段开关 / 隐藏 / 随机 BSSID。
 ///
 /// 同组的 2.4G 与 5G 是两条独立 `wifi-iface`，名称和密码必须写成一样，
 /// 否则手机在两个频段上会看到两个不同名字的网络——所以由这一页统一写。
+///
+/// **安全性只在真动过时才写**（v3.4.1）：老值认不出来（`owe` / `wpa3` 这类）
+/// 时不碰 `encryption`，免得「只改了个名字」把加密方式一起压成混合。
 struct WifiGroupEditorSheet: View {
     @Environment(AppModel.self) private var model: AppModel
     @Environment(\.dismiss) private var dismiss
@@ -278,6 +736,8 @@ struct WifiGroupEditorSheet: View {
     @State private var showKey = false
     @State private var busy = false
     @State private var errorText: String?
+    /// 用户点过安全性那几个胶囊没有。没点过就不写 `encryption`。
+    @State private var securityTouched = false
 
     init(group: WifiNetGroup) {
         self.group = group
@@ -300,87 +760,24 @@ struct WifiGroupEditorSheet: View {
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section {
-                    HStack {
-                        Text("名称")
-                        TextField("", text: $ssid)
-                            .multilineTextAlignment(.trailing)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
+            ScrollView {
+                VStack(spacing: UI.cardSpacing) {
+                    identityCard
+                    securityCard
+                    bandsCard
+                    optionsCard
+                    if let errorText { WifiErrorNote(text: errorText) { self.errorText = nil } }
+                    WifiSaveButton(title: "保存", busy: busy) {
+                        Task { await save() }
                     }
-                    .adaptiveRowBackground()
-
-                    Picker("安全性", selection: $security) {
-                        ForEach(WifiSecurity.allCases) { item in
-                            Text(item.title).tag(item)
-                        }
-                    }
-                    .adaptiveRowBackground()
-
-                    if security.needsKey {
-                        HStack {
-                            Text("密码")
-                            Group {
-                                if showKey {
-                                    TextField("", text: $key)
-                                } else {
-                                    SecureField("", text: $key)
-                                }
-                            }
-                            .multilineTextAlignment(.trailing)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-
-                            Button {
-                                showKey.toggle()
-                            } label: {
-                                Image(systemName: showKey ? "eye.slash" : "eye")
-                                    .font(.system(size: 14))
-                                    .foregroundStyle(.secondary)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        .adaptiveRowBackground()
-                    }
-
-                    Toggle("隐藏网络", isOn: $hidden)
-                        .blueSwitch()
-                        .adaptiveRowBackground()
-                    Toggle("随机 BSSID", isOn: $randomBSSID)
-                        .blueSwitch()
-                        .adaptiveRowBackground()
+                    .padding(.top, 2)
                 }
-
-                Section("频段") {
-                    ForEach(group.members) { member in
-                        Toggle(isOn: Binding(
-                            get: { bandOn[member.band] ?? false },
-                            set: { bandOn[member.band] = $0 }
-                        )) {
-                            Text(member.bandName)
-                        }
-                        .blueSwitch()
-                        .adaptiveRowBackground()
-                    }
-                    if let bandProblem {
-                        Text(bandProblem)
-                            .font(.system(size: 13))
-                            .foregroundStyle(Color(red: 0.85, green: 0.25, blue: 0.22))
-                            .adaptiveRowBackground()
-                    }
-                }
-
-                if let errorText {
-                    Section {
-                        Text(errorText)
-                            .font(.system(size: 13))
-                            .foregroundStyle(Color(red: 0.85, green: 0.25, blue: 0.22))
-                            .adaptiveRowBackground()
-                    }
-                }
+                .padding(.horizontal, UI.pagePadding)
+                .padding(.top, 12)
+                .padding(.bottom, 28)
             }
-            .themedFormBackground()
+            .scrollBounceBehavior(.basedOnSize)
+            .themedScrollBackground()
             .primaryButtons()
             .navigationTitle(group.kind.title)
             .navigationBarTitleDisplayMode(.inline)
@@ -390,15 +787,174 @@ struct WifiGroupEditorSheet: View {
                         .navBarTint()
                         .disabled(busy)
                 }
-                ToolbarItem(placement: .topBarTrailing) {
-                    if busy {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Button("保存") { Task { await save() } }
-                            .fontWeight(.semibold)
-                            .navBarTint()
+            }
+        }
+    }
+
+    private var identityCard: some View {
+        CardPanel("名称", icon: "wifi") {
+            HStack(spacing: 8) {
+                TextField("", text: $ssid)
+                    .font(.system(size: 15.5, weight: .medium))
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background {
+                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            .fill(Color(.tertiarySystemFill))
+                    }
+                    .disabled(busy)
+                Text("\(ssid.count)/32")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.tertiary)
+                    .monospacedDigit()
+            }
+            .padding(.top, 2)
+            .padding(.bottom, 4)
+        }
+    }
+
+    private var securityCard: some View {
+        CardPanel("安全性", icon: "lock.shield") {
+            VStack(alignment: .leading, spacing: 10) {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 8),
+                                    GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                    ForEach(WifiSecurity.allCases) { item in
+                        securityPill(item)
                     }
                 }
+                if security.needsKey {
+                    passwordField
+                }
+            }
+            .padding(.top, 2)
+            .padding(.bottom, 4)
+        }
+    }
+
+    private func securityPill(_ item: WifiSecurity) -> some View {
+        let selected = security == item
+        return Button {
+            security = item
+            securityTouched = true
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 12, weight: .semibold))
+                Text(item.title)
+                    .font(.system(size: 12.5, weight: selected ? .semibold : .regular))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(selected ? NetPalette.wan : Color.secondary)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(selected ? NetPalette.wan.opacity(0.12) : Color(.tertiarySystemFill))
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(busy)
+    }
+
+    private var passwordField: some View {
+        HStack(spacing: 8) {
+            Group {
+                if showKey {
+                    TextField("密码", text: $key)
+                } else {
+                    SecureField("密码", text: $key)
+                }
+            }
+            .font(.system(size: 15))
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+
+            Button {
+                showKey.toggle()
+            } label: {
+                Image(systemName: showKey ? "eye.slash" : "eye")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .padding(4)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background {
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(Color(.tertiarySystemFill))
+        }
+    }
+
+    private var bandsCard: some View {
+        CardPanel("频段", icon: "antenna.radiowaves.left.and.right") {
+            VStack(spacing: 0) {
+                ForEach(Array(group.members.enumerated()), id: \.element.id) { index, member in
+                    if index > 0 { CardRule() }
+                    HStack(spacing: 8) {
+                        Text(member.bandName)
+                            .font(UI.row())
+                        Text(member.channelLabel)
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 8)
+                        Toggle("", isOn: Binding(
+                            get: { bandOn[member.band] ?? false },
+                            set: { bandOn[member.band] = $0 }
+                        ))
+                        .labelsHidden()
+                        .blueSwitch()
+                    }
+                    .padding(.vertical, UI.rowPadding)
+                }
+                if let bandProblem {
+                    Text(bandProblem)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color(red: 0.85, green: 0.25, blue: 0.22))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.bottom, 6)
+                }
+            }
+        }
+    }
+
+    private var optionsCard: some View {
+        CardPanel("其他", icon: "slider.horizontal.3") {
+            VStack(spacing: 0) {
+                HStack(spacing: 9) {
+                    Image(systemName: "eye.slash")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.blue)
+                        .frame(width: 18, alignment: .leading)
+                    Text("隐藏网络").font(UI.row())
+                    Spacer(minLength: 8)
+                    Toggle("", isOn: $hidden)
+                        .labelsHidden()
+                        .blueSwitch()
+                }
+                .padding(.vertical, UI.rowPadding)
+
+                CardRule()
+
+                HStack(spacing: 9) {
+                    Image(systemName: "shuffle")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.blue)
+                        .frame(width: 18, alignment: .leading)
+                    Text("随机 BSSID").font(UI.row())
+                    Spacer(minLength: 8)
+                    Toggle("", isOn: $randomBSSID)
+                        .labelsHidden()
+                        .blueSwitch()
+                }
+                .padding(.vertical, UI.rowPadding)
             }
         }
     }
@@ -411,8 +967,9 @@ struct WifiGroupEditorSheet: View {
         }
         busy = true
         errorText = nil
+        let encryption: String? = (securityTouched || group.security != nil) ? security.rawValue : nil
         let problem = await model.saveWifiGroup(group, ssid: ssid, key: key, hidden: hidden,
-                                                encryption: security.rawValue,
+                                                encryption: encryption,
                                                 randomBSSID: randomBSSID,
                                                 bandOn: bandOn)
         busy = false
@@ -426,12 +983,15 @@ struct WifiGroupEditorSheet: View {
     }
 }
 
-// MARK: - 频段设置
+// MARK: - 无线参数（按频段）
 
 /// 一个频段的无线参数：信道 / 频宽 / 发射功率 / 5G 的 DFS。
 ///
 /// 这些键挂在 radio 段上（`wireless.MT7993_1_2`），改了之后这个频段上**所有**网络
 /// 一起换信道——官方也是这么写的（「以下配置将应用到所有 X 频段的网络」）。
+///
+/// 界面这一版全换成图形件：顶部一条大频谱预览，信道用「标尺」（一根一个信道，
+/// 点哪根选哪个），频宽四块（横条越长越宽），功率四格（信号格越高越强）。
 struct WifiRadioEditorSheet: View {
     @Environment(AppModel.self) private var model: AppModel
     @Environment(\.dismiss) private var dismiss
@@ -453,12 +1013,11 @@ struct WifiRadioEditorSheet: View {
         self.band = band
         _channel = State(initialValue: band.channelMode.isEmpty ? "auto" : band.channelMode)
         // 读不到 / 不在上限表里（有人手动改成 20）就退回这一频段最低的一档，
-        // 否则 Picker 会显示空行。
+        // 否则界面会空着。
         let options = band.widthOptions
         let initialWidth = options.contains(band.width) ? band.width : (options.first ?? "")
         _width = State(initialValue: initialWidth)
-        // 读回来的百分比不在四档里（有人手动改过 60）就取最近的一档，
-        // 免得 Picker 空着——这一页不提供任意百分比，官方也只有四档。
+        // 读回来的百分比不在四档里（有人手动改过 60）就取最近的一档。
         let nearest = Self.powerLevels.min {
             abs($0 - band.txPowerPercent) < abs($1 - band.txPowerPercent)
         } ?? 100
@@ -466,60 +1025,42 @@ struct WifiRadioEditorSheet: View {
         _dfs = State(initialValue: band.dfsEnabled)
     }
 
-    /// 信道候选：自动 + 这一频段的常用非 DFS 信道。
-    ///
-    /// **当前值一定要在列表里**：路由器可能正停在 DFS 信道（100 / 52…）上，
-    /// 那些值不在 `channelOptions` 里，不补进去 Picker 会显示空行、一保存就把它改掉。
-    private var channelChoices: [String] {
-        var list = ["auto"] + band.channelOptions.map(String.init)
-        if !list.contains(channel) { list.insert(channel, at: 1) }
-        return list
+    /// 这一频段的候选信道；当前信道（可能落在 DFS 段）一定补进来。
+    private var channelChoices: [Int] {
+        var list = band.channelOptions
+        if let current = Int(channel), current > 0, !list.contains(current) { list.append(current) }
+        if band.channel > 0, !list.contains(band.channel) { list.append(band.channel) }
+        return list.sorted()
     }
+
+    /// 频谱预览上要亮的那一格：自动时用运行态实测值。
+    private var previewChannel: Int {
+        Int(channel) ?? band.channel
+    }
+
+    private var tint: Color { BandTint.color(band.band) }
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section {
-                    Picker("信道", selection: $channel) {
-                        ForEach(channelChoices, id: \.self) { value in
-                            Text(value == "auto" ? "自动" : "CH \(value)").tag(value)
-                        }
+            ScrollView {
+                VStack(spacing: UI.cardSpacing) {
+                    previewCard
+                    channelCard
+                    widthCard
+                    powerCard
+                    if band.band == "5" { dfsCard }
+                    if let errorText { WifiErrorNote(text: errorText) { self.errorText = nil } }
+                    WifiSaveButton(title: "保存", busy: busy) {
+                        Task { await save() }
                     }
-                    .adaptiveRowBackground()
-
-                    Picker("频宽", selection: $width) {
-                        ForEach(band.widthOptions, id: \.self) { value in
-                            Text("\(value) MHz").tag(value)
-                        }
-                    }
-                    .adaptiveRowBackground()
-
-                    Picker("发射功率", selection: $power) {
-                        ForEach(Self.powerLevels, id: \.self) { value in
-                            Text(powerLabel(value)).tag(value)
-                        }
-                    }
-                    .adaptiveRowBackground()
+                    .padding(.top, 2)
                 }
-
-                if band.band == "5" {
-                    Section {
-                        Toggle("允许 DFS 信道", isOn: $dfs)
-                            .blueSwitch()
-                            .adaptiveRowBackground()
-                    }
-                }
-
-                if let errorText {
-                    Section {
-                        Text(errorText)
-                            .font(.system(size: 13))
-                            .foregroundStyle(Color(red: 0.85, green: 0.25, blue: 0.22))
-                            .adaptiveRowBackground()
-                    }
-                }
+                .padding(.horizontal, UI.pagePadding)
+                .padding(.top, 12)
+                .padding(.bottom, 28)
             }
-            .themedFormBackground()
+            .scrollBounceBehavior(.basedOnSize)
+            .themedScrollBackground()
             .primaryButtons()
             .navigationTitle(band.bandName)
             .navigationBarTitleDisplayMode(.inline)
@@ -529,25 +1070,211 @@ struct WifiRadioEditorSheet: View {
                         .navBarTint()
                         .disabled(busy)
                 }
-                ToolbarItem(placement: .topBarTrailing) {
-                    if busy {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Button("保存") { Task { await save() } }
-                            .fontWeight(.semibold)
-                            .navBarTint()
+            }
+        }
+    }
+
+    private var previewCard: some View {
+        CardPanel("当前设置", icon: "waveform.path.ecg") {
+            WifiSpectrum(channels: channelChoices,
+                         highlight: previewChannel,
+                         slots: widthSlots(width),
+                         tint: tint,
+                         ghost: channel == "auto")
+                .frame(height: 46)
+                .padding(.top, 4)
+                .padding(.bottom, 8)
+                .accessibilityHidden(true)
+
+            HStack(alignment: .top, spacing: 12) {
+                MetricCell(label: "信道",
+                           value: channel == "auto"
+                               ? (band.channel > 0 ? "自动 · CH \(band.channel)" : "自动")
+                               : "CH \(channel)",
+                           valueWeight: .semibold)
+                MetricCell(label: "频宽",
+                           value: width.isEmpty ? "—" : "\(width) MHz",
+                           valueWeight: .semibold)
+                MetricCell(label: "功率", value: powerLabel(power), valueWeight: .semibold)
+            }
+            .padding(.bottom, 2)
+        }
+    }
+
+    private var channelCard: some View {
+        CardPanel("信道", icon: "antenna.radiowaves.left.and.right") {
+            HStack(spacing: 8) {
+                Button {
+                    channel = "auto"
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: channel == "auto" ? "checkmark.circle.fill" : "circle")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text("自动").font(.system(size: 12.5, weight: channel == "auto" ? .semibold : .regular))
+                    }
+                    .foregroundStyle(channel == "auto" ? tint : Color.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background {
+                        Capsule().fill(channel == "auto" ? tint.opacity(0.13) : Color(.tertiarySystemFill))
+                    }
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                Spacer(minLength: 0)
+            }
+            .padding(.top, 2)
+
+            if channelChoices.isEmpty {
+                Text("这一频段没有可选信道")
+                    .font(UI.label())
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 8)
+            } else {
+                ChannelRuler(channels: channelChoices,
+                             selected: channel,
+                             measured: band.channel,
+                             tint: tint) { picked in
+                    channel = String(picked)
+                }
+                .padding(.top, 8)
+                .padding(.bottom, 2)
+            }
+        }
+    }
+
+    private var widthCard: some View {
+        CardPanel("频宽", icon: "arrow.left.and.right") {
+            if band.widthOptions.isEmpty {
+                Text("这一频段不支持改频宽")
+                    .font(UI.label())
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 8)
+            } else {
+                HStack(spacing: 8) {
+                    ForEach(band.widthOptions, id: \.self) { item in
+                        widthTile(item)
                     }
                 }
+                .padding(.top, 2)
+                .padding(.bottom, 2)
             }
+        }
+    }
+
+    private func widthTile(_ item: String) -> some View {
+        let selected = width == item
+        // 一条长度随频宽变化的横条：20 / 40 / 80 / 160 一眼看得出宽窄。
+        let barWidth = CGFloat(widthSlots(item)) * 3.4
+
+        return Button {
+            width = item
+        } label: {
+            VStack(spacing: 5) {
+                RoundedRectangle(cornerRadius: 2, style: .continuous)
+                    .fill(selected ? NetPalette.wan : Color(.systemGray3))
+                    .frame(width: barWidth, height: 4)
+                    .frame(height: 6)
+                Text(item)
+                    .font(.system(size: 13, weight: selected ? .bold : .medium))
+                Text("MHz")
+                    .font(.system(size: 8.5))
+            }
+            .foregroundStyle(selected ? NetPalette.wan : Color.secondary)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+            .background {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(selected ? NetPalette.wan.opacity(0.12) : Color(.tertiarySystemFill))
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(busy)
+    }
+
+    private var powerCard: some View {
+        CardPanel("发射功率", icon: "bolt") {
+            HStack(spacing: 8) {
+                ForEach(Array(Self.powerLevels.enumerated()), id: \.element) { index, item in
+                    powerTile(item, level: Self.powerLevels.count - index)
+                }
+            }
+            .padding(.top, 2)
+            .padding(.bottom, 2)
+        }
+    }
+
+    private func powerTile(_ value: Int, level: Int) -> some View {
+        let selected = power == value
+        return Button {
+            power = value
+        } label: {
+            VStack(spacing: 5) {
+                HStack(alignment: .bottom, spacing: 2) {
+                    ForEach(0..<4, id: \.self) { bar in
+                        RoundedRectangle(cornerRadius: 1, style: .continuous)
+                            .fill(bar < level
+                                  ? (selected ? NetPalette.wan : Color(.systemGray2))
+                                  : Color(.systemGray5))
+                            .frame(width: 4, height: CGFloat(6 + bar * 4))
+                    }
+                }
+                .frame(height: 22, alignment: .bottom)
+                Text(shortPower(value))
+                    .font(.system(size: 11.5, weight: selected ? .semibold : .regular))
+            }
+            .foregroundStyle(selected ? NetPalette.wan : Color.secondary)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+            .background {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(selected ? NetPalette.wan.opacity(0.12) : Color(.tertiarySystemFill))
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(busy)
+    }
+
+    private var dfsCard: some View {
+        CardPanel("DFS 信道", icon: "dot.radiowaves.left.and.right") {
+            HStack(spacing: 9) {
+                Text("允许使用 DFS 信道").font(UI.row())
+                Spacer(minLength: 8)
+                Toggle("", isOn: $dfs)
+                    .labelsHidden()
+                    .blueSwitch()
+            }
+            .padding(.vertical, UI.rowPadding)
+        }
+    }
+
+    private func widthSlots(_ value: String) -> Int {
+        switch value {
+        case "160": return 8
+        case "80": return 4
+        case "40": return 2
+        default: return 1
+        }
+    }
+
+    private func shortPower(_ value: Int) -> String {
+        switch value {
+        case 100: return "最大"
+        case 75: return "高"
+        case 50: return "中"
+        case 25: return "低"
+        default: return "\(value)%"
         }
     }
 
     private func powerLabel(_ value: Int) -> String {
         switch value {
-        case 100: return "最大（100%）"
-        case 75: return "高（75%）"
-        case 50: return "中（50%）"
-        case 25: return "低（25%）"
+        case 100: return "100%"
+        case 75: return "75%"
+        case 50: return "50%"
+        case 25: return "25%"
         default: return "\(value)%"
         }
     }
@@ -583,42 +1310,28 @@ struct WifiGroupCreateSheet: View {
 
     @State private var ssid = ""
     @State private var key = ""
+    @State private var showKey = false
     @State private var busy = false
     @State private var errorText: String?
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section {
-                    HStack {
-                        Text("名称")
-                        TextField(kind.title, text: $ssid)
-                            .multilineTextAlignment(.trailing)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
+            ScrollView {
+                VStack(spacing: UI.cardSpacing) {
+                    introCard
+                    formCard
+                    if let errorText { WifiErrorNote(text: errorText) { self.errorText = nil } }
+                    WifiSaveButton(title: "创建", busy: busy) {
+                        Task { await create() }
                     }
-                    .adaptiveRowBackground()
-
-                    HStack {
-                        Text("密码")
-                        SecureField("至少 8 位", text: $key)
-                            .multilineTextAlignment(.trailing)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                    }
-                    .adaptiveRowBackground()
+                    .padding(.top, 2)
                 }
-
-                if let errorText {
-                    Section {
-                        Text(errorText)
-                            .font(.system(size: 13))
-                            .foregroundStyle(Color(red: 0.85, green: 0.25, blue: 0.22))
-                            .adaptiveRowBackground()
-                    }
-                }
+                .padding(.horizontal, UI.pagePadding)
+                .padding(.top, 12)
+                .padding(.bottom, 28)
             }
-            .themedFormBackground()
+            .scrollBounceBehavior(.basedOnSize)
+            .themedScrollBackground()
             .primaryButtons()
             .navigationTitle("添加\(kind.title)")
             .navigationBarTitleDisplayMode(.inline)
@@ -628,16 +1341,79 @@ struct WifiGroupCreateSheet: View {
                         .navBarTint()
                         .disabled(busy)
                 }
-                ToolbarItem(placement: .topBarTrailing) {
-                    if busy {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Button("创建") { Task { await create() } }
-                            .fontWeight(.semibold)
-                            .navBarTint()
+            }
+        }
+    }
+
+    private var introCard: some View {
+        HStack(spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(KindTint.color(kind).opacity(0.13))
+                    .frame(width: 52, height: 52)
+                Image(systemName: KindTint.icon(kind))
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(KindTint.color(kind))
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(kind.title)
+                    .font(UI.title(.semibold))
+                Text("为它单独起一个名字和密码，主网络的密码不用告诉客人。")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .cardSurface()
+    }
+
+    private var formCard: some View {
+        CardPanel("名称与密码", icon: "wifi") {
+            VStack(alignment: .leading, spacing: 10) {
+                TextField("名称", text: $ssid)
+                    .font(.system(size: 15.5, weight: .medium))
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background {
+                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            .fill(Color(.tertiarySystemFill))
                     }
+                    .disabled(busy)
+
+                HStack(spacing: 8) {
+                    Group {
+                        if showKey {
+                            TextField("密码（至少 8 位）", text: $key)
+                        } else {
+                            SecureField("密码（至少 8 位）", text: $key)
+                        }
+                    }
+                    .font(.system(size: 15))
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+
+                    Button {
+                        showKey.toggle()
+                    } label: {
+                        Image(systemName: showKey ? "eye.slash" : "eye")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                            .padding(4)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background {
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .fill(Color(.tertiarySystemFill))
                 }
             }
+            .padding(.top, 2)
+            .padding(.bottom, 4)
         }
     }
 
