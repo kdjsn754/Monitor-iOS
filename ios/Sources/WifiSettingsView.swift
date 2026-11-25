@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// 无线（二级页）。
 ///
@@ -31,6 +32,22 @@ import SwiftUI
 /// **没做的两项**（原因写进第 5 节）：无线模式 `hwmode` 与使用环境（室内/户外）。
 /// 前者这台固件没有 `hwmode` 这个键，制式写在 `htmode` 前缀里，写错会让 MTK 驱动
 /// 直接不认这个频段；后者在固件里没有 uci 落点（官方走 RPC 直调驱动）。
+///
+/// ## v3.4.2 配色重定（用户 2026-11-25：「这页面的配色太丑了」）
+///
+/// 版式没动，只换颜色。旧版一屏里有五种高饱和色，而且互相撞：
+/// 2.4G 墨绿和 IoT 草绿是同一个色族，6G 的紫和「多链路」的紫**完全相同**
+/// （都是 `0.44,0.36,0.88`），再叠一个很亮的橙，整页像拼图。
+///
+/// 现在：
+/// - **频段只用冷色一族**——青绿（2.4）→ 青蓝（5，接着网络页拓扑的青色）→ 靛蓝（6），
+///   色相只差二十来度，明度对齐，扫过去是一组；
+/// - **次要网络全部降饱和**——访客暖赭（唯一暖色，用来分主次）、物联网中性灰蓝、
+///   多链路暗洋红，都不与频段撞；
+/// - **每个色都有浅色 / 深色两套值**（`wifiTone`）：白卡上用压深的，近黑卡上用提亮的，
+///   不再一套 hex 打天下；
+/// - 顺手把「关闭态」的灰从 `systemGray4` 换到 `Color.primary.opacity(…)`，浅色下
+///   那些 13% 灰底原先几乎看不见。 
 struct WifiSettingsView: View {
     @Environment(AppModel.self) private var model: AppModel
 
@@ -114,7 +131,7 @@ struct WifiSettingsView: View {
         let clients = bands.reduce(0) { $0 + $1.clients }
         return HStack(alignment: .center, spacing: 14) {
             WifiWaveGlyph(lit: live.isEmpty ? 0 : min(live.count, 3),
-                          color: live.isEmpty ? Color(.systemGray3) : NetPalette.wifi)
+                          color: live.isEmpty ? Color.secondary : NetPalette.wifi)
                 .frame(width: 86, height: 64)
                 .accessibilityHidden(true)
 
@@ -356,7 +373,7 @@ struct WifiSettingsView: View {
                 HStack(alignment: .center, spacing: 12) {
                     ZStack {
                         RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill((exists && on ? tint : Color(.systemGray4)).opacity(0.13))
+                            .fill(exists && on ? tint.opacity(0.13) : Color.primary.opacity(0.06))
                             .frame(width: 42, height: 42)
                         Image(systemName: exists ? KindTint.icon(group.kind) : "plus")
                             .font(.system(size: 16, weight: .semibold))
@@ -423,7 +440,7 @@ struct WifiSettingsView: View {
                     .padding(.vertical, 1.5)
                     .background {
                         Capsule()
-                            .fill((lit ? BandTint.color(member.band) : Color(.systemGray4)).opacity(0.16))
+                            .fill(lit ? BandTint.color(member.band).opacity(0.16) : Color.primary.opacity(0.07))
                     }
             }
             if group.clients > 0 {
@@ -602,7 +619,7 @@ private struct ChannelRuler: View {
                     VStack(spacing: 4) {
                         RoundedRectangle(cornerRadius: 3, style: .continuous)
                             .fill(isOn ? tint
-                                  : (isMeasured ? tint.opacity(0.26) : Color(.systemGray4)))
+                                  : (isMeasured ? tint.opacity(0.26) : Color.primary.opacity(0.12)))
                             .frame(height: isOn ? 32 : 22)
                         Text("\(channel)")
                             .font(.system(size: 8, weight: isOn ? .bold : .regular))
@@ -627,7 +644,7 @@ private struct WifiErrorNote: View {
     let onClose: () -> Void
 
     var body: some View {
-        let red = Color(red: 0.85, green: 0.25, blue: 0.22)
+        let red = wifiTone((0.72, 0.16, 0.13), (1.0, 0.45, 0.40))
         return HStack(alignment: .top, spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 13))
@@ -680,25 +697,53 @@ private struct WifiSaveButton: View {
     }
 }
 
-/// 频段配色：2.4G 绿松、5G 青、6G 紫（与网络页拓扑同一个色系，`NetPalette.wifi` 就是 5G）。
+/// 浅色 / 深色两套色值。
+///
+/// **为什么不用同一个 hex**：卡片底一边是白、一边是近黑，同一个颜色在一侧必然发灰、
+/// 另一侧发跳。浅色下要压深压饱和才够对比（白底上过 4.5:1），深色下要提亮降饱和，
+/// 否则小字糊在黑卡上。
+private func wifiTone(_ light: (CGFloat, CGFloat, CGFloat),
+                      _ dark: (CGFloat, CGFloat, CGFloat)) -> Color {
+    Color(UIColor { trait in
+        let v = trait.userInterfaceStyle == .dark ? dark : light
+        return UIColor(red: v.0, green: v.1, blue: v.2, alpha: 1)
+    })
+}
+
+/// 频段配色（v3.4.2 重定）：**青绿 → 青蓝 → 靛蓝，同一个冷色族**。
+///
+/// 旧值（v3.4.1 及以前）是 2.4G 墨绿 `(0.10,0.62,0.45)` + 5G 青 + 6G 紫：三个色相
+/// 各在一百二十度开外，一屏摆三张卡像三套皮肤的拼图；墨绿在白卡上尤其脏，绿又和
+/// 「IoT」那个草绿撞、紫又和「多链路」的紫**完全同色**（`0.44,0.36,0.88` 一字不差）。
+///
+/// 现在三档只动色相 20° 左右、明度对齐，扫过去是一组，读单个又能分开：
+/// 2.4G 偏绿（穿墙、远）、5G 居中（沿用网络页拓扑的青色系，两页对得上）、6G 偏靛（最新）。
 private enum BandTint {
     static func color(_ band: String) -> Color {
         switch band {
-        case "2.4": return Color(red: 0.10, green: 0.62, blue: 0.45)
-        case "6": return Color(red: 0.44, green: 0.36, blue: 0.88)
-        default: return NetPalette.wifi
+        case "2.4":
+            return wifiTone((0.04, 0.49, 0.47), (0.36, 0.80, 0.75))
+        case "6":
+            return wifiTone((0.29, 0.31, 0.72), (0.60, 0.60, 0.96))
+        default:
+            return wifiTone((0.06, 0.49, 0.60), (0.31, 0.71, 0.84))
         }
     }
 }
 
 /// 三种附加网络的配色与图标。
+///
+/// 频段已经把冷色族占满了（青绿 / 青蓝 / 靛），次要网络再上一个饱和橙、饱和绿，
+/// 整页就成了调色盘。这里全部降到低饱和：访客是暖赭（唯一暖色，一眼区分主次），
+/// 物联网是中性灰蓝（和 2.4G 的青绿拉开，不再撞绿），多链路是暗洋红（和 6G 的靛
+/// 分开，不再同色）。
 private enum KindTint {
     static func color(_ kind: WifiNetGroup.Kind) -> Color {
         switch kind {
-        case .guest: return Color(red: 0.93, green: 0.55, blue: 0.16)
-        case .iot: return Color(red: 0.20, green: 0.62, blue: 0.42)
-        case .mlo: return Color(red: 0.44, green: 0.36, blue: 0.88)
-        case .main: return NetPalette.wifi
+        case .guest: return wifiTone((0.62, 0.42, 0.13), (0.90, 0.71, 0.40))
+        case .iot: return wifiTone((0.30, 0.35, 0.40), (0.66, 0.71, 0.75))
+        case .mlo: return wifiTone((0.58, 0.28, 0.52), (0.90, 0.64, 0.84))
+        case .main: return BandTint.color("5")
         }
     }
 
@@ -917,7 +962,7 @@ struct WifiGroupEditorSheet: View {
                 if let bandProblem {
                     Text(bandProblem)
                         .font(.system(size: 12))
-                        .foregroundStyle(Color(red: 0.85, green: 0.25, blue: 0.22))
+                        .foregroundStyle(wifiTone((0.72, 0.16, 0.13), (1.0, 0.45, 0.40)))
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.bottom, 6)
                 }
