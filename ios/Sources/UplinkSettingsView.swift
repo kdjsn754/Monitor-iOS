@@ -1,60 +1,42 @@
 import SwiftUI
 
-/// 上网（二级页，v2.9.4 整页重做）。
+/// 上网（二级页）。
 ///
 /// **入口**：网络页拓扑图最上面那个出口节点。
 ///
-/// ## 为什么不用 `Form` 了（v2.9.4）
+/// ## 这一版（v3.3.12）为什么又重做
 ///
-/// 老版本是 `Form` + 五个 Section：第一张卡十行「标签—值」堆成一面墙，读到第五行
-/// 就不知道自己在看什么；最后一行「MAC 地址」被底部那条浮着的玻璃底栏压掉一半
-/// （`Form` 不会替那颗悬浮底栏留白）；「保存」在以太网 / 蜂窝页签里也是灰着摆在那儿。
-/// 用户 2026-11-15 的截图 + 原话「这个上网页里面 bug 太多了整个页面全部重新设计重做」。
+/// 用户 2026-11-25 的反馈是两件事：
+/// 1. 「很多时候修改不起作用」——这不是界面问题。固件里 `repeater reload`
+///    只处理 `@main` 那一组（`lock_band` / `smart_reconnect` / `disabled`），
+///    `@network` 里的 `disguise` / `auto_portal` / `key` / `bssid` 必须走
+///    `ubus call repeater connect`。老版把所有项一起 `uci set` 再 `reload`，
+///    于是「启用伪装」「公共热点认证模式」写进去了、运行态没变（见
+///    `AppModel.applyRepeaterOptions` / `applyRepeaterNetwork`）。
+/// 2. 「操作步骤也重新设计」——老版一屏里既有状态、又有 SSID/密码输入框、
+///    又有六个开关，右上角一个「保存」把这些全提交；点扫描结果只是把值填回
+///    上面的表单，用户还得往上滚、再点保存。
 ///
-/// 现在的结构（自上而下，每一块只回答一个问题）：
+/// 现在按「看 → 换 → 调」三步拆开：
 ///
-/// | 区块 | 回答的问题 |
+/// | 位置 | 干什么 |
 /// | --- | --- |
-/// | 状态卡 | **现在**怎么上网：走哪条线、通没通、IP / 网关 / 信号 / 时长 / 流量 |
-/// | 方式条 | 有哪几种方式、现在在看谁的配置、哪种在**用** |
-/// | 面板 | 这种方式的细节和它自己的操作 |
+/// | 状态卡 | 现在走哪条线、通没通、IP / 信号 / 时长 |
+/// | 方式条 | 中继 / 以太网 / 蜂窝，只切换看谁 |
+/// | 当前网络 | 连的是哪个 AP；「重新连接」「忽略此网络」 |
+/// | 其他网络 | 已保存的（点一下就切）+ 扫描到的（点一下输密码就加入） |
+/// | 中继设置 › | 所有参数在这一页（`RepeaterOptionsView`），一次保存分两条通道 |
 ///
-/// **v2.9.5 精简**（用户 2026-11-15：「上网页面太杂乱了」）。v2.9.4 虽然把 `Form`
-/// 换成了卡片，但一口气摆了 6 张卡，而且几乎每张卡都拖着一行灰色说明——
-/// 恰恰踩了用户 2026-10-31 定的规矩「页面上不要一行行说明性小字」。
-/// 这次：状态卡与网络信息卡并成一张（两者本来就在说同一件事，IP/协议各写一遍）；
-/// 三块「连接方式」压成一行方式条（标题 + 「点开是看配置，不是切换」那行提示删了）；
-/// 说明性小字全部删除；已保存网络与周边扫描合成一张「其他网络」。
-///
-/// 关键的一条：**「在看哪种方式」和「现在用哪种方式」是两件事**。
-/// 以前页签切换时会顺手把当前连接方式也改掉（`seed()` 里），所以「点开以太网看看」
-/// 就会变成「切到以太网」；现在页签只切面板，真切换要点面板里那颗带确认的按钮，
-/// 在用哪一种用方式条上的绿点 + 面板标题右侧的状态字说明。
-///
-/// 数据只走官方通道（见 `开发交接.md` 3.0）：配置 `uci show repeater`、
-/// 状态 `ubus call repeater status`、周边 `ubus call repeater surveys`（按需）、
-/// 蜂窝 `ubus call cellular.modem status`。**不碰 LuCI 那一套。**
+/// 数据只走官方通道：配置 `uci show repeater`、状态 `ubus call repeater status`、
+/// 周边 `ubus call repeater surveys`、写入 `ubus call repeater connect` /
+/// `uci + reload`（各自管各自那半边，见 `AppModel` 里那两个方法）。
 struct UplinkSettingsView: View {
     @Environment(AppModel.self) private var model: AppModel
 
     /// 当前在看哪种上网方式的配置。**只是切换看的面板，不动路由器。**
     @State private var mode: UplinkMode = .repeater
-    /// 表单已经按采集结果填过一次，之后不再自动回填（刷新会把用户刚敲的字冲掉）。
+    /// 第一次进来落在「现在真在用的那种方式」上，之后不再跟着采集跳。
     @State private var seeded = false
-
-    // ---- 上级网络（可写）----
-    @State private var ssid = ""
-    @State private var key = ""
-    @State private var bssid = ""
-    @State private var disguise = false
-    @State private var autoPortal = false
-    @State private var enabled = true
-    /// 0 不切换 / 1 自动切换 / 2 仅没网自动切换
-    @State private var switchMode = 1
-    /// 频段选择，空 = 自动
-    @State private var lockBand = ""
-    /// 密码要不要显示明文。
-    @State private var showKey = false
 
     // ---- 周边 Wi-Fi ----
     @State private var surveys: [RepeaterSurvey] = []
@@ -66,6 +48,12 @@ struct UplinkSettingsView: View {
     @State private var pendingMode: UplinkMode?
     /// 断开热点共享的确认弹窗（v3.2.2）
     @State private var pendingTetherOff = false
+    /// 要忽略（删除）的已保存网络
+    @State private var pendingForget: RepeaterSavedNetwork?
+    /// 点了一条没存过的网络：弹这一层输密码
+    @State private var pendingJoin: RepeaterSurvey?
+    @State private var joinKey = ""
+    @State private var joinReveal = false
 
     private var info: NetworkInfo { model.network }
     private var rep: RepeaterInfo { info.repeater }
@@ -83,7 +71,7 @@ struct UplinkSettingsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 12) {
+            VStack(spacing: UI.cardSpacing) {
                 statusCard
                 modeBar
                 switch mode {
@@ -93,43 +81,31 @@ struct UplinkSettingsView: View {
                 }
                 if let errorText { errorCard(errorText) }
             }
-            .padding(.horizontal, 16)
+            .padding(.horizontal, UI.pagePadding)
             .padding(.top, 12)
-            // 底栏是浮在内容上的玻璃条，不是不透明容器：不自己留这一截，
-            // 最后一行就会被它盖住（v2.9.3 之前的截图就是这样）。
+            // 底栏是浮在内容上的玻璃条：不自己留这一截，最后一行会被它盖住。
             .padding(.bottom, 44)
         }
         .scrollBounceBehavior(.basedOnSize)
         .themedScrollBackground()
-        // 按钮文字一律主色，只有开关是蓝的（`ButtonStyles.swift` 的四类）。
         .primaryButtons()
         .navigationTitle("上网")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                // 只在「中继」面板 + 真有改动时才是可点的保存。
-                // 以前不分页签、不看改动，永远是颗灰按钮摆在右上角。
-                if busy {
-                    ProgressView().controlSize(.small)
-                } else if mode == .repeater, dirty {
-                    Button("保存") { Task { await save() } }
-                        .fontWeight(.semibold)
-                        .navBarTint()
-                }
+                if busy { ProgressView().controlSize(.small) }
             }
         }
         .onAppear(perform: seed)
-        // 两个确认框都自绘（v3.2.4）。系统的 `confirmationDialog` 在 iOS 26 会被锚到
-        // 页面上方，看着像贴歪的气泡、底下那行按钮还露在外面——设置页的「断开并清除密码」
-        // v2.4.18 就是这么改的，`Glass.swift` 里那条「任何页面都不用系统 alert /
-        // confirmationDialog」没有例外，这页以前漏了。自绘之后位置永远在这一屏正中。
+        // 所有确认框都自绘（v3.2.4）。系统的 `confirmationDialog` 在 iOS 26 会被锚到
+        // 页面上方，看着像贴歪的气泡、底下那行按钮还露在外面——`Glass.swift` 里
+        // 那条「任何页面都不用系统 alert / confirmationDialog」没有例外。
         .overlay {
             if let target = pendingMode {
                 SheetOverlay(onDismiss: { pendingMode = nil }) {
                     SheetOverlayCard {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("切换上网方式")
-                                .font(.headline)
+                            Text("切换上网方式").font(.headline)
                             Text(target == .repeater
                                  ? "中继会重新连接上游网络，断开十几秒。"
                                  : "有线口没插网线时切过去，路由器就没有网络了。")
@@ -137,7 +113,6 @@ struct UplinkSettingsView: View {
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
-
                         HStack(spacing: 10) {
                             SheetOverlayButton(title: "取消") { pendingMode = nil }
                             SheetOverlayButton(title: target == .repeater ? "切到中继" : "切到以太网",
@@ -153,18 +128,76 @@ struct UplinkSettingsView: View {
                 SheetOverlay(onDismiss: { pendingTetherOff = false }) {
                     SheetOverlayCard {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("断开热点共享")
-                                .font(.headline)
+                            Text("断开热点共享").font(.headline)
                             Text("断开后手机的网络不再分给路由器；数据线不用拔，随时能再连。")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
-
                         HStack(spacing: 10) {
                             SheetOverlayButton(title: "取消") { pendingTetherOff = false }
                             SheetOverlayButton(title: "断开", tint: .red) {
                                 Task { await disconnectTether() }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let victim = pendingForget {
+                SheetOverlay(onDismiss: { pendingForget = nil }) {
+                    SheetOverlayCard {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("忽略此网络").font(.headline)
+                            Text("路由器会忘掉「\(victim.ssid)」的密码，之后要重新输入。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        HStack(spacing: 10) {
+                            SheetOverlayButton(title: "取消") { pendingForget = nil }
+                            SheetOverlayButton(title: "忽略", tint: .red) {
+                                Task { await forget(victim) }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let target = pendingJoin {
+                SheetOverlay(onDismiss: { pendingJoin = nil }) {
+                    SheetOverlayCard {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("加入「\(target.ssid)」").font(.headline)
+                            HStack(spacing: 8) {
+                                Group {
+                                    if joinReveal {
+                                        TextField("密码", text: $joinKey)
+                                    } else {
+                                        SecureField("密码", text: $joinKey)
+                                    }
+                                }
+                                .font(.system(size: 15))
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 10)
+                                .background {
+                                    AdaptiveFill(shape: RoundedRectangle(cornerRadius: 10, style: .continuous),
+                                                 color: Color(.tertiarySystemFill))
+                                }
+                                Button { joinReveal.toggle() } label: {
+                                    Image(systemName: joinReveal ? "eye.slash" : "eye")
+                                        .font(.system(size: 13))
+                                        .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        HStack(spacing: 10) {
+                            SheetOverlayButton(title: "取消") { pendingJoin = nil }
+                            SheetOverlayButton(title: "连接", tint: .blue) {
+                                Task { await join(target) }
                             }
                         }
                     }
@@ -175,12 +208,7 @@ struct UplinkSettingsView: View {
 
     // MARK: - 状态卡
 
-    /// 「现在是怎么上网的」，一卡读完：走哪条线、通没通、地址、信号、时长、流量。
-    ///
-    /// **v2.9.5 把原来的「状态卡 + 网络信息卡」并成一张**。两张卡都在说同一件事：
-    /// 「方式」「协议」各写一遍，会话数和累计流量另占一卡的三行——这正是用户
-    /// 2026-11-15 说的「上网页面太杂乱」。现在会话和上下行收进副标题下面那一行小字，
-    /// 主网格只留会变的（地址、网关、信号、时长、DNS）。
+    /// 「现在是怎么上网的」，一卡读完：走哪条线、通没通、地址、信号、时长。
     private var statusCard: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 12) {
@@ -195,10 +223,8 @@ struct UplinkSettingsView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 7) {
                         Text(statusTitle)
-                            .font(.system(size: 17, weight: .semibold))
-                        if info.uplinkOK {
-                            pill(stateShort, stateColor)
-                        }
+                            .font(.system(size: UI.titleSize, weight: .semibold))
+                        if info.uplinkOK { StatusTag(text: stateShort, color: stateColor) }
                     }
                     Text(statusSubline)
                         .font(.system(size: 12.5))
@@ -210,7 +236,6 @@ struct UplinkSettingsView: View {
             }
 
             if info.uplinkOK {
-                // 接口 · 会话 · 累计上下行：三个数字合成一行小字，不再单独占一张卡。
                 Text(trafficLine)
                     .font(.system(size: 11.5))
                     .foregroundStyle(.tertiary)
@@ -219,20 +244,19 @@ struct UplinkSettingsView: View {
                     .minimumScaleFactor(0.85)
                     .padding(.top, 6)
 
-                divider.padding(.top, 10)
+                CardRule().padding(.top, 10)
                 metricRow(("IP 地址", emptyDash(info.uplinkIP), nil),
                           ("网关", emptyDash(info.uplinkGateway), nil))
-                divider
+                CardRule()
                 metricRow(("信号", signalText, nil),
                           ("在线时长", info.uplinkUptime > 0 ? durationLabel(info.uplinkUptime) : "—", nil))
-                divider
+                CardRule()
                 metricRow(("DNS", emptyDash(info.uplinkDNS.prefix(2).joined(separator: "  ")), nil))
             }
         }
         .cardSurface()
     }
 
-    /// 出口那条线的一行小字：接口、会话数、累计流量（有哪个说哪个）。
     private var trafficLine: String {
         var parts: [String] = []
         if !info.uplinkInterface.isEmpty { parts.append(info.uplinkInterface) }
@@ -265,14 +289,12 @@ struct UplinkSettingsView: View {
             if !info.wanCable { parts[0] = "未插网线" }
             return parts.joined(separator: " · ")
         case .tethering:
-            // 手机型号 + 网卡名：`Xiaomi 14 · usb0 · DHCP`
             var parts: [String] = []
             if let usb = rep.usbUplink, !usb.label.isEmpty { parts.append(usb.label) }
             if let usb = rep.usbUplink, !usb.name.isEmpty { parts.append(usb.name) }
             parts.append(info.protoLabel)
             return parts.joined(separator: " · ")
         case .none:
-            // 说明性小字一律不写（用户 2026-10-31 的规矩），「未联网」由标题给出。
             return ""
         }
     }
@@ -286,41 +308,21 @@ struct UplinkSettingsView: View {
         }
     }
 
-    private var stateColor: Color {
-        info.uplinkOK ? NetPalette.wan : Color.secondary
-    }
+    private var stateColor: Color { info.uplinkOK ? NetPalette.wan : Color.secondary }
 
-    /// 状态卡右侧那颗小胶囊里的话。
     private var stateShort: String {
         switch info.uplink {
         case .repeater: return rep.connected ? "已连接" : "已启用"
-        case .wired: return "已连接"
-        case .tethering: return "已连接"
+        case .wired, .tethering: return "已连接"
         case .none: return "未联网"
         }
     }
 
-    /// MAC 模式的几档 + 实际地址。老版是「随机 · FA:59:…」一行，被尾巴截断。
-    private var macLabel: String {
-        let modeText: String
-        switch rep.macMode {
-        case "random": modeText = "随机"
-        case "clone": modeText = "克隆"
-        default: modeText = "出厂"
-        }
-        return rep.macAddress.isEmpty ? modeText : "\(modeText) · \(rep.macAddress)"
-    }
-
     /// 「其他网络」里要列的那些：已保存、但**现在没在用**的。
-    ///
-    /// 正在用的那条不列：它的名字已经写在上面「上级网络」卡的名称框里了，
-    /// 列表里再出现一次，同一屏就有两个「@Ruijie-s0051」，这才是「杂乱」的来源。
     private var otherSaved: [RepeaterSavedNetwork] {
         rep.saved.filter { !$0.selected }
     }
 
-    /// 「信号」那一格：`-58 dBm · 强`。v3.0.8 起不再上色，强弱用文字说
-    /// （与网络页上网卡同一套写法、同一组阈值，见 `NetworkView.signalGrade`）。
     private var signalText: String {
         guard info.upstreamSignal != 0 else { return "—" }
         return "\(info.upstreamSignal) dBm · \(signalGrade(info.upstreamSignal))"
@@ -334,13 +336,6 @@ struct UplinkSettingsView: View {
 
     // MARK: - 方式条
 
-    /// 一行三格：中继 / 以太网 / 蜂窝。点一下只换下面的面板，**不动路由器**；
-    /// 正在用的那一格名字后面跟一个绿点。
-    ///
-    /// **v2.9.5 从三块大瓦片压成一条**。瓦片要 80pt 高（图标 / 名称 / 状态各一行），
-    /// 三块并排还各带一句状态字，是这一页最占地方的东西；顶上还有一行
-    /// 「点开是看配置，不是切换」的说明——既是说明性小字，又是在替设计解释设计。
-    /// 现在高度不到原来一半，「在用哪条线」用绿点 + 各面板标题右侧的状态字表达。
     private var modeBar: some View {
         HStack(spacing: 2) {
             ForEach(UplinkMode.allCases) { item in
@@ -372,9 +367,7 @@ struct UplinkSettingsView: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                 if activeMode == item {
-                    Circle()
-                        .fill(Color.green)
-                        .frame(width: 6, height: 6)
+                    Circle().fill(Color.green).frame(width: 6, height: 6)
                 }
             }
             .foregroundStyle(selected ? NetPalette.wan : Color.secondary)
@@ -389,82 +382,90 @@ struct UplinkSettingsView: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: - 中继面板
+    // MARK: - 中继
 
     @ViewBuilder
     private var repeaterPanel: some View {
-        card("上级网络", trailing: dirty ? "未保存" : (activeMode == .repeater ? "使用中" : "")) {
-            fieldBlock("名称", text: $ssid, placeholder: "上级 Wi-Fi 名称")
-            fieldBlock("密码", text: $key, placeholder: "留空表示不改", secure: true)
-            menuRow("锁定 BSSID", selection: $bssid) {
-                Text("自动").tag("")
-                ForEach(bssidChoices) { item in
-                    Text("\(item.bssid) · \(item.signal) dBm").tag(item.bssid)
-                }
-            }
-            if dirty {
-                divider
-                Button {
-                    reseed()
-                } label: {
-                    HStack(spacing: 7) {
-                        Image(systemName: "arrow.uturn.backward")
-                            .font(.system(size: 12, weight: .medium))
-                        Text("撤销修改")
-                            .font(.system(size: 14))
-                        Spacer(minLength: 8)
-                    }
-                    .padding(.vertical, 11)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
+        if !rep.enabled {
+            disabledCard
+        } else {
+            currentNetworkCard
         }
-
-        card("中继设置") {
-            switchRow("启用中继", isOn: $enabled)
-            divider
-            switchRow("启用伪装", isOn: $disguise)
-            divider
-            switchRow("公共热点认证模式", isOn: $autoPortal)
-            divider
-            menuRow("切换模式", selection: $switchMode) {
-                Text("不切换").tag(0)
-                Text("自动切换").tag(1)
-                Text("仅没网自动切换").tag(2)
-            }
-            divider
-            menuRow("频段选择", selection: $lockBand) {
-                ForEach(rep.bandChoices) { item in
-                    Text(item.label).tag(item.value)
-                }
-            }
-            divider
-            // MAC 占满一整行：老版这条挤在「标签—值」里被截成「随机 · FA:59:BE:E0:01:B1…」
-            metricRow(("MAC 地址", macLabel, nil))
-            if activeMode != .repeater {
-                divider
-                modeSwitchButton("切换到中继上网", enabled: true) { pendingMode = .repeater }
-            }
-        }
-
         otherNetworksCard
+        optionsEntry
     }
 
-    /// 别的网络：已保存的 + 周边扫到的，合成一张。
-    ///
-    /// **v2.9.5 并卡**：两张卡说的是同一件事「除了当前这条上级网络以外还有什么」，
-    /// 各占一块白底 + 各带一个标题，页面上就多出两块方格（用户：「上网页面太杂乱」）。
-    /// 现在一张卡两段、中间一根分隔线；周边结果点「扫描」才展开，不扫就只有一行。
-    ///
-    /// **「使用中」那一行不再是按钮**。v2.9.4 里点它有反应：会去 `uci set selected='1'`
-    /// 再 `repeater reload`，链路一断、`selected` 读回来是空的，于是页面底下
-    /// 留一条红字「没能切到这条网络」——用户 2026-11-15 的截图就是这个。
-    /// 已经在用的网络没有「切」这个动作，这一行只负责显示。
+    /// 中继没启用时：不摆一堆灰着的参数，只给一颗「开启」。
+    private var disabledCard: some View {
+        CardPanel("中继未启用", icon: "wifi.slash") {
+            Text("开启后会去连已保存的上级网络。")
+                .font(UI.row())
+                .foregroundStyle(.secondary)
+                .padding(.top, 2)
+            primaryButton("开启中继", icon: "power") {
+                Task { await enableRepeater() }
+            }
+            .padding(.top, 12)
+            .padding(.bottom, 4)
+        }
+    }
+
+    /// 当前连的这个 AP：结论在上，动作在下。
+    private var currentNetworkCard: some View {
+        CardPanel("当前网络", icon: "wifi",
+                  trailing: rep.connected ? "已连接" : "未连接") {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(rep.ssid.isEmpty ? "—" : rep.ssid)
+                    .font(UI.title())
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 8)
+                if rep.connected, info.upstreamSignal != 0 {
+                    Text("\(info.upstreamSignal) dBm")
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+            }
+            .padding(.top, 2)
+
+            CardRule().padding(.top, 10)
+            HStack(alignment: .top, spacing: 12) {
+                MetricCell(label: "频段", value: rep.band.isEmpty ? "—" : bandLabel(rep.band))
+                MetricCell(label: "信道", value: rep.channel > 0 ? "CH \(rep.channel)" : "—")
+                MetricCell(label: "BSSID",
+                           value: rep.currentBSSID.isEmpty ? (rep.bssid.isEmpty ? "—" : rep.bssid)
+                                                           : rep.currentBSSID)
+            }
+            .padding(.vertical, UI.rowPadding)
+
+            CardRule()
+            Button {
+                Task { await reconnect() }
+            } label: {
+                actionRow("重新连接", icon: "arrow.clockwise")
+            }
+            .buttonStyle(.plain)
+            .disabled(busy)
+
+            CardRule()
+            Button {
+                pendingForget = RepeaterSavedNetwork(ssid: rep.ssid, bssid: rep.bssid,
+                                                     key: rep.key, selected: true)
+            } label: {
+                actionRow("忽略此网络", icon: "trash", tint: Color(red: 0.85, green: 0.25, blue: 0.22))
+            }
+            .buttonStyle(.plain)
+            .disabled(busy || rep.ssid.isEmpty)
+        }
+    }
+
+    /// 已保存的 + 扫到的，合成一张。
     private var otherNetworksCard: some View {
-        card("其他网络", trailing: otherSaved.isEmpty ? "" : "\(otherSaved.count) 个已保存") {
+        CardPanel("其他网络", icon: "dot.radiowaves.left.and.right",
+                  trailing: otherSaved.isEmpty ? "" : "\(otherSaved.count) 个已保存") {
             ForEach(Array(otherSaved.enumerated()), id: \.element.id) { index, item in
-                if index > 0 { divider }
+                if index > 0 { CardRule() }
                 Button {
                     Task { await switchTo(item) }
                 } label: {
@@ -473,13 +474,31 @@ struct UplinkSettingsView: View {
                 .buttonStyle(.plain)
                 .disabled(busy)
             }
-            if !otherSaved.isEmpty { divider }
-            scanRow
+            if !otherSaved.isEmpty { CardRule() }
+            Button {
+                Task { await scan() }
+            } label: {
+                HStack(spacing: 9) {
+                    if scanning {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "dot.radiowaves.left.and.right")
+                            .font(.system(size: 13, weight: .medium))
+                    }
+                    Text(scanning ? "扫描中…" : (surveys.isEmpty ? "扫描周边 Wi-Fi" : "重新扫描"))
+                        .font(UI.row())
+                    Spacer(minLength: 8)
+                }
+                .padding(.vertical, UI.rowPadding)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(scanning || busy)
+
             ForEach(surveys) { item in
-                divider
+                CardRule()
                 Button {
-                    // 点一条：**直接连它**（v3.1.11，见 `connect(to:)`）。
-                    Task { await connect(to: item) }
+                    Task { await pick(item) }
                 } label: {
                     surveyRow(item)
                 }
@@ -489,62 +508,69 @@ struct UplinkSettingsView: View {
         }
     }
 
-    /// 一行已保存的上级网络。「使用中」那条只显示，不响应点击。
-    private func savedRow(_ item: RepeaterSavedNetwork) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: item.selected ? "checkmark.circle.fill" : "wifi")
-                .font(.system(size: 14))
-                .foregroundStyle(item.selected ? NetPalette.wan : Color.secondary)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(item.ssid.isEmpty ? "—" : item.ssid)
-                    .font(.system(size: 15))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                Text(item.bssid.isEmpty ? "—" : item.bssid)
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
-            Spacer(minLength: 8)
-            if item.selected {
-                Text("使用中")
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(.secondary)
-            } else {
-                HStack(spacing: 3) {
-                    Text("切换")
-                        .font(.system(size: 13))
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.tertiary)
-                }
-                .foregroundStyle(.primary)
-            }
-        }
-        .padding(.vertical, 11)
-        .contentShape(Rectangle())
-    }
-
-    private var scanRow: some View {
-        Button {
-            Task { await scan() }
+    /// 入口：所有参数在这一页。
+    private var optionsEntry: some View {
+        NavigationLink {
+            RepeaterOptionsView()
         } label: {
-            HStack(spacing: 9) {
-                if scanning {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Image(systemName: "dot.radiowaves.left.and.right")
-                        .font(.system(size: 13, weight: .medium))
-                }
-                Text(scanning ? "扫描中…" : (surveys.isEmpty ? "扫描周边 Wi-Fi" : "重新扫描"))
-                    .font(.system(size: 15))
+            HStack(spacing: 10) {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.blue)
+                    .frame(width: 18, alignment: .leading)
+                Text("中继设置")
+                    .font(UI.cardTitle())
+                    .foregroundStyle(.primary)
                 Spacer(minLength: 8)
+                Text(optionsSummary)
+                    .font(UI.label())
+                    .foregroundStyle(.secondary)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.tertiary)
             }
-            .padding(.vertical, 11)
+            .cardSurface()
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(scanning)
+    }
+
+    /// 入口右侧那一句：把这一页里最关键的三个结论摊在外面，不用点进去也知道现状。
+    private var optionsSummary: String {
+        var parts: [String] = []
+        parts.append(rep.switchMode == 0 ? "不切换" : (rep.switchMode == 2 ? "仅没网切换" : "自动切换"))
+        parts.append(rep.lockBand.isEmpty ? "频段自动" : bandLabel(rep.lockBand))
+        if rep.disguise { parts.append("伪装") }
+        return parts.joined(separator: " · ")
+    }
+
+    private func savedRow(_ item: RepeaterSavedNetwork) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "wifi")
+                .font(.system(size: 14))
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.ssid.isEmpty ? "—" : item.ssid)
+                    .font(UI.row())
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                if !item.bssid.isEmpty {
+                    Text(item.bssid)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+            }
+            Spacer(minLength: 8)
+            Text("切换")
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, UI.rowPadding)
+        .contentShape(Rectangle())
     }
 
     private func surveyRow(_ item: RepeaterSurvey) -> some View {
@@ -555,7 +581,7 @@ struct UplinkSettingsView: View {
                 .frame(width: 16)
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.ssid)
-                    .font(.system(size: 15))
+                    .font(UI.row())
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                 Text("\(item.bandLabel) · CH \(item.channel)")
@@ -568,7 +594,7 @@ struct UplinkSettingsView: View {
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
         }
-        .padding(.vertical, 10)
+        .padding(.vertical, UI.rowPadding)
         .contentShape(Rectangle())
     }
 
@@ -576,24 +602,30 @@ struct UplinkSettingsView: View {
 
     @ViewBuilder
     private var wiredPanel: some View {
-        card("以太网", trailing: wiredStateLabel) {
-            metricRow(("协商速率", info.bestPortLabel, nil),
-                      ("协议", info.uplink == .wired ? info.protoLabel : "—", nil))
-            divider
-            metricRow(("端口", wanPortText, nil),
-                      ("地址", info.uplink == .wired ? emptyDash(info.uplinkIP) : "—", nil))
+        CardPanel("以太网", icon: "cable.connector", trailing: wiredStateLabel) {
+            HStack(alignment: .top, spacing: 12) {
+                MetricCell(label: "协商速率", value: info.bestPortLabel)
+                MetricCell(label: "协议", value: info.uplink == .wired ? info.protoLabel : "—")
+            }
+            .padding(.vertical, UI.rowPadding)
+            CardRule()
+            HStack(alignment: .top, spacing: 12) {
+                MetricCell(label: "端口", value: wanPortText)
+                MetricCell(label: "地址", value: info.uplink == .wired ? emptyDash(info.uplinkIP) : "—")
+            }
+            .padding(.vertical, UI.rowPadding)
 
             if info.uplink != .wired {
-                divider
-                modeSwitchButton("切换到以太网上网", enabled: info.wanCable) { pendingMode = .wired }
+                primaryButton("切换到以太网上网", icon: "arrow.right", enabled: info.wanCable) {
+                    pendingMode = .wired
+                }
+                .padding(.top, 4)
+                .padding(.bottom, 4)
             }
         }
     }
 
     /// 以太网出口的三档状态（用户 2026-11-15 的截图：WAN 口空着却写「已连接」）。
-    /// - 默认路由真走有线、且拿到了地址 → 已连接；
-    /// - WAN 口有链路、但没在用（走的还是中继）→ 已插网线，未联网；
-    /// - WAN 口连链路都没有 → 未插网线。
     private var wiredStateLabel: String {
         if info.uplink == .wired, !info.uplinkIP.isEmpty { return "已连接" }
         return info.wanCable ? "已插网线，未联网" : "未插网线"
@@ -606,55 +638,48 @@ struct UplinkSettingsView: View {
 
     // MARK: - 蜂窝面板
 
-    /// 这一格管两条完全不同的通道，**以前只认后面那条**（2026-11-18 用户插着手机
-    /// 开了 USB 热点共享，界面照样写「没有检测到 USB Modem」）：
-    /// - **USB Modem**：插 SIM 卡的 4G/5G 棒，判据是 `cellular.modem` 的 `modems` 非空；
-    /// - **USB 热点共享**：手机用数据线把网络分给路由器，判据是内核里多出的一张
-    ///   挂在 USB 总线上的网卡（实机 `usb0`），型号从 sysfs 读（`Xiaomi 14`）。
-    /// 有设备不等于连着：手机没开共享、或路由器没 `ifup tethering` 时，网卡在、
-    /// 没载波也没 IP——这时说的是「未连接」，不是「未检测到」。
-    ///
-    /// **v3.2.2 起这张卡能动手**：认出设备之后给一颗「连接热点共享」（写
-    /// `network.tethering` + 防火墙 wan 区，见 `AppModel.connectTethering`），
-    /// 连着的时候给「断开」。这跟网页端「热点共享」那页是同一件事、同一份配置。
     private var cellularPanel: some View {
-        card("蜂窝网络", trailing: cellularTrailing) {
+        CardPanel("蜂窝网络", icon: "antenna.radiowaves.left.and.right",
+                  trailing: cellularTrailing) {
             HStack(spacing: 10) {
-                Image(systemName: rep.modemPresent ? "antenna.radiowaves.left.and.right"
-                                                   : "personalhotspot")
+                Image(systemName: rep.modemPresent ? "antenna.radiowaves.left.and.right" : "personalhotspot")
                     .font(.system(size: 15))
                     .foregroundStyle(.secondary)
                 Text(cellularTitle)
-                    .font(.system(size: 15))
+                    .font(UI.row())
                     .lineLimit(1)
                     .minimumScaleFactor(0.85)
                 Spacer(minLength: 0)
             }
             .padding(.vertical, 12)
 
-            // 只有「手机热点共享」这条路能在 App 里接/断（v3.2.2）。USB Modem 走的是
-            // `wwan`（`cellular.modem`），插上就在，没有「连接」这个动作。
             if let usb = rep.usbUplink, !rep.modemPresent {
-                divider
-                metricRow(("接口", usb.name, nil),
-                          ("地址", usb.ip.isEmpty ? "—" : usb.ip, nil))
-                divider
+                CardRule()
+                HStack(alignment: .top, spacing: 12) {
+                    MetricCell(label: "接口", value: usb.name)
+                    MetricCell(label: "地址", value: usb.ip.isEmpty ? "—" : usb.ip)
+                }
+                .padding(.vertical, UI.rowPadding)
+                CardRule()
                 if tetherOn {
-                    redRow("断开热点共享") { pendingTetherOff = true }
+                    Button {
+                        pendingTetherOff = true
+                    } label: {
+                        actionRow("断开热点共享", icon: "xmark.circle",
+                                  tint: Color(red: 0.85, green: 0.25, blue: 0.22))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(busy)
                 } else {
-                    modeSwitchButton("连接热点共享", enabled: true) {
+                    primaryButton("连接热点共享", icon: "arrow.right") {
                         Task { await connectTether(usb) }
                     }
+                    .padding(.vertical, 10)
                 }
             }
         }
     }
 
-    /// 热点共享现在是「通着」还是「没通」。
-    ///
-    /// 两个判据任一成立就算通：网卡上有 IPv4（`UsbUplink.connected`），或者默认路由
-    /// 已经落在 `tethering` 上（`info.uplink == .tethering`）。前一个是常态
-    /// （metric 30 比中继的 20 大，它平时只拿地址、不当默认出口）。
     private var tetherOn: Bool {
         info.uplink == .tethering || (rep.usbUplink?.connected ?? false)
     }
@@ -668,110 +693,45 @@ struct UplinkSettingsView: View {
     private var cellularTitle: String {
         if rep.modemPresent { return "检测到 USB Modem" }
         guard let usb = rep.usbUplink else { return "没有检测到 USB Modem 或手机热点" }
-        // 地址不再写进标题（v3.2.2）：下面那行「地址」已经写着，一处就够。
         return usb.connected ? "\(usb.label)（手机热点）" : "检测到 \(usb.label)（手机热点）"
     }
 
-    // MARK: - 表单是否改过
-
-    /// 和路由器上的值比：有任何一项不同就算「未保存」。
-    /// 以前不看这个，右上角永远是颗可点的「保存」，点一次白跑一趟 SSH。
-    private var dirty: Bool {
-        ssid != rep.ssid || key != rep.key || bssid != rep.bssid
-            || disguise != rep.disguise || autoPortal != rep.autoPortal
-            || enabled != rep.enabled || switchMode != rep.switchMode
-            || lockBand != rep.lockBand
-    }
-
-    // MARK: - 小工具：卡片 / 行
-
-    private func card<Content: View>(_ title: String,
-                                     trailing: String = "",
-                                     @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(title)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 8)
-                if !trailing.isEmpty {
-                    Text(trailing)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
-            }
-            .padding(.bottom, 6)
-            content()
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 14)
-        .padding(.bottom, 6)
-        // 跟设置页的「卡片透明度」滑块（v2.9.6，和网络页同一套 `AdaptiveFill`）。
-        .background {
-            AdaptiveFill(shape: RoundedRectangle(cornerRadius: 18, style: .continuous),
-                         color: Color(.secondarySystemGroupedBackground))
-        }
-        .overlay {
-            AdaptiveBorder(shape: RoundedRectangle(cornerRadius: 18, style: .continuous),
-                           width: 0.6, strength: 0.45)
-        }
-    }
-
-    private var divider: some View {
-        Rectangle()
-            .fill(Color(.separator).opacity(0.45))
-            .frame(height: 0.5)
-    }
+    // MARK: - 小工具
 
     private func metricRow(_ left: (String, String, Color?),
                            _ right: (String, String, Color?)? = nil) -> some View {
         HStack(alignment: .top, spacing: 12) {
-            metricCell(left.0, left.1, left.2)
+            MetricCell(label: left.0, value: left.1, valueColor: left.2 ?? .primary)
             if let right {
-                metricCell(right.0, right.1, right.2)
+                MetricCell(label: right.0, value: right.1, valueColor: right.2 ?? .primary)
             }
         }
-        .padding(.vertical, 9)
+        .padding(.vertical, UI.rowPadding)
     }
 
-    private func metricCell(_ label: String, _ value: String, _ color: Color?) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(label)
-                .font(.system(size: 11.5))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            Text(value)
-                .font(.system(size: 15))
-                .foregroundStyle(color ?? Color.primary)
-                .monospacedDigit()
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .minimumScaleFactor(0.8)
+    /// 一行普通动作（蓝字图标 + 文字 + 右侧箭头）。
+    private func actionRow(_ title: String, icon: String, tint: Color = .primary) -> some View {
+        HStack(spacing: 9) {
+            Image(systemName: icon)
+                .font(.system(size: 13, weight: .medium))
+                .frame(width: 18, alignment: .leading)
+            Text(title).font(UI.row())
+            Spacer(minLength: 8)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func pill(_ text: String, _ color: Color) -> some View {
-        Text(text)
-            .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(color)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 2.5)
-            .background { Capsule().fill(color.opacity(0.12)) }
+        .foregroundStyle(tint)
+        .padding(.vertical, UI.rowPadding)
+        .contentShape(Rectangle())
     }
 
     /// 主操作按钮：蓝底白字（`ButtonStyles.swift` 的第④类）。
-    /// 切链路是**真会断网**的动作，所以不做成文字按钮，也不跟普通行混在一起。
-    private func modeSwitchButton(_ title: String, enabled: Bool,
-                                  action: @escaping () -> Void) -> some View {
+    private func primaryButton(_ title: String, icon: String,
+                               enabled: Bool = true,
+                               action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack {
-                Text(title)
-                    .font(.system(size: 15, weight: .medium))
+                Text(title).font(.system(size: 15, weight: .medium))
                 Spacer(minLength: 8)
-                Image(systemName: "arrow.right")
-                    .font(.system(size: 12, weight: .semibold))
+                Image(systemName: icon).font(.system(size: 12, weight: .semibold))
             }
             .foregroundStyle(.white)
             .padding(.horizontal, 14)
@@ -784,93 +744,7 @@ struct UplinkSettingsView: View {
         }
         .buttonStyle(.plain)
         .disabled(!enabled || busy)
-        .padding(.vertical, 11)
     }
-
-    /// 反向动作行：红字 + 一行高（断开热点共享）。
-    ///
-    /// 用红字而不是蓝底按钮：蓝底是「去做一件事」（切换链路、连接），红字是
-    /// 「把现在这个停掉」。红值和设置页「断开并清除密码」、网络页「已拦截」同一个
-    /// （`0.85 / 0.25 / 0.22`），别新开一个红。
-    private func redRow(_ title: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 7) {
-                Image(systemName: "xmark.circle")
-                    .font(.system(size: 13, weight: .medium))
-                Text(title)
-                    .font(.system(size: 15))
-                Spacer(minLength: 8)
-            }
-            .foregroundStyle(Color(red: 0.85, green: 0.25, blue: 0.22))
-            .padding(.vertical, 11)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(busy)
-    }
-
-    /// 输入框：标签在上、框在下。右对齐的 `TextField` 在 iOS 上编辑长 SSID 时很难用。
-    private func fieldBlock(_ label: String, text: Binding<String>,
-                            placeholder: String, secure: Bool = false) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(label)
-                .font(.system(size: 11.5))
-                .foregroundStyle(.secondary)
-            HStack(spacing: 8) {
-                Group {
-                    if secure && !showKey {
-                        SecureField(placeholder, text: text)
-                    } else {
-                        TextField(placeholder, text: text)
-                    }
-                }
-                .font(.system(size: 15))
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                if secure {
-                    Button {
-                        showKey.toggle()
-                    } label: {
-                        Image(systemName: showKey ? "eye.slash" : "eye")
-                            .font(.system(size: 13))
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background {
-                AdaptiveFill(shape: RoundedRectangle(cornerRadius: 10, style: .continuous),
-                             color: Color(.tertiarySystemFill))
-            }
-        }
-        .padding(.vertical, 8)
-    }
-
-    private func switchRow(_ title: String, isOn: Binding<Bool>) -> some View {
-        Toggle(title, isOn: isOn)
-            .font(.system(size: 15))
-            .blueSwitch()
-            .padding(.vertical, 10)
-    }
-
-    private func menuRow<Value: Hashable, Content: View>(_ title: String,
-                                                         selection: Binding<Value>,
-                                                         @ViewBuilder content: () -> Content) -> some View {
-        HStack(spacing: 8) {
-            Text(title)
-                .font(.system(size: 15))
-            Spacer(minLength: 8)
-            Picker(title, selection: selection) { content() }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .tint(.primary)
-        }
-        .padding(.vertical, 4)
-    }
-
-    // MARK: - 文案小工具
 
     private func emptyDash(_ text: String) -> String { text.isEmpty ? "—" : text }
 
@@ -903,10 +777,7 @@ struct UplinkSettingsView: View {
                 .foregroundStyle(Color(red: 0.85, green: 0.25, blue: 0.22))
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
-            // 能关掉（v2.9.5）：以前报错只能靠下一次操作清掉，它就一直挂在页面最下面。
-            Button {
-                errorText = nil
-            } label: {
+            Button { errorText = nil } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(Color(red: 0.85, green: 0.25, blue: 0.22).opacity(0.7))
@@ -921,46 +792,13 @@ struct UplinkSettingsView: View {
         }
     }
 
-    /// 可选的 BSSID：周边同名网络 + 当前已锁的那一个
-    /// （已锁的那个不一定在这次扫描结果里，漏了就选不回来）。
-    private var bssidChoices: [RepeaterSurvey] {
-        var list = sameNameSurveys
-        if !bssid.isEmpty, !list.contains(where: { $0.bssid == bssid }) {
-            list.insert(RepeaterSurvey(ssid: ssid, bssid: bssid), at: 0)
-        }
-        return list
-    }
+    // MARK: - 读写
 
-    /// 周边网络里和当前上级网络同名的那些（锁 BSSID 只能在同名的 AP 里挑）。
-    private var sameNameSurveys: [RepeaterSurvey] {
-        surveys.filter { $0.ssid == ssid }
-    }
-
-    // MARK: - 读 / 写
-
-    /// 按采集结果填一次表单。之后刷新不再回填。
-    ///
-    /// **不再顺手改 `mode`**：v2.9.1 里 `if rep.connected { mode = .repeater }`，
-    /// 于是「点开以太网看看」在一轮采集回来后就自己跳回中继。页签只跟着用户的手走。
     private func seed() {
         guard !seeded else { return }
-        reseed()
         seeded = true
-        // 第一次进来，默认落在「现在真在用的那种方式」上。
+        // 第一次进来，默认落在「现在真在用的那种方式」上；之后页签只跟着手走。
         if let active = activeMode { mode = active }
-    }
-
-    /// 把表单恢复成路由器上的值。
-    private func reseed() {
-        ssid = rep.ssid
-        key = rep.key
-        bssid = rep.bssid
-        disguise = rep.disguise
-        autoPortal = rep.autoPortal
-        enabled = rep.enabled
-        switchMode = rep.switchMode
-        lockBand = rep.lockBand
-        errorText = nil
     }
 
     private func scan() async {
@@ -970,84 +808,125 @@ struct UplinkSettingsView: View {
         scanning = false
     }
 
-    private func save() async {
+    /// 点扫描到的一条：存过密码就直接连，没存过就弹输入框。
+    ///
+    /// 老版是「把值填进上面的表单，再自己滚上去点保存」——用户 2026-11-17
+    /// 说「点了不起作用」就是这个。现在点一下只有两种结果：连上了，或者弹出密码框。
+    private func pick(_ item: RepeaterSurvey) async {
+        if let saved = rep.saved.first(where: { $0.ssid == item.ssid && !$0.key.isEmpty }) {
+            await switchTo(saved, band: item.band)
+            return
+        }
+        joinKey = ""
+        joinReveal = false
+        pendingJoin = item
+    }
+
+    private func join(_ item: RepeaterSurvey) async {
+        pendingJoin = nil
         guard !busy else { return }
         busy = true
         errorText = nil
-        let problem = await model.saveRepeater(ssid: ssid, key: key, bssid: bssid,
-                                              disguise: disguise, autoPortal: autoPortal,
-                                              switchMode: switchMode, lockBand: lockBand,
-                                              enabled: enabled)
+        let problem = await model.applyRepeaterNetwork(ssid: item.ssid,
+                                                       key: joinKey,
+                                                       bssid: item.bssid,
+                                                       disguise: rep.disguise,
+                                                       autoPortal: rep.autoPortal,
+                                                       band: item.band.isEmpty ? nil : item.band)
         busy = false
+        surveys = []
         guard let problem else {
-            model.notice = Notice(kind: .ok, title: "已保存", detail: ssid)
+            model.notice = Notice(kind: .ok, title: "已连接",
+                                  detail: item.bandLabel.isEmpty ? item.ssid : "\(item.ssid) · \(item.bandLabel)")
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
             await model.manualRefresh()
             return
         }
         errorText = problem
     }
 
-    /// 切到另一条已保存的上级网络。
-    ///
-    /// **点「使用中」那条不要发命令**（v2.9.5）。它已经在用，`uci set selected='1'`
-    /// 是个空动作，但后面的 `repeater reload` 真会把链路断掉，等 4 秒回来
-    /// `selected` 读空 → 返回「没能切到这条网络」，页面底下挂一条红字。
-    /// 现在界面那一行本来就不是按钮（见 `otherNetworksCard`），这里再兜一层。
-    private func switchTo(_ item: RepeaterSavedNetwork) async {
-        guard !item.selected else { return }
+    private func switchTo(_ item: RepeaterSavedNetwork, band: String? = nil) async {
         guard !busy else { return }
         busy = true
         errorText = nil
-        let problem = await model.switchRepeaterNetwork(ssid: item.ssid, bssid: item.bssid)
+        let problem = await model.applyRepeaterNetwork(ssid: item.ssid,
+                                                       key: item.key,
+                                                       bssid: item.bssid,
+                                                       disguise: rep.disguise,
+                                                       autoPortal: rep.autoPortal,
+                                                       band: band)
         busy = false
         guard let problem else {
             model.notice = Notice(kind: .ok, title: "已切换", detail: item.ssid)
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
             await model.manualRefresh()
             return
         }
         errorText = problem
     }
 
-    /// 点「其他网络」里扫到的一条：**直接连它**（v3.1.11）。
-    ///
-    /// 以前只是把名称 / BSSID 填进上面的表单、什么都不说——表单在屏幕外，
-    /// 用户点完只看到列表收起来，于是就是「点了不起作用」（2026-11-17 20:18）。
-    ///
-    /// 现在分两种：
-    /// - 同名网络**已经存过**（说明本机留着密码）→ 立刻切过去。频段也要一起切：
-    ///   路由器上 `repeater.@main[0].lock_band` 是「只连这个频段」，它**压过**锁定的
-    ///   BSSID。用户点 5G 那条而 `lock_band='2g'` 时，光写 BSSID 会连回 2.4G，
-    ///   并且旧代码还会报「已切换」——这就是用户说的「切换不起作用」。
-    /// - 没存过 → 把名称 / BSSID / **频段**都填进表单，提示去填密码后保存。
-    private func connect(to item: RepeaterSurvey) async {
+    /// 用当前参数重连一次（不动任何设置）。
+    private func reconnect() async {
         guard !busy else { return }
-        let saved = rep.saved.first { $0.ssid == item.ssid && !$0.key.isEmpty }
-        ssid = item.ssid
-        bssid = item.bssid
-        if !item.band.isEmpty { lockBand = item.band }
-        if let saved { key = saved.key }
-        surveys = []
-
-        guard let saved else {
-            model.notice = Notice(kind: .info, title: "已填入", detail: "填密码后点右上角保存")
-            return
-        }
-        // 已经连着这条（同一 BSSID、同一频段）就什么都不用发。
-        if rep.connected,
-           rep.currentBSSID.caseInsensitiveCompare(item.bssid) == .orderedSame,
-           item.band.isEmpty || rep.band == item.band {
-            model.notice = Notice(kind: .info, title: "已经在用", detail: item.ssid)
-            return
-        }
-
         busy = true
         errorText = nil
-        let problem = await model.switchRepeaterNetwork(ssid: item.ssid, bssid: item.bssid,
-                                                        band: item.band)
+        let problem = await model.applyRepeaterNetwork(ssid: rep.ssid,
+                                                       key: rep.key,
+                                                       bssid: rep.bssid,
+                                                       disguise: rep.disguise,
+                                                       autoPortal: rep.autoPortal)
         busy = false
         guard let problem else {
-            let detail = item.bandLabel.isEmpty ? item.ssid : "\(item.ssid) · \(item.bandLabel)"
-            model.notice = Notice(kind: .ok, title: "已切换", detail: detail)
+            model.notice = Notice(kind: .ok, title: "已重新连接", detail: rep.ssid)
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            await model.manualRefresh()
+            return
+        }
+        errorText = problem
+    }
+
+    private func enableRepeater() async {
+        guard !busy else { return }
+        busy = true
+        errorText = nil
+        if let problem = await model.applyRepeaterOptions(switchMode: rep.switchMode,
+                                                          lockBand: rep.lockBand,
+                                                          smartReconnect: rep.smartReconnect,
+                                                          enabled: true) {
+            busy = false
+            errorText = problem
+            return
+        }
+        // 一条已保存的都不认识就先只开开关：让他去下面「其他网络」里挑一个。
+        guard !rep.ssid.isEmpty else {
+            busy = false
+            model.notice = Notice(kind: .info, title: "中继已开启", detail: "选一个上级网络")
+            await model.manualRefresh()
+            return
+        }
+        let problem = await model.applyRepeaterNetwork(ssid: rep.ssid,
+                                                       key: rep.key,
+                                                       bssid: rep.bssid,
+                                                       disguise: rep.disguise,
+                                                       autoPortal: rep.autoPortal)
+        busy = false
+        guard let problem else {
+            model.notice = Notice(kind: .ok, title: "中继已开启", detail: rep.ssid)
+            await model.manualRefresh()
+            return
+        }
+        errorText = problem
+    }
+
+    private func forget(_ item: RepeaterSavedNetwork) async {
+        pendingForget = nil
+        guard !busy else { return }
+        busy = true
+        errorText = nil
+        let problem = await model.forgetRepeaterNetwork(ssid: item.ssid)
+        busy = false
+        guard let problem else {
+            model.notice = Notice(kind: .ok, title: "已忽略", detail: item.ssid)
             await model.manualRefresh()
             return
         }
@@ -1067,19 +946,12 @@ struct UplinkSettingsView: View {
         }
         mode = target
         model.notice = Notice(kind: .ok, title: "已切换", detail: target.title)
-        // 接口是**确认拿到地址之后**才返回成功的（`switchUplink` 里按 `up` 验过），
-        // 这里只等一拍让它出现在下一次采集里，不用再赌十几秒。
         try? await Task.sleep(nanoseconds: 2_000_000_000)
         await model.manualRefresh()
     }
 
     // MARK: - 热点共享（v3.2.2）
 
-    /// 连接手机热点共享。
-    ///
-    /// **没有确认弹窗**：写进去的 `network.tethering` metric 是 30，比中继的 20 大，
-    /// 中继还活着时默认路由不会被它抢走——它只是多了一条备用出口。所以这一步
-    /// 不会把用户当前的网络搞断，不需要拦一道。
     private func connectTether(_ usb: UsbUplink) async {
         guard !busy else { return }
         busy = true
@@ -1090,14 +962,11 @@ struct UplinkSettingsView: View {
             errorText = problem
             return
         }
-        // `note` 是「拿到了哪个地址 / 还没拿到」这一句，写进提示里：用户点完就知道
-        // 是「连上了」还是「配置写了但手机那边没给网」。
         model.notice = Notice(kind: .ok, title: "已连接热点共享",
                               detail: outcome.note ?? usb.label)
         await model.manualRefresh()
     }
 
-    /// 断开热点共享。断开之后固件的 hotplug 不会自动连回来（`disabled=1`）。
     private func disconnectTether() async {
         pendingTetherOff = false
         guard !busy else { return }
@@ -1113,9 +982,3 @@ struct UplinkSettingsView: View {
         await model.manualRefresh()
     }
 }
-
-// MARK: - 卡面
-
-// v3.3.0：这里原来自己写了一份 18 圆角 / 四边 16 的卡面和一个**同名**的
-// `cardSurface()` 私有扩展。本文件内它会把 `DesignSystem.swift` 的全局版本遮蔽掉，
-// 于是无论别处怎么统一，这一页永远停在旧尺子上。整套删掉，直接吃全局那一份。

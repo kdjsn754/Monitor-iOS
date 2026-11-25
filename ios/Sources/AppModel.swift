@@ -2577,18 +2577,77 @@ private struct NetVap {
 
     // MARK: - 中继（写）
 
-    /// 保存中继配置。返回 `nil` 表示成功，否则是要显示给用户的错误文案。
+    /// 写「全局」选项：启用中继 / 切换模式 / 频段选择 / 智能重连。
     ///
-    /// **官方通道**：`uci set repeater.*` → `commit repeater` → `ubus call repeater reload`
-    /// → 回读。`reload` 之后中继会重连一次（上游会断一下），所以最后再读一次
-    /// `ubus call repeater status` 确认真的连上了，而不是只看 uci 回读。
+    /// **v3.3.12 起和网络参数分开**。固件里这是两条不同的通道：
     ///
-    /// 写到的是**当前在用的那条**已保存网络（`@network[*]` 里 `selected='1'` 的那条）。
+    /// | 通道 | 管什么 |
+    /// | --- | --- |
+    /// | `uci set repeater.@main[0].*` + `ubus call repeater reload` | `auto` / `lock_band` / `smart_reconnect` / `disabled` |
+    /// | `ubus call repeater connect {...}` | `ssid` / `key` / `bssid` / `disguise` / `auto_portal` / `macaddr` / `remember` |
+    ///
+    /// 依据是固件自己的实现（`/usr/lib/oui-httpd/rpc/repeater` 的字符串表）：
+    /// `reload` 旁边只有 `lock_band` / `smart_reconnect` / `dfs_support`，
+    /// 而 `connect` 旁边是 `key` / `disguise` / `auto_portal` / `macaddr` / `remember`。
+    /// v3.3.11 及以前把所有项都塞进 uci 再 `reload`，于是「启用伪装」「公共热点认证模式」
+    /// 明明写进了 `/etc/config/repeater`，运行态却一直是老值——用户 2026-11-25
+    /// 说的「很多时候修改不起作用」就是这一步。网络参数改走 `connect`，见
+    /// `applyRepeaterNetwork`。
     @discardableResult
-    func saveRepeater(ssid: String, key: String, bssid: String,
-                      disguise: Bool, autoPortal: Bool,
-                      switchMode: Int, lockBand: String,
-                      enabled: Bool) async -> String? {
+    func applyRepeaterOptions(switchMode: Int,
+                              lockBand: String,
+                              smartReconnect: Bool,
+                              enabled: Bool) async -> String? {
+        guard connected else { return "还没连上路由器" }
+
+        var lines: [String] = []
+        // `@main[0]` 是出厂就有的段；万一没有（被重置过），先补一个再写。
+        lines.append("uci -q get repeater.@main[0] >/dev/null 2>&1 || uci -q add repeater main")
+        // 0 不切换 / 1 自动切换 / 2 仅没网自动切换（官方三态，`auto` 存的也是这个数字）。
+        lines.append("uci -q set repeater.@main[0].auto='\(switchMode)'")
+        lines.append("uci -q set repeater.@main[0].lock_band=\(shQuote(lockBand))")
+        lines.append("uci -q set repeater.@main[0].smart_reconnect='\(smartReconnect ? "1" : "0")'")
+        lines.append("uci -q set repeater.@main[0].disabled='\(enabled ? "0" : "1")'")
+        lines.append("uci -q commit repeater")
+        // 回读：每项一个标记。频段选择本来可能是空串（= 自动），所以不能用「取非空行」。
+        lines.append("echo @@AUTO; uci -q get repeater.@main[0].auto")
+        lines.append("echo @@BAND; uci -q get repeater.@main[0].lock_band")
+        lines.append("echo @@SMART; uci -q get repeater.@main[0].smart_reconnect")
+        lines.append("echo @@OFF; uci -q get repeater.@main[0].disabled")
+        lines.append("echo @@DONE")
+
+        do {
+            let sections = parseSections(try await execute(lines.joined(separator: "; "), timeout: 40))
+            func read(_ key: String) -> String {
+                (sections[key] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            guard read("AUTO") == String(switchMode) else { return "「切换模式」没写进去" }
+            guard read("BAND") == lockBand else { return "「频段选择」没写进去" }
+            guard read("SMART") == (smartReconnect ? "1" : "0") else { return "「智能重连」没写进去" }
+            guard read("OFF") == (enabled ? "0" : "1") else { return "中继开关没写进去" }
+
+            // 关掉中继要真的把 STA 放掉，不然接口还挂着、页面却写「已关闭」。
+            if !enabled {
+                _ = try? await execute("ubus call repeater disconnect >/dev/null 2>&1", timeout: 30)
+            }
+            return nil
+        } catch {
+            return describe(error)
+        }
+    }
+
+    /// 写「当前这条上级网络」的参数：官方 `ubus call repeater connect {...}`。
+    ///
+    /// **这条通道同时改 UCI 和运行态**（2026-11-25 真机实测：把 `auto_portal`
+    /// 从 false 改成 true 再改回来，`uci get` 与 `ubus call repeater status`
+    /// 的 `@.config.auto_portal` 同步变化，而且**不断开当前连接**——
+    /// 参数没变的字段只是更新配置，不会重新握手）。
+    ///
+    /// 改 SSID / 密码时它会重新关联；连不上会如实返回错误，而不是「写进去了」。
+    @discardableResult
+    func applyRepeaterNetwork(ssid: String, key: String, bssid: String,
+                              disguise: Bool, autoPortal: Bool,
+                              band: String? = nil) async -> String? {
         guard connected else { return "还没连上路由器" }
         let name = ssid.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return "上级网络名称不能为空" }
@@ -2598,61 +2657,101 @@ private struct NetVap {
         }
         let locked = bssid.trimmingCharacters(in: .whitespaces)
 
+        // JSON 交给 JSONSerialization，不手拼引号：SSID 里可能有 `"`、`\` 或中文。
+        var payload: [String: Any] = [
+            "ssid": name,
+            "key": secret,
+            "protocol": "dhcp",
+            "disguise": disguise,
+            "auto_portal": autoPortal,
+            "remember": true,
+        ]
+        if !locked.isEmpty { payload["bssid"] = locked }
+        // **`macaddr` 必须原样带上**（2026-11-25 实测踩到）：`connect` 会把
+        // `/etc/config/repeater` 里这一项**整项覆盖**——不传就删掉，运行态立刻退回
+        // 「出厂 MAC」，而且 `reload` 也不会重读，只有 `/etc/init.d/repeater restart`
+        // 才恢复。用户原来的随机 MAC（`r,3A:0C:…`）就是这么丢的。
+        // 模式存在 `@network[*].macaddr` 的前缀里：`r,` 随机 / `c,` 克隆 / 无前缀出厂。
+        let mac = network.repeater
+        if !mac.macAddress.isEmpty {
+            switch mac.macMode {
+            case "random": payload["macaddr"] = "r," + mac.macAddress
+            case "clone": payload["macaddr"] = "c," + mac.macAddress
+            default: break          // 出厂：这一项本来就不存在，别传
+            }
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8) else {
+            return "参数序列化失败"
+        }
+
+        // 频段选择在 `@main` 里，`connect` 不管它；先写 UCI 再连，
+        // 否则点 5G 那条会在 2.4G 上连回来（v3.1.11 的老问题）。
         var lines: [String] = []
-        // 找到当前在用的那条已保存网络的序号；一台都没有就用 0 号新建。
-        // （提取方式用 grep 而不是 sed：`uci show` 的段名里带方括号，正则要转义，
-        //  实机测过 grep 这条更稳。）
-        lines.append("S=$(uci -q show repeater | grep -o 'repeater\\.@network\\[[0-9]*\\]\\.ssid' | grep -o '[0-9]\\+' | head -1)")
-        lines.append("[ -n \"$S\" ] || S=0")
-        lines.append("uci -q set repeater.@network[$S].ssid=\(shQuote(name))")
-        if !secret.isEmpty {
-            lines.append("uci -q set repeater.@network[$S].key=\(shQuote(secret))")
+        if let band {
+            lines.append("uci -q set repeater.@main[0].lock_band=\(shQuote(band))")
+            lines.append("uci -q commit repeater")
         }
-        lines.append("uci -q set repeater.@network[$S].selected='1'")
-        if locked.isEmpty {
-            // 「锁定 BSSID」是可选的：不锁就把这一项删掉，路由器自己挑 AP。
-            lines.append("uci -q delete repeater.@network[$S].bssid")
-        } else {
-            lines.append("uci -q set repeater.@network[$S].bssid=\(shQuote(locked))")
-        }
-        lines.append("uci -q set repeater.@network[$S].disguise='\(disguise ? "1" : "0")'")
-        lines.append("uci -q set repeater.@network[$S].auto_portal='\(autoPortal ? "1" : "0")'")
-        // 0 不切换 / 1 自动切换 / 2 仅没网自动切换（官方三态）。
-        lines.append("uci -q set repeater.@main[0].auto='\(switchMode)'")
-        lines.append("uci -q set repeater.@main[0].lock_band=\(shQuote(lockBand))")
-        lines.append("uci -q set repeater.@main[0].disabled='\(enabled ? "0" : "1")'")
-        lines.append("uci -q commit repeater")
-        // 回读：每项一个标记。**不能用「按行取非空值」的办法**——频段选择
-        // 本来就可能是空串（= 自动），滤掉空行就错位了。
-        lines.append("echo @@SSID; uci -q get repeater.@network[$S].ssid")
-        lines.append("echo @@DIS; uci -q get repeater.@network[$S].disguise")
-        lines.append("echo @@PORTAL; uci -q get repeater.@network[$S].auto_portal")
-        lines.append("echo @@AUTO; uci -q get repeater.@main[0].auto")
-        lines.append("echo @@BAND; uci -q get repeater.@main[0].lock_band")
-        lines.append("echo @@OFF; uci -q get repeater.@main[0].disabled")
-        lines.append("echo @@STATE")
-        lines.append("ubus call repeater reload >/dev/null 2>&1; sleep 4; ubus call repeater status 2>/dev/null | jsonfilter -e '@.state_s' -e '@.ssid' 2>/dev/null")
+        lines.append("ubus call repeater connect \(shQuote(json))")
+        // 等它真连上：换 SSID / 改密码时这一步要十几秒。
+        lines.append("k=0; while [ $k -lt 6 ]; do k=$((k+1)); [ \"$(ubus call repeater status 2>/dev/null | jsonfilter -e '@.state_s')\" = connected ] && break; sleep 5; done")
+        // **MAC 模式只有 `repeater` 服务启动时才会从 UCI 读一次**（2026-11-25 实测）：
+        // 每跑一次 `connect`，运行态都会掉回「出厂 MAC」（`@.config.macaddr.mode` = default），
+        // 传 `macaddr` 也拉不回来，`reload` 也不重读。用户原来的随机 MAC 就这么没了。
+        // 所以这里补一刀：UCI 里本来是 `r,` / `c,` 却掉成 default，就重启服务把它恢复。
+        // 这一段只在真掉的时候跑（约 25 秒），正常改密码不会多等。
+        lines.append("P=$(uci -q get repeater.@network[0].macaddr | cut -d, -f1)")
+        lines.append("LIVE=$(ubus call repeater status 2>/dev/null | jsonfilter -e '@.config.macaddr.mode')")
+        lines.append("[ -n \"$P\" ] && [ \"$LIVE\" = default ] && { /etc/init.d/repeater restart >/dev/null 2>&1; j=0; while [ $j -lt 12 ]; do j=$((j+1)); [ \"$(ubus call repeater status 2>/dev/null | jsonfilter -e '@.state_s')\" = connected ] && break; sleep 5; done; }")
+        lines.append("echo @@DIS; ubus call repeater status 2>/dev/null | jsonfilter -e '@.config.disguise'")
+        lines.append("echo @@PORTAL; ubus call repeater status 2>/dev/null | jsonfilter -e '@.config.auto_portal'")
+        lines.append("echo @@STATE; ubus call repeater status 2>/dev/null | jsonfilter -e '@.state_s'")
+        lines.append("echo @@SSID; ubus call repeater status 2>/dev/null | jsonfilter -e '@.ssid'")
+        lines.append("echo @@UCI; uci -q get repeater.@network[0].auto_portal")
 
         do {
-            let sections = parseSections(try await execute(lines.joined(separator: "; "), timeout: 60))
+            let sections = parseSections(try await execute(lines.joined(separator: "; "), timeout: 200))
             func read(_ key: String) -> String {
                 (sections[key] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             }
-            guard read("SSID") == name else { return "上级网络名没写进去（读回来是「\(read("SSID"))」）" }
-            guard read("DIS") == (disguise ? "1" : "0") else { return "「启用伪装」没写进去" }
-            guard read("PORTAL") == (autoPortal ? "1" : "0") else { return "「公共热点认证模式」没写进去" }
-            guard read("AUTO") == String(switchMode) else { return "切换模式没写进去" }
-            guard read("BAND") == lockBand else { return "频段选择没写进去" }
-            guard read("OFF") == (enabled ? "0" : "1") else { return "中继开关没写进去" }
-
-            // 回读够了还不够：中继重连之后到底连上没有，要问状态本身。
-            let connectedState = read("STATE").split(separator: "\n")
-                .map { String($0).trimmingCharacters(in: .whitespaces) }
-                .first ?? ""
-            if enabled, connectedState != "connected" {
-                return "配置已保存，但中继还没连上（当前状态 \(connectedState.isEmpty ? "未知" : connectedState)）"
+            // 运行态是唯一算数的：UCI 写对了不算，`status.config` 跟着变才算生效。
+            if read("DIS") != (disguise ? "true" : "false") {
+                return "「启用伪装」没生效（当前 \(read("DIS").isEmpty ? "无" : read("DIS"))）"
+            }
+            if read("PORTAL") != (autoPortal ? "true" : "false") {
+                return "「公共热点认证模式」没生效（当前 \(read("PORTAL").isEmpty ? "无" : read("PORTAL"))）"
+            }
+            let state = read("STATE")
+            if state != "connected" {
+                return "配置已写入，但中继没连上（状态：\(state.isEmpty ? "无响应" : state)）"
+            }
+            let liveSSID = read("SSID")
+            if !liveSSID.isEmpty, liveSSID != name {
+                return "连上的是「\(liveSSID)」，不是「\(name)」"
             }
             return nil
+        } catch {
+            return describe(error)
+        }
+    }
+
+    /// 忽略（删除）一条已保存的上级网络。
+    ///
+    /// 官方叫「忽略此网络」（`internet_forgetSavedWifi`）。删的就是
+    /// `repeater.@network[N]` 这一整段；删完 `reload`，让它从候选列表里消失。
+    @discardableResult
+    func forgetRepeaterNetwork(ssid: String) async -> String? {
+        guard connected else { return "还没连上路由器" }
+        var lines: [String] = []
+        lines.append("N=\"\"; for i in $(uci -q show repeater | grep -o 'repeater\\.@network\\[[0-9]*\\]\\.ssid' | grep -o '[0-9]\\+' | sort -u); do [ \"$(uci -q get repeater.@network[$i].ssid)\" = \(shQuote(ssid)) ] && N=$i; done")
+        lines.append("[ -n \"$N\" ] && uci -q delete repeater.@network[$N] && uci -q commit repeater")
+        lines.append("echo @@GONE; uci -q show repeater | grep -c \(shQuote(ssid))")
+        lines.append("ubus call repeater reload >/dev/null 2>&1")
+
+        do {
+            let sections = parseSections(try await execute(lines.joined(separator: "; "), timeout: 40))
+            let left = (sections["GONE"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return left == "0" || left.isEmpty ? nil : "没删掉，请再试一次"
         } catch {
             return describe(error)
         }

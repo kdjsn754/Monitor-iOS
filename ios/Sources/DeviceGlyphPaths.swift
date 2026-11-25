@@ -31,7 +31,7 @@ enum OfficialGlyph {
         case .nas: nas(&p, k)
         case .server: server(&p, k)
         case .networkSwitch: networkSwitch(&p, k)
-        case .auto: break          // 手绘，见 DeviceGlyph.defaultMark
+        case .auto: devices(&p, k)   // 官方 `clients` 字形（0xe9ff）：显示器 + 手机
         }
     }
 
@@ -1567,6 +1567,49 @@ enum OfficialGlyph {
         p.addQuadCurve(to: pt(6.45, 11.66, k), control: pt(6.45, 11.37, k))
         p.addQuadCurve(to: pt(6.64, 12.15, k), control: pt(6.45, 11.95, k))
         p.addQuadCurve(to: pt(7.15, 12.35, k), control: pt(6.84, 12.35, k))
+        p.closeSubpath()
+    }
+
+    private static func devices(_ p: inout Path, _ k: CGFloat) {
+        p.move(to: pt(22.8, 7.59, k))
+        p.addLine(to: pt(15.82, 7.59, k))
+        p.addQuadCurve(to: pt(15.18, 7.86, k), control: pt(15.45, 7.59, k))
+        p.addQuadCurve(to: pt(14.91, 8.51, k), control: pt(14.91, 8.13, k))
+        p.addLine(to: pt(14.91, 20.34, k))
+        p.addQuadCurve(to: pt(15.18, 21, k), control: pt(14.91, 20.74, k))
+        p.addQuadCurve(to: pt(15.82, 21.26, k), control: pt(15.45, 21.26, k))
+        p.addLine(to: pt(22.8, 21.26, k))
+        p.addQuadCurve(to: pt(23.45, 21, k), control: pt(23.18, 21.26, k))
+        p.addQuadCurve(to: pt(23.72, 20.34, k), control: pt(23.72, 20.74, k))
+        p.addLine(to: pt(23.72, 8.51, k))
+        p.addQuadCurve(to: pt(23.45, 7.86, k), control: pt(23.72, 8.13, k))
+        p.addQuadCurve(to: pt(22.8, 7.59, k), control: pt(23.18, 7.59, k))
+        p.closeSubpath()
+        p.move(to: pt(22.2, 19.73, k))
+        p.addLine(to: pt(16.43, 19.73, k))
+        p.addLine(to: pt(16.43, 9.12, k))
+        p.addLine(to: pt(22.2, 9.12, k))
+        p.closeSubpath()
+        p.move(to: pt(4.27, 4.27, k))
+        p.addLine(to: pt(17.32, 4.27, k))
+        p.addLine(to: pt(17.32, 5.46, k))
+        p.addLine(to: pt(18.87, 5.46, k))
+        p.addLine(to: pt(18.87, 4.1, k))
+        p.addQuadCurve(to: pt(18.46, 3.14, k), control: pt(18.87, 3.54, k))
+        p.addQuadCurve(to: pt(17.48, 2.74, k), control: pt(18.05, 2.74, k))
+        p.addLine(to: pt(4.12, 2.74, k))
+        p.addQuadCurve(to: pt(3.14, 3.14, k), control: pt(3.54, 2.74, k))
+        p.addQuadCurve(to: pt(2.74, 4.1, k), control: pt(2.74, 3.54, k))
+        p.addLine(to: pt(2.74, 13.66, k))
+        p.addLine(to: pt(0.47, 13.66, k))
+        p.addQuadCurve(to: pt(0.35, 13.71, k), control: pt(0.4, 13.66, k))
+        p.addQuadCurve(to: pt(0.3, 13.83, k), control: pt(0.3, 13.76, k))
+        p.addLine(to: pt(0.3, 14.44, k))
+        p.addQuadCurve(to: pt(0.9, 15.83, k), control: pt(0.33, 15.26, k))
+        p.addQuadCurve(to: pt(2.3, 16.41, k), control: pt(1.48, 16.41, k))
+        p.addLine(to: pt(12.77, 16.41, k))
+        p.addLine(to: pt(12.77, 13.66, k))
+        p.addLine(to: pt(4.27, 13.66, k))
         p.closeSubpath()
     }
 }
