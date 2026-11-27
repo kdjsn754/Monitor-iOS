@@ -474,6 +474,14 @@ struct WifiMainPage: View {
     private var liveBands: [WifiBandInfo] { bands.filter(\.up) }
     private var clientCount: Int { bands.reduce(0) { $0 + $1.clients } }
 
+    /// 读数第三格要报的那一段：优先「在广播且有设备在连」的，其次任意在广播的，
+    /// 最后才退回第一段（全关时总得显示点什么）。
+    private var powerBand: WifiBandInfo? {
+        let live = bands.filter { $0.ssidOn && !$0.radioOff }
+        if let busy = live.max(by: { $0.clients < $1.clients }) { return busy }
+        return bands.first
+    }
+
     /// 主网里第一台在线设备，读数第一格的副行要报它的名字。
     ///
     /// **按网口认，不按「第一台不是有线的」认**：`gl-clients` 的 `dev` 就是设备挂的
@@ -483,12 +491,17 @@ struct WifiMainPage: View {
         let online = info.onlineClients.filter { !$0.wired }
         let live = bands.filter { $0.ssidOn && !$0.radioOff }
         let ifnames = Set(live.map(\.ifname).filter { !$0.isEmpty })
-        if !ifnames.isEmpty, let hit = online.first(where: { ifnames.contains($0.dev) }) {
+        if !ifnames.isEmpty, let hit = online.first(where: { !$0.dev.isEmpty && ifnames.contains($0.dev) }) {
             return hit
         }
-        // 旧固件的客户端列表没有 `dev`，退回按频段标签对（`2.4G` / `5G`）。
+        // 这台固件没有 `dev`，只能按「网络归属 + 频段标签」两条一起对：
+        // 先要求 `netTag == main`，否则 2.4G 的粗标签会把 IoT / 访客的设备也放进来，
+        // 主网络下面就会报一台别人的设备名（用户报的「数据显示有问题」）。
         let tags = Set(live.map { wifiShortBand($0.band) })
-        return online.first { tags.contains($0.iface) }
+        if let hit = online.first(where: { $0.netTag == "main" && tags.contains($0.iface) }) {
+            return hit
+        }
+        return online.first { $0.netTag == "main" }
     }
 
     /// 中继正在用的那个频段。改它的信道 / 频宽等于把上级连接掐掉，官方在界面上锁住。
@@ -594,9 +607,11 @@ struct WifiMainPage: View {
                            sub: offBandNames.isEmpty ? "全部广播中" : "\(offBandNames.joined(separator: "/")) 已关"),
                 // iOS 的采集里没有 `country`（官方那格是「功率 · 地区」），
                 // 这里报「功率 · 制式」——不编一个读不到的地区出来。
+                // 取「真正在广播并且有设备在连」的那一段：以前固定拿 `bands.first`
+                // （排序后是 2.4G），2.4G 关着的时候这格报的就是关掉那段的功率。
                 WifiMetric(label: "功率 · 制式",
-                           value: bands.first?.powerLabel ?? "最大",
-                           sub: bands.first.map { wifiStandard($0) } ?? "—")
+                           value: powerBand?.powerLabel ?? "最大",
+                           sub: powerBand.map { wifiStandard($0) } ?? "—")
             ])
             .padding(.top, 8)
         }
@@ -1055,7 +1070,10 @@ struct WifiSidePage: View {
             GuestViz(isOn: isOn,
                      created: hasNet,
                      clients: group?.clients ?? 0,
-                     bands: group?.onBandShort ?? "",
+                     // 传「真在广播」的那几段（`liveBandShort`），不是 `onBandShort`：
+                     // 后者只看 SSID 开关，射频被关掉也算进来，读数会写「2.4G · 5G」，
+                     // 实际只有 5G 有信号。
+                     bands: liveBandShort,
                      supported: supportedBands)
         case .iot:
             IotViz(isOn: isOn,
@@ -1092,22 +1110,26 @@ struct WifiSidePage: View {
 
     /// IoT 组里在线的那几台。
     ///
-    /// **按网口认**（`NetClient.dev` 就是 `ra1` / `rai1` 这种 VAP 名）。这台固件的
-    /// `gl-clients` 在 `iface` 里只给「2.4G / 5G / 有线」，不写 SSID；按频段筛会把
-    /// 主网同频段的手机算进来，按 `iface.contains("iot")` 又永远筛不到。
-    /// 旧固件没有 `dev` 时退回本组台数，但**不再随便抓一台别组的设备**当样本。
+    /// 归属有两条线，任一对上就算：`dev`（`ra3` 这种 VAP 名，旧固件才有）
+    /// 与 `netTag`（`gl-clients` 的 `iface` 后缀 `_Iot`，这台固件只有这条）。
+    /// 以前只按 `dev` 比，而这台机器的 `gl-clients list` 里根本没有 `dev`，
+    /// 于是「在线设备」永远 0 台、图里一直写「等待 IoT 设备接入」。
     private var iotClients: [NetClient] {
         guard let group else { return [] }
         let ifnames = Set(group.members.map(\.ifname).filter { !$0.isEmpty })
-        guard !ifnames.isEmpty else { return [] }
-        return info.onlineClients.filter { !$0.wired && ifnames.contains($0.dev) }
+        return info.onlineClients.filter { client in
+            guard !client.wired else { return false }
+            if !client.dev.isEmpty, ifnames.contains(client.dev) { return true }
+            return client.netTag == "iot"
+        }
     }
 
-    /// IoT 在线台数：能按网口数就按网口数，旧固件退回本组台数。
+    /// IoT 在线台数：优先数这一组各网口的关联终端（`iw station dump`，和路由器后台同源），
+    /// 读不到关联表时才退回上面那份名单。
     private var iotOnlineCount: Int {
         guard let group else { return 0 }
-        let ifnames = Set(group.members.map(\.ifname).filter { !$0.isEmpty })
-        return ifnames.isEmpty ? group.clients : iotClients.count
+        let exact = group.members.reduce(0) { $0 + $1.clients }
+        return exact > 0 ? exact : iotClients.count
     }
 
     /// IoT 共用信道：优先这一组的 2.4G，其次主网 2.4G，再其次组内任一段。
@@ -1142,7 +1164,9 @@ struct WifiSidePage: View {
 
     /// IoT 正在广播的那个频段短名，没在广播就写 IoT。
     private var iotBandTag: String {
-        if let short = group?.onBandShort, !short.isEmpty { return short }
+        // 用 `liveBandShort`（SSID 开着 **且** 射频没关）；`onBandShort` 只看 SSID，
+        // 射频关掉时会把一个没信号的频段写到图里。
+        if !liveBandShort.isEmpty { return liveBandShort }
         return info.bands.first { $0.band == "2.4" }.map { wifiShortBand($0.band) } ?? "2.4G"
     }
 
@@ -1713,8 +1737,10 @@ private struct MloViz: View {
     var body: some View {
         HStack(spacing: 8) {
             VStack(spacing: 4) {
-                RouterSideGlyph(tint: isOn ? WifiPalette.accent : Color.secondary)
-                    .frame(width: 48, height: 34)
+                // 用 `RouterGlyph.swift` 里那份官方 `/www/model.svg` 线稿（同一张图，
+                // 拓扑中心用的就是它）。以前这里是自己手描的「斜视方盒」，
+                // 没有天线、角度也不对，和官方实机图一眼就分得出（用户 2026-11-28 报的）。
+                RouterModelGlyph(width: 56, tint: isOn ? WifiPalette.accent : Color.secondary)
                 Text(shortModel)
                     .font(.system(size: 9.5, weight: .medium))
                     .foregroundStyle(.tertiary)
@@ -1771,55 +1797,6 @@ private struct MloViz: View {
                     .foregroundStyle(WifiPalette.ink)
             }
             .frame(width: 42, height: 58)
-        }
-    }
-}
-
-/// 路由器侧视线稿（参考的 `RouterModelGlyph` 是官方实机轮廓的贝塞尔曲线，
-/// 这里按同一种「斜视方盒 + 前面板 + 两只脚」的画法给一笔，48×34）。
-private struct RouterSideGlyph: View {
-    let tint: Color
-
-    var body: some View {
-        Canvas { ctx, size in
-            let w = size.width
-            let h = size.height
-            func p(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: w * x, y: h * y) }
-
-            // 顶面
-            var top = Path()
-            top.move(to: p(0.04, 0.58))
-            top.addLine(to: p(0.66, 0.26))
-            top.addLine(to: p(0.98, 0.42))
-            top.addLine(to: p(0.36, 0.74))
-            top.closeSubpath()
-            ctx.fill(top, with: .color(tint.opacity(0.14)))
-            ctx.stroke(top, with: .color(tint), style: StrokeStyle(lineWidth: 1.3, lineJoin: .round))
-
-            // 前面板
-            var front = Path()
-            front.move(to: p(0.36, 0.74))
-            front.addLine(to: p(0.98, 0.42))
-            front.addLine(to: p(0.98, 0.58))
-            front.addLine(to: p(0.36, 0.90))
-            front.closeSubpath()
-            ctx.fill(front, with: .color(tint.opacity(0.06)))
-            ctx.stroke(front, with: .color(tint), style: StrokeStyle(lineWidth: 1.3, lineJoin: .round))
-
-            // 两只脚
-            var feet = Path()
-            feet.move(to: p(0.42, 0.90))
-            feet.addLine(to: p(0.42, 0.98))
-            feet.move(to: p(0.88, 0.62))
-            feet.addLine(to: p(0.88, 0.70))
-            ctx.stroke(feet, with: .color(tint.opacity(0.85)),
-                       style: StrokeStyle(lineWidth: 1.3, lineCap: .round))
-
-            // 前面板两颗状态灯
-            for x in [CGFloat(0.60), CGFloat(0.68)] {
-                let dot = CGRect(x: w * x - 1.2, y: h * 0.60 - 1.2, width: 2.4, height: 2.4)
-                ctx.fill(Path(ellipseIn: dot), with: .color(tint.opacity(0.8)))
-            }
         }
     }
 }

@@ -1701,10 +1701,15 @@ private struct NetVap {
             client.mac = entry.mac
             client.ip = (object["ip"] as? String) ?? ""
             client.online = (object["online"] as? Bool) ?? false
-            client.iface = clientIfaceName((object["iface"] as? String) ?? "")
+            let rawIface = (object["iface"] as? String) ?? ""
+            client.iface = clientIfaceName(rawIface)
             // 官方列表里还带着接入口名（`rai0` / `ra1` / `wlan3`）。频段计数用它，
             // 比上面那个粗标签准；旧固件没这个键就是空串。
             client.dev = (object["dev"] as? String) ?? ""
+            // 这台固件（GL-MT3600BE 4.9.0）的 `gl-clients` 没有 `dev`，但 `iface`
+            // 带上了网络：`2.4G_Iot` / `5G_Guest` / `cable_Iot` / `mld_Guest`。
+            // 官方 `gl_clients_update` 里这套标签是写死的，后缀就是归属。
+            client.netTag = clientNetTag(rawIface)
             client.totalRx = looseNumber(object["total_rx"]) ?? 0
             client.totalTx = looseNumber(object["total_tx"]) ?? 0
             client.rxSpeed = looseNumber(object["rx"]) ?? 0
@@ -1787,6 +1792,15 @@ private struct NetVap {
             return members.first
         }
 
+        // 每个网口此刻的关联台数（采集脚本里 `iw dev <if> station dump` 数的）。
+        var staCounts: [String: Int] = [:]
+        for raw in (sections["WLSTA"] ?? "").split(separator: "\n") {
+            let parts = raw.split(separator: " ", maxSplits: 1).map(String.init)
+            guard parts.count == 2,
+                  let count = Int(parts[1].trimmingCharacters(in: .whitespaces)) else { continue }
+            staCounts[parts[0]] = count
+        }
+
         var radios: [String] = []
         for key in wifi.keys where key.hasPrefix("wireless.") && key.hasSuffix(".band") {
             radios.append(String(key.dropFirst("wireless.".count).dropLast(".band".count)))
@@ -1833,19 +1847,24 @@ private struct NetVap {
                 band.hidden = (wifi["wireless.\(sec).hidden"] ?? "0") == "1"
             }
 
-            // 台数：直接数官方客户端列表里**接在这个网口上**、且在线的那几台。
-            // 以前数的是各 VAP 的 iwinfo 关联表——官方列表里有、关联表里没有的设备
-            // （随机 MAC 一变就是这种局面）会漏数，现在两边用同一个口径。
+            // 台数：**直接数这个网口的关联终端**（采集里 `iw dev <if> station dump`）。
             //
-            // 优先按官方列表的 `dev`（`rai0` / `ra1` / `wlan3`）对：`iface` 只有
-            // 「2.4G / 5G / 有线」三个粗标签，HaLow 与 6G 都表达不出来。旧固件没有
-            // `dev` 时留空，退回去按标签比，和以前一模一样。
-            let tag = band.band.isEmpty ? "" : "\(band.band)G"
-            band.clients = clients.filter { client in
-                guard client.online else { return false }
-                if !client.dev.isEmpty, !band.ifname.isEmpty { return client.dev == band.ifname }
-                return client.iface == tag
-            }.count
+            // 不能按 `gl-clients` 的 `iface` 粗标签数：`clientIfaceName` 把
+            // `2.4G_Iot` / `2.4G_Guest` 都归一成 `2.4G`，主网络于是把访客和 IoT 的
+            // 设备一起算进来（用户 2026-11-28：「无线页数据显示有问题，IoT 接入设备有误」）。
+            // 这台固件的 `gl-clients list` 里**根本没有 `dev` 这个键**，所以
+            // 「先按 dev、再按标签」两条路都会落空。
+            // 关联表是唯一按网口分得清的口径；读不到时才退回名单里的 `dev` / 网络标签。
+            if let exact = staCounts[band.ifname] {
+                band.clients = exact
+            } else {
+                band.clients = clients.filter { client in
+                    guard client.online else { return false }
+                    if !client.dev.isEmpty, !band.ifname.isEmpty { return client.dev == band.ifname }
+                    guard client.netTag == "main" else { return false }
+                    return !band.band.isEmpty && client.iface == "\(band.band)G"
+                }.count
+            }
             band.extraNets = vaps.filter {
                 $0.radio == radio && $0.section != main?.section && !$0.disabled && $0.mode == "ap"
             }.count
@@ -1888,14 +1907,6 @@ private struct NetVap {
             .filter { !$0.isEmpty }
         let mloSupported = !mldIfaces.isEmpty || wifi["wireless.mld0.disabled"] != nil
 
-        // 每个网口此刻的关联台数（采集脚本里 `iw dev <if> station dump` 数的）。
-        var staCounts: [String: Int] = [:]
-        for raw in (sections["WLSTA"] ?? "").split(separator: "\n") {
-            let parts = raw.split(separator: " ", maxSplits: 1).map(String.init)
-            guard parts.count == 2,
-                  let count = Int(parts[1].trimmingCharacters(in: .whitespaces)) else { continue }
-            staCounts[parts[0]] = count
-        }
 
         /// 把一条 `wifi-iface` 摊成编辑页要用的那一套字段（和主网络同构）。
         func memberInfo(_ vap: NetVap) -> WifiBandInfo {
@@ -1994,6 +2005,21 @@ private struct NetVap {
         if value.hasPrefix("2") { return "2.4G" }
         if value.hasPrefix("5") { return "5G" }
         return raw
+    }
+
+    /// `gl-clients` 的 `iface` 后缀就是设备归属的网络。
+    ///
+    /// 官方脚本 `/usr/bin/gl_clients_update` 里的取值是写死的一串：
+    /// `2.4G_Guest` / `5G_Guest` / `6G_Guest` / `mld_Guest` / `cable_Guest`、
+    /// `2.4G_Iot` / `5G_Iot` / `cable_Iot`、`cable_Vlan`，不带后缀的是主网络。
+    /// 分不出归属时按主网络算（宁可少算别人的，也不要把访客算进主网）。
+    private func clientNetTag(_ raw: String) -> String {
+        let value = raw.lowercased()
+        if value.contains("_iot") { return "iot" }
+        if value.contains("_guest") { return "guest" }
+        if value.contains("_vlan") { return "vlan" }
+        if value.hasPrefix("mld") { return "mlo" }
+        return "main"
     }
 
     /// `gl-clients` 的数字有时是字符串（`total_rx`），有时是数字（`rx`）。

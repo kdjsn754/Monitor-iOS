@@ -515,6 +515,13 @@ struct NetClient: Identifiable, Equatable {
     /// 数某个频段有多少台时按它对——HaLow（`wlan3`）这种 `iface` 认不出来的也能算进去。
     /// 旧固件没这个字段时留空，退回按 `iface` 比。
     var dev = ""
+    /// 这台设备挂在哪个网络：`main` / `guest` / `iot` / `vlan` / `mlo`。
+    ///
+    /// 取自 `gl-clients` 的 `iface` 后缀（`2.4G_Iot` → `iot`、`5G_Guest` → `guest`）。
+    /// GL-MT3600BE 4.9.0 的 `gl-clients list` **没有 `dev`**，而 `iface` 又被界面
+    /// 归一成「2.4G / 5G」这种粗标签，只剩后缀能分清访客 / IoT / 主网——
+    /// 以前主网络把 IoT 设备算进「在线终端」就是这么来的。
+    var netTag = "main"
     var online = false
     var totalRx: Double = 0
     var totalTx: Double = 0
