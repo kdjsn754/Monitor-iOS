@@ -366,10 +366,7 @@ struct WifiSoftButton: View {
     }
 }
 
-/// 密码行（参考 `WifiPasswordActionRow`）：密码点、眼睛、复制。
-///
-/// 参考里右边还有一颗 24×24 的二维码盒，iOS 侧没做 `QrShareTarget`，这里没有——
-/// 留一个按不动的图标不如不摆（见文件头）。
+/// 密码行（参考 `WifiPasswordActionRow`）：密码、眼睛、复制、二维码。
 struct WifiKeyRow: View {
     let key: String
     let revealed: Bool
@@ -377,6 +374,10 @@ struct WifiKeyRow: View {
     var tint: Color = WifiPalette.ink
     let onReveal: () -> Void
     let onCopy: () -> Void
+    /// 二维码分享。不传就不摆那颗按钮——没实现分享的页面别留一个按不动的图标。
+    var onShare: (() -> Void)? = nil
+
+    @State private var copied = false
 
     var body: some View {
         HStack(spacing: 7) {
@@ -396,13 +397,35 @@ struct WifiKeyRow: View {
             }
             .buttonStyle(.plain)
 
-            Button(action: onCopy) {
-                Text("复制")
+            Button {
+                onCopy()
+                copied = true
+                Task {
+                    try? await Task.sleep(nanoseconds: 1_600_000_000)
+                    copied = false
+                }
+            } label: {
+                Text(copied ? "已复制" : "复制")
                     .font(.system(size: 11.5, weight: .semibold))
                     .foregroundStyle(tint)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+
+            if let onShare {
+                Button(action: onShare) {
+                    Image(systemName: "qrcode")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 24, height: 24)
+                        .background {
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(Color.primary.opacity(0.05))
+                        }
+                        .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
         }
         .padding(.leading, indent)
         .padding(.top, 2)
@@ -416,21 +439,74 @@ struct WifiKeyRow: View {
 struct WifiMainPage: View {
     @Environment(AppModel.self) private var model: AppModel
 
-    @State private var editingGroup: WifiNetGroup?
+    @State private var editingBand: WifiBandInfo?
     @State private var editingRadio: WifiBandInfo?
+    /// 正在等用户确认「关掉最后一个频段」。
+    @State private var pendingClose: WifiBandInfo?
+    @State private var qrTarget: WifiQrPayload?
     @State private var busyBands: Set<String> = []
     @State private var revealed: Set<String> = []
     @State private var errorText: String?
 
     private var info: NetworkInfo { model.network }
-    private var bands: [WifiBandInfo] { info.bands }
+
+    /// 中继锁定的提示色（琥珀）。跟主色分开，一眼看出这是「不能改」而不是「出错了」。
+    private var amber: Color { wifiTone((0.62, 0.42, 0.02), (1.00, 0.78, 0.30)) }
+
+    /// 按实机的顺序摆：6 GHz → 5 GHz → 2.4 GHz。
+    ///
+    /// `info.bands` 本身是 2.4 → 5 → 6（网络页的拓扑也用这个顺序），但官方无线页
+    /// 把最快的频段放最上面，照它来。只影响这一页的显示，不动 `info.bands`。
+    private var bands: [WifiBandInfo] {
+        info.bands.sorted { bandRank($0.band) < bandRank($1.band) }
+    }
+
+    private func bandRank(_ band: String) -> Int {
+        switch band {
+        case "6": return 0
+        case "5": return 1
+        case "2.4": return 2
+        default: return 3
+        }
+    }
+
     private var mainGroup: WifiNetGroup? { info.wifiGroups.first { $0.kind == .main } }
     private var liveBands: [WifiBandInfo] { bands.filter(\.up) }
     private var clientCount: Int { bands.reduce(0) { $0 + $1.clients } }
 
     /// 主网里第一台在线设备，读数第一格的副行要报它的名字。
+    ///
+    /// **按网口认，不按「第一台不是有线的」认**：`gl-clients` 的 `dev` 就是设备挂的
+    /// 那一个 VAP（`rai0` / `ra1`…），访客手机与 IoT 设备挂的是同一台机器的别的 VAP。
+    /// 以前取第一台无线设备，主网络下面报出来的名字经常是访客的手机。
     private var firstClient: NetClient? {
-        info.onlineClients.first { !$0.wired }
+        let online = info.onlineClients.filter { !$0.wired }
+        let live = bands.filter { $0.ssidOn && !$0.radioOff }
+        let ifnames = Set(live.map(\.ifname).filter { !$0.isEmpty })
+        if !ifnames.isEmpty, let hit = online.first(where: { ifnames.contains($0.dev) }) {
+            return hit
+        }
+        // 旧固件的客户端列表没有 `dev`，退回按频段标签对（`2.4G` / `5G`）。
+        let tags = Set(live.map { wifiShortBand($0.band) })
+        return online.first { tags.contains($0.iface) }
+    }
+
+    /// 中继正在用的那个频段。改它的信道 / 频宽等于把上级连接掐掉，官方在界面上锁住。
+    private var repeaterLockedBand: String {
+        guard info.uplink == .repeater else { return "" }
+        let raw = info.repeater.lockBand.lowercased()
+        if raw.hasPrefix("2") { return "2.4" }
+        if raw.hasPrefix("5") { return "5" }
+        if raw.hasPrefix("6") { return "6" }
+        // 没锁频段时按上级信道推断：14 以上只可能是 5G。
+        if let channel = Int(info.upstreamChannel), channel > 0 {
+            return channel > 14 ? "5" : "2.4"
+        }
+        return ""
+    }
+
+    private func isRepeaterLocked(_ band: WifiBandInfo) -> Bool {
+        !repeaterLockedBand.isEmpty && band.band == repeaterLockedBand
     }
 
     private var offBandNames: [String] {
@@ -451,11 +527,36 @@ struct WifiMainPage: View {
             .padding(.bottom, 44)
         }
         .scrollBounceBehavior(.basedOnSize)
-        .sheet(item: $editingGroup) { group in
-            WifiGroupEditorSheet(group: group)
+        .sheet(item: $editingBand) { band in
+            WifiBandSheet(band: band, isLastLive: liveBands.count <= 1)
         }
         .sheet(item: $editingRadio) { band in
             WifiRadioEditorSheet(band: band)
+        }
+        .sheet(item: $qrTarget) { payload in
+            WifiQrSheet(payload: payload)
+        }
+        .overlay {
+            if let pendingClose {
+                SheetOverlay(onDismiss: { self.pendingClose = nil }) {
+                    SheetOverlayCard {
+                        Text("关闭 \(wifiShortBand(pendingClose.band)) 的主 Wi-Fi")
+                            .font(.headline)
+                        Text("请确保至少还有一个频段的 Wi-Fi 开着。全部关掉后，手机和电脑会立刻断开这台路由器，只能插网线或按机身上的开关才能恢复。")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack(spacing: 10) {
+                            SheetOverlayButton(title: "取消") { self.pendingClose = nil }
+                            SheetOverlayButton(title: "确认关闭", tint: .red) {
+                                let band = pendingClose
+                                self.pendingClose = nil
+                                commitBand(band, on: false)
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -491,7 +592,9 @@ struct WifiMainPage: View {
                                ? "已关闭"
                                : liveBands.map { wifiShortBand($0.band) }.joined(separator: " + "),
                            sub: offBandNames.isEmpty ? "全部广播中" : "\(offBandNames.joined(separator: "/")) 已关"),
-                WifiMetric(label: "发射功率",
+                // iOS 的采集里没有 `country`（官方那格是「功率 · 地区」），
+                // 这里报「功率 · 制式」——不编一个读不到的地区出来。
+                WifiMetric(label: "功率 · 制式",
                            value: bands.first?.powerLabel ?? "最大",
                            sub: bands.first.map { wifiStandard($0) } ?? "—")
             ])
@@ -512,9 +615,10 @@ struct WifiMainPage: View {
 
                 Spacer(minLength: 4)
 
-                Text(band.clients > 0 ? "\(band.clients) 台" : (on ? "无设备" : "已关闭 · 0 台"))
+                Text(envelopeStatus(band, on: on))
                     .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(Color.secondary.opacity(on ? 1 : 0.62))
+                    .foregroundStyle(isRepeaterLocked(band) && on
+                                     ? amber : Color.secondary.opacity(on ? 1 : 0.62))
                     .monospacedDigit()
                     .lineLimit(1)
             }
@@ -527,10 +631,24 @@ struct WifiMainPage: View {
         }
     }
 
-    /// `2.4G · CH 6 · 40MHz`。频宽为 0 时省掉尾段，不留一个空的「MHz」。
+    /// 频谱行右侧那句：中继锁住时要说明「为什么这台数不会变」。
+    private func envelopeStatus(_ band: WifiBandInfo, on: Bool) -> String {
+        if on, isRepeaterLocked(band) { return "中继锁定 · \(band.clients) 台" }
+        return on ? "\(band.clients) 台" : "已关闭 · 0 台"
+    }
+
+    /// `2.4G · 自动 · CH 6 · 40MHz`。
+    ///
+    /// 「自动」和落点是两件事：官方行里钉住信道写 `CH 6`，自动时写 `自动`，
+    /// 但自动也必须把实测落点带出来，否则用户以为信道没定。
     private func envelopeLabel(_ band: WifiBandInfo) -> String {
         var parts: [String] = [wifiShortBand(band.band)]
-        parts.append(band.channel > 0 ? "CH \(band.channel)" : "自动")
+        let pinned = band.channelMode.isEmpty || band.channelMode == "auto"
+        if pinned {
+            parts.append(band.channel > 0 ? "自动 · CH \(band.channel)" : "自动")
+        } else {
+            parts.append("CH \(band.channelMode)")
+        }
         if !band.width.isEmpty { parts.append(band.width + "MHz") }
         return parts.joined(separator: " · ")
     }
@@ -572,7 +690,14 @@ struct WifiMainPage: View {
                                    indent: 55,
                                    tint: WifiPalette.ink,
                                    onReveal: { toggleReveal(band.id) },
-                                   onCopy: { copy(key, label: band.ssid) })
+                                   onCopy: { copy(key, label: band.ssid) },
+                                   onShare: {
+                                       qrTarget = WifiQrPayload(ssid: band.ssid,
+                                                                key: key,
+                                                                security: band.securityLabel,
+                                                                hidden: band.hidden,
+                                                                bandLabel: band.bandName)
+                                   })
                     }
                 }
             }
@@ -594,7 +719,9 @@ struct WifiMainPage: View {
             WifiBandTag(text: wifiShortBand(band.band), on: on)
 
             Button {
-                if let mainGroup, mainGroup.editable { editingGroup = mainGroup }
+                // 只改这一段（官方也是「仅修改 X GHz，不影响其他频段」）。
+                // 以前点这里打开的是整组编辑页，改 2.4G 的名字会把 5G 一起改掉。
+                if band.editable { editingBand = band }
             } label: {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(band.ssid.isEmpty ? "未命名" : band.ssid)
@@ -604,18 +731,27 @@ struct WifiMainPage: View {
                         .truncationMode(.middle)
 
                     HStack(spacing: 5) {
-                        WifiChip(text: band.hidden ? "隐藏" : "显示",
-                                 tint: on ? WifiPalette.accent : nil,
-                                 ink: on ? WifiPalette.ink : nil)
+                        if on {
+                            WifiChip(text: band.hidden ? "隐藏" : "显示",
+                                     tint: WifiPalette.accent,
+                                     ink: WifiPalette.ink)
+                        } else {
+                            WifiChip(text: band.radioOff ? "射频已关" : "已关闭")
+                        }
                         WifiChip(text: band.securityLabel)
-                        if band.channel > 0 { WifiChip(text: "信道 \(band.channel)") }
+                        let channelTag = band.channel > 0
+                            ? "\(band.channel)"
+                            : band.channelMode
+                        if !channelTag.isEmpty, channelTag != "auto" {
+                            WifiChip(text: "信道 \(channelTag)")
+                        }
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .disabled(mainGroup?.editable != true)
+            .disabled(!band.editable)
 
             bandSwitch(band)
         }
@@ -672,9 +808,11 @@ struct WifiMainPage: View {
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
 
-                    Text("\(wifiStandard(band)) · 功率 \(band.powerLabel)")
+                    Text(isRepeaterLocked(band)
+                         ? "中继已锁定信道与频宽 · 功率 \(band.powerLabel)"
+                         : "\(wifiStandard(band)) · 功率 \(band.powerLabel)")
                         .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(isRepeaterLocked(band) ? amber : Color.secondary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.85)
                 }
@@ -704,19 +842,25 @@ struct WifiMainPage: View {
     }
 
     private func setBand(_ band: WifiBandInfo, on: Bool) {
-        guard !busyBands.contains(band.id), let group = mainGroup else { return }
+        guard !busyBands.contains(band.id) else { return }
+        // 关掉最后一个还在广播的频段 = 手机立刻掉线、也没法再连回来打开它。
+        // 官方在这一步先弹一句「请确保至少有一个频段开着」，这里照做。
+        if !on, liveBands.count <= 1 {
+            pendingClose = band
+            return
+        }
+        commitBand(band, on: on)
+    }
+
+    private func commitBand(_ band: WifiBandInfo, on: Bool) {
+        guard !busyBands.contains(band.id) else { return }
         busyBands.insert(band.id)
         errorText = nil
         Task {
-            var map: [String: Bool] = [:]
-            for member in group.members { map[member.band] = member.ssidOn }
-            map[band.band] = on
-
-            let problem = await model.saveWifiGroup(group,
-                                                    ssid: group.ssid,
-                                                    key: group.key,
-                                                    hidden: group.hidden,
-                                                    bandOn: map)
+            // 只改这一条 `wifi-iface`。以前是把整组的 `disabled` 全部重写一遍，
+            // 其中「radio 关着、SSID 还开着」的频段会被算成开，顺手又给写回 0，
+            // 于是用户切 A 频段，B 频段的射频也跟着被拉起来。
+            let problem = await model.setBandEnabled(band, on)
             busyBands.remove(band.id)
             if let problem {
                 errorText = problem
@@ -788,6 +932,8 @@ struct WifiSidePage: View {
 
     @State private var editing = false
     @State private var creating = false
+    @State private var confirmingDelete = false
+    @State private var qrTarget: WifiQrPayload?
     @State private var busy = false
     @State private var revealed = false
     @State private var errorText: String?
@@ -799,6 +945,7 @@ struct WifiSidePage: View {
 
     private var tint: Color { kind == .iot ? WifiPalette.iot : WifiPalette.accent }
     private var ink: Color { kind == .iot ? WifiPalette.iotInk : WifiPalette.ink }
+    private var danger: Color { wifiTone((0.72, 0.16, 0.13), (1.00, 0.45, 0.40)) }
 
     private var pillTone: WifiPill.Tone {
         if !hasNet { return .neutral }
@@ -823,6 +970,32 @@ struct WifiSidePage: View {
         }
         .sheet(isPresented: $creating) {
             WifiGroupCreateSheet(kind: kind)
+        }
+        .sheet(item: $qrTarget) { payload in
+            WifiQrSheet(payload: payload)
+        }
+        .overlay {
+            if confirmingDelete, let group {
+                SheetOverlay(onDismiss: { confirmingDelete = false }) {
+                    SheetOverlayCard {
+                        Text("移除\(kind.title)")
+                            .font(.headline)
+                        Text("将停用并重置这组网络的配置，已连入的设备会断开连接。配置段会留着（不删除），下次「添加」还是用同一批模板段。")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(group.ssid.isEmpty ? "未命名" : group.ssid)
+                            .font(.subheadline.weight(.semibold))
+                        HStack(spacing: 10) {
+                            SheetOverlayButton(title: "取消") { confirmingDelete = false }
+                            SheetOverlayButton(title: "确认移除", tint: .red) {
+                                confirmingDelete = false
+                                remove(group)
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -868,8 +1041,7 @@ struct WifiSidePage: View {
         guard let group, hasNet else { return "未创建" }
         guard isOn else { return "已关闭" }
         if kind == .iot {
-            let bands = group.onBandShort
-            return bands.isEmpty ? "广播中" : bands + " 广播中"
+            return liveBandShort.isEmpty ? "广播中" : liveBandShort + " 广播中"
         }
         return "已开启"
     }
@@ -885,7 +1057,7 @@ struct WifiSidePage: View {
                      supported: supportedBands)
         case .iot:
             IotViz(isOn: isOn,
-                   clients: group?.clients ?? 0,
+                   clients: iotOnlineCount,
                    bandTag: iotBandTag,
                    sample: iotClients.first)
         default:
@@ -907,14 +1079,52 @@ struct WifiSidePage: View {
 
     /// IoT 组里在线的那几台。
     ///
-    /// **不能按 `iface.contains("iot")` 筛**：这台固件的 `gl-clients` 只在 `iface` 里给频段
-    /// （`2.4G` / `5G` / `有线`），不写它挂在哪一个 SSID 上。所以台数取本组台数，
-    /// 样本设备只能从「同频段的在线设备」里挑一台，文案也不硬说「这台就是 IoT 的」。
+    /// **按网口认**（`NetClient.dev` 就是 `ra1` / `rai1` 这种 VAP 名）。这台固件的
+    /// `gl-clients` 在 `iface` 里只给「2.4G / 5G / 有线」，不写 SSID；按频段筛会把
+    /// 主网同频段的手机算进来，按 `iface.contains("iot")` 又永远筛不到。
+    /// 旧固件没有 `dev` 时退回本组台数，但**不再随便抓一台别组的设备**当样本。
     private var iotClients: [NetClient] {
-        guard let group, group.clients > 0 else { return [] }
-        let bands = Set(group.members.filter { $0.ssidOn }.map { wifiShortBand($0.band) })
-        let matched = info.onlineClients.filter { bands.contains($0.iface) }
-        return matched.isEmpty ? Array(info.onlineClients.prefix(1)) : matched
+        guard let group else { return [] }
+        let ifnames = Set(group.members.map(\.ifname).filter { !$0.isEmpty })
+        guard !ifnames.isEmpty else { return [] }
+        return info.onlineClients.filter { !$0.wired && ifnames.contains($0.dev) }
+    }
+
+    /// IoT 在线台数：能按网口数就按网口数，旧固件退回本组台数。
+    private var iotOnlineCount: Int {
+        guard let group else { return 0 }
+        let ifnames = Set(group.members.map(\.ifname).filter { !$0.isEmpty })
+        return ifnames.isEmpty ? group.clients : iotClients.count
+    }
+
+    /// IoT 共用信道：优先这一组的 2.4G，其次主网 2.4G，再其次组内任一段。
+    /// 以前写的是「第一个不是 5G 的成员」——有 6G 时会报成 6G 的信道。
+    private var iotSharedChannel: String {
+        let members = group?.members ?? []
+        if let two = members.first(where: { $0.band == "2.4" }), two.channel > 0 {
+            return "CH \(two.channel)"
+        }
+        if let hit = members.first(where: { $0.channel > 0 }) {
+            return "CH \(hit.channel)"
+        }
+        if let main = info.bands.first(where: { $0.band == "2.4" }), main.channel > 0 {
+            return "CH \(main.channel)"
+        }
+        return "自动"
+    }
+
+    /// 真正在广播的频段串（`ssidOn` 且 radio 没关）。
+    ///
+    /// `WifiNetGroup.onBandShort` 只看 `ssidOn`：radio 被关掉的频段它也算进来。
+    /// 读数与状态胶囊用这个，否则界面说「2.4G · 5G 开着」，实际只有 2.4G 有信号。
+    private var liveBandShort: String {
+        guard let group else { return "" }
+        var names: [String] = []
+        for member in group.members where member.ssidOn && !member.radioOff {
+            let name = wifiShortBand(member.band)
+            if !name.isEmpty && !names.contains(name) { names.append(name) }
+        }
+        return names.joined(separator: " · ")
     }
 
     /// IoT 正在广播的那个频段短名，没在广播就写 IoT。
@@ -947,16 +1157,15 @@ struct WifiSidePage: View {
         switch kind {
         case .guest:
             return [WifiMetric(label: "访客终端", value: "\(group.clients) 台"),
-                    WifiMetric(label: "开启频段", value: group.onBandShort.isEmpty ? "未开启" : group.onBandShort),
+                    WifiMetric(label: "开启频段", value: liveBandShort.isEmpty ? "未开启" : liveBandShort),
                     WifiMetric(label: "主网隔离", value: "已开启")]
         case .iot:
-            let shared = group.members.first { $0.band != "5" } ?? group.members.first
-            return [WifiMetric(label: "在线设备", value: "\(group.clients) 台"),
-                    WifiMetric(label: "共用信道", value: shared.map { $0.channel > 0 ? "CH \($0.channel)" : "自动" } ?? "自动"),
+            return [WifiMetric(label: "在线设备", value: "\(iotOnlineCount) 台"),
+                    WifiMetric(label: "共用信道", value: iotSharedChannel),
                     WifiMetric(label: "随机 BSSID", value: group.randomBSSID ? "已开启" : "未开启")]
         default:
             return [WifiMetric(label: "在线终端", value: "\(group.clients) 台"),
-                    WifiMetric(label: "聚合链路", value: group.onBandShort.isEmpty ? "2.4G · 5G" : group.onBandShort),
+                    WifiMetric(label: "聚合链路", value: liveBandShort.isEmpty ? "2.4G · 5G" : liveBandShort),
                     WifiMetric(label: "安全标准", value: group.securityLabel.isEmpty ? "—" : group.securityLabel)]
         }
     }
@@ -1048,7 +1257,14 @@ struct WifiSidePage: View {
                            indent: 0,
                            tint: ink,
                            onReveal: { revealed.toggle() },
-                           onCopy: { copyKey(group.key, label: group.ssid) })
+                           onCopy: { copyKey(group.key, label: group.ssid) },
+                           onShare: {
+                               qrTarget = WifiQrPayload(ssid: group.ssid,
+                                                        key: group.key,
+                                                        security: group.securityLabel,
+                                                        hidden: group.hidden,
+                                                        bandLabel: kind == .mlo ? "多链路 (MLO)" : cardTitle)
+                           })
             }
 
             CardRule()
@@ -1058,16 +1274,22 @@ struct WifiSidePage: View {
                                           value: randomBSSIDText(group))
             } else {
                 WifiKvRow(label: kind == .mlo ? "聚合频段" : "开启频段",
-                          value: group.onBandShort.isEmpty ? "—" : group.onBandShort)
+                          value: liveBandShort.isEmpty ? "—" : liveBandShort)
                 CardRule()
                 WifiKvRow(label: "随机 BSSID", value: randomBSSIDText(group))
             }
 
-            WifiSoftButton(text: "修改",
-                           tint: tint,
-                           ink: ink,
-                           enabled: group.editable) { editing = true }
-                .padding(.top, 12)
+            HStack(spacing: 9) {
+                WifiSoftButton(text: "修改",
+                               tint: tint,
+                               ink: ink,
+                               enabled: group.editable) { editing = true }
+                WifiSoftButton(text: "删除",
+                               tint: danger,
+                               ink: danger,
+                               enabled: group.editable) { confirmingDelete = true }
+            }
+            .padding(.top, 12)
 
             if kind == .iot {
                 Text(tipText)
@@ -1135,19 +1357,32 @@ struct WifiSidePage: View {
         busy = true
         errorText = nil
         Task {
-            var map: [String: Bool] = [:]
-            for member in group.members { map[member.band] = on }
-
-            let problem = await model.saveWifiGroup(group,
-                                                    ssid: group.ssid,
-                                                    key: group.key,
-                                                    hidden: group.hidden,
-                                                    bandOn: map)
+            // 整组开 / 关交给 `setWifiGroup`：成员、`mld0`、`network.guest|iot`
+            // 与桥接接口它一起处理，还会把 `init` 摆对。以前是「重写一遍
+            // ssid / key / hidden 再带 bandOn」，多走了一条本来不需要的写入路径。
+            let problem = await model.setWifiGroup(group, on: on)
             busy = false
             if let problem {
                 errorText = problem
                 model.notice = Notice(kind: .fail, title: "没切换成功", detail: problem)
             } else {
+                await model.manualRefresh()
+            }
+        }
+    }
+
+    private func remove(_ group: WifiNetGroup) {
+        guard !busy else { return }
+        busy = true
+        errorText = nil
+        Task {
+            let problem = await model.deleteWifiGroup(group)
+            busy = false
+            if let problem {
+                errorText = problem
+                model.notice = Notice(kind: .fail, title: "没移除成功", detail: problem)
+            } else {
+                model.notice = Notice(kind: .ok, title: "\(kind.title)已移除", detail: group.ssid)
                 await model.manualRefresh()
             }
         }

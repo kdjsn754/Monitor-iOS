@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import CoreImage
 
 /// 无线（二级页）。
 ///
@@ -78,9 +79,14 @@ struct WifiSettingsView: View {
     }
 
     /// 正在广播的组，顶栏在对应那格右侧点一颗绿点。
+    ///
+    /// 主网络不靠 `mainGroup.isOn` 判：那一组还带着 `network.lan` 的状态，
+    /// 而「有没有在广播」看的是各频段的 `ssidOn && !radioOff`（`WifiBandInfo.up`）。
+    /// 访客 / IoT / 多链路才有独立的 `network.*` 段，用组的状态。
     private var liveTabs: Set<WifiNetTab> {
         var set: Set<WifiNetTab> = []
-        for group in info.wifiGroups where group.isOn {
+        if info.bands.contains(where: \.up) { set.insert(.main) }
+        for group in info.wifiGroups where group.kind != .main && group.isOn {
             if let matched = WifiNetTab(rawValue: group.kind.rawValue) { set.insert(matched) }
         }
         return set
@@ -385,6 +391,404 @@ enum KindIcon {
     }
 }
 
+// MARK: - 单频段编辑
+
+/// 只改一个频段：名称 / 安全性 / 密码 / 隐藏 / 随机 BSSID / 启用。
+///
+/// 主网络卡里点哪一段，改的就是那一段（官方那句「仅修改 X GHz，不影响其他频段」）。
+/// v3.4.6 及以前点开的是**整组**编辑页——改 2.4G 的名字会把 5G 一起改掉，
+/// 关 2.4G 的 SSID 也会把 5G 关掉，这是这一页最容易被当成「bug」的地方。
+/// 写入走 `saveBand`，只碰这一条 `wifi-iface` 和它自己的 `random_bssid`。
+struct WifiBandSheet: View {
+    @Environment(AppModel.self) private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+
+    let band: WifiBandInfo
+    /// 这是不是最后一个还在广播的频段。是的话不许在这里关——关掉就断连。
+    var isLastLive = false
+
+    @State private var ssid: String
+    @State private var key: String
+    @State private var hidden: Bool
+    @State private var randomBSSID: Bool
+    @State private var enabled: Bool
+    @State private var security: WifiSecurity
+    @State private var showKey = false
+    @State private var busy = false
+    @State private var errorText: String?
+    /// 用户点过安全性那几档没有。没点过就不写 `encryption`。
+    @State private var securityTouched = false
+
+    init(band: WifiBandInfo, isLastLive: Bool = false) {
+        self.band = band
+        self.isLastLive = isLastLive
+        _ssid = State(initialValue: band.ssid)
+        _key = State(initialValue: band.key)
+        _hidden = State(initialValue: band.hidden)
+        _randomBSSID = State(initialValue: band.randomBSSID)
+        // 和列表里的开关同一个口径：radio 关着就是关着，不因为 iface 的 disabled=0 就当开。
+        _enabled = State(initialValue: band.ssidOn && !band.radioOff)
+        _security = State(initialValue: WifiSecurity.match(band.encryption) ?? .mixed)
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: UI.cardSpacing) {
+                    identityCard
+                    securityCard
+                    optionsCard
+                    if let errorText { WifiErrorNote(text: errorText) { self.errorText = nil } }
+                    WifiSaveButton(title: "保存", busy: busy) {
+                        Task { await save() }
+                    }
+                    .padding(.top, 2)
+                }
+                .padding(.horizontal, UI.pagePadding)
+                .padding(.top, 12)
+                .padding(.bottom, 28)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            .themedScrollBackground()
+            .primaryButtons()
+            .navigationTitle("\(band.bandName) 设置")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("取消") { dismiss() }
+                        .navBarTint()
+                        .disabled(busy)
+                }
+            }
+        }
+    }
+
+    private var identityCard: some View {
+        CardPanel("名称", icon: "wifi") {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    TextField("", text: $ssid)
+                        .font(.system(size: 15.5, weight: .medium))
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background {
+                            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                .fill(Color(.tertiarySystemFill))
+                        }
+                        .disabled(busy)
+                    Text("\(ssid.count)/32")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.tertiary)
+                        .monospacedDigit()
+                }
+                Text("只改 \(band.bandName)，其他频段的名称与密码不动。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.top, 2)
+            .padding(.bottom, 4)
+        }
+    }
+
+    private var securityCard: some View {
+        CardPanel("安全性", icon: "lock.shield") {
+            VStack(alignment: .leading, spacing: 10) {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 8),
+                                    GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                    ForEach(WifiSecurity.allCases) { item in
+                        securityPill(item)
+                    }
+                }
+                if security.needsKey {
+                    HStack(spacing: 8) {
+                        Group {
+                            if showKey {
+                                TextField("密码", text: $key)
+                            } else {
+                                SecureField("密码", text: $key)
+                            }
+                        }
+                        .font(.system(size: 15))
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .disabled(busy)
+
+                        Button {
+                            showKey.toggle()
+                        } label: {
+                            Image(systemName: showKey ? "eye.slash" : "eye")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
+                                .padding(4)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .background {
+                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            .fill(Color(.tertiarySystemFill))
+                    }
+                }
+            }
+            .padding(.top, 2)
+            .padding(.bottom, 4)
+        }
+    }
+
+    private func securityPill(_ item: WifiSecurity) -> some View {
+        let selected = security == item
+        return Button {
+            security = item
+            securityTouched = true
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 12, weight: .semibold))
+                Text(item.title)
+                    .font(.system(size: 12.5, weight: selected ? .semibold : .regular))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(selected ? WifiPalette.ink : Color.secondary)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(selected ? WifiPalette.accent.opacity(0.12) : Color(.tertiarySystemFill))
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(busy)
+    }
+
+    private var optionsCard: some View {
+        CardPanel("其他", icon: "slider.horizontal.3") {
+            VStack(spacing: 0) {
+                HStack(spacing: 9) {
+                    Image(systemName: "eye.slash")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(WifiPalette.ink)
+                        .frame(width: 18, alignment: .leading)
+                    Text("隐藏网络").font(UI.row())
+                    Spacer(minLength: 8)
+                    Toggle("", isOn: $hidden)
+                        .labelsHidden()
+                        .blueSwitch()
+                        .disabled(busy)
+                }
+                .padding(.vertical, UI.rowPadding)
+
+                CardRule()
+
+                HStack(spacing: 9) {
+                    Image(systemName: "shuffle")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(WifiPalette.ink)
+                        .frame(width: 18, alignment: .leading)
+                    Text("随机 BSSID").font(UI.row())
+                    Spacer(minLength: 8)
+                    Toggle("", isOn: $randomBSSID)
+                        .labelsHidden()
+                        .blueSwitch()
+                        .disabled(busy)
+                }
+                .padding(.vertical, UI.rowPadding)
+
+                CardRule()
+
+                HStack(spacing: 9) {
+                    Image(systemName: "power")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(WifiPalette.ink)
+                        .frame(width: 18, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("启用这个频段").font(UI.row())
+                        Text(enabled
+                             ? "保存后开始广播"
+                             : (isLastLive ? "这是最后一个在广播的频段，不能在这里关" : "保存后停止广播（同组其他频段不受影响）"))
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+                    }
+                    Spacer(minLength: 8)
+                    Toggle("", isOn: $enabled)
+                        .labelsHidden()
+                        .blueSwitch()
+                        .disabled(busy)
+                }
+                .padding(.vertical, UI.rowPadding)
+            }
+        }
+    }
+
+    private func save() async {
+        guard !busy else { return }
+        // 断连的这一个动作只留在列表里做：那里有二次确认，这里没有。
+        if isLastLive, band.up, !enabled {
+            errorText = "这是最后一个在广播的频段，关掉会立刻断连。请回列表点开关并确认。"
+            return
+        }
+        let name = ssid.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.count <= 32 else {
+            errorText = "Wi-Fi 名称要 1–32 个字符"
+            return
+        }
+        if security.needsKey {
+            let secret = key.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard secret.count >= 8, secret.count <= 63 else {
+                errorText = "密码要 8–63 个字符"
+                return
+            }
+            guard !secret.contains(where: { $0.isWhitespace || !$0.isASCII }) else {
+                errorText = "密码不能包含空格或中文字符"
+                return
+            }
+        }
+        busy = true
+        errorText = nil
+        // 认不出来的老加密（`owe` / `psk2+tkip+ccmp`）且用户没动过：不写 encryption，
+        // 免得「只改了个名字」把固件原有的组合压成别的。
+        let encryption: String? = (securityTouched || WifiSecurity.match(band.encryption) != nil)
+            ? security.rawValue : nil
+        let problem = await model.saveBand(band, ssid: name, key: key,
+                                           hidden: hidden, enabled: enabled,
+                                           encryption: encryption,
+                                           randomBSSID: randomBSSID)
+        busy = false
+        guard let problem else {
+            model.notice = Notice(kind: .ok, title: "\(band.bandName) 已保存", detail: name)
+            dismiss()
+            await model.manualRefresh()
+            return
+        }
+        errorText = problem
+    }
+}
+
+// MARK: - 二维码分享
+
+/// 一条分享用的网络信息（标准 `WIFI:` 串，系统相机和微信扫一扫都认）。
+struct WifiQrPayload: Identifiable {
+    let id = UUID()
+    let ssid: String
+    let key: String
+    let security: String
+    let hidden: Bool
+    let bandLabel: String
+
+    var encoded: String {
+        let noPass = security.isEmpty || security.contains("无")
+        let specials: Set<Character> = ["\\", ";", ",", ":", "\""]
+        func escape(_ raw: String) -> String {
+            var out = ""
+            for ch in raw {
+                if specials.contains(ch) { out.append("\\") }
+                out.append(ch)
+            }
+            return out
+        }
+        // 二维码规范里只有 WPA / WEP / nopass 三种；WPA3 落在 WPA 这一档。
+        let type = noPass ? "nopass" : "WPA"
+        var text = "WIFI:T:" + type + ";S:" + escape(ssid) + ";"
+        if !noPass { text += "P:" + escape(key) + ";" }
+        if hidden { text += "H:true;" }
+        return text + ";"
+    }
+}
+
+struct WifiQrSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let payload: WifiQrPayload
+    private let image: UIImage?
+
+    init(payload: WifiQrPayload) {
+        self.payload = payload
+        self.image = Self.makeImage(payload.encoded)
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: UI.cardSpacing) {
+                    CardPanel("扫一扫连接", icon: "qrcode") {
+                        VStack(spacing: 12) {
+                            if let image {
+                                Image(uiImage: image)
+                                    .interpolation(.none)
+                                    .resizable()
+                                    .scaledToFit()
+                                    .frame(width: 186, height: 186)
+                                    .padding(12)
+                                    // 二维码必须留白底：深色模式下透出页面底会扫不出来。
+                                    .background(Color.white)
+                                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            } else {
+                                Text("二维码没生成出来")
+                                    .font(UI.row())
+                                    .foregroundStyle(.secondary)
+                            }
+                            VStack(spacing: 4) {
+                                Text(payload.ssid.isEmpty ? "未命名" : payload.ssid)
+                                    .font(.system(size: 15, weight: .semibold))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Text(payload.bandLabel)
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(.secondary)
+                            }
+                            Text("用手机相机或微信扫一扫，直接连上这个网络。二维码只在本机生成，密码不会上传。")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.tertiary)
+                                .multilineTextAlignment(.center)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                    }
+
+                    if !payload.key.isEmpty {
+                        CardPanel("密码", icon: "key") {
+                            Text(payload.key)
+                                .font(.system(size: 15, weight: .medium, design: .monospaced))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.vertical, 4)
+                        }
+                    }
+                }
+                .padding(.horizontal, UI.pagePadding)
+                .padding(.top, 12)
+                .padding(.bottom, 28)
+            }
+            .themedScrollBackground()
+            .navigationTitle("分享 Wi-Fi")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("完成") { dismiss() }
+                        .navBarTint()
+                }
+            }
+        }
+    }
+
+    private static func makeImage(_ text: String) -> UIImage? {
+        guard let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
+        filter.setValue(Data(text.utf8), forKey: "inputMessage")
+        filter.setValue("M", forKey: "inputCorrectionLevel")
+        guard let output = filter.outputImage else { return nil }
+        let scaled = output.transformed(by: CGAffineTransform(scaleX: 12, y: 12))
+        guard let cg = CIContext(options: nil).createCGImage(scaled, from: scaled.extent) else { return nil }
+        return UIImage(cgImage: cg)
+    }
+}
+
 // MARK: - 网络编辑
 
 /// 一组无线网络的编辑页：名称 / 安全性 / 密码 / 各频段开关 / 隐藏 / 随机 BSSID。
@@ -420,7 +824,10 @@ struct WifiGroupEditorSheet: View {
         _security = State(initialValue: group.security ?? .mixed)
         _randomBSSID = State(initialValue: group.randomBSSID)
         var map: [String: Bool] = [:]
-        for member in group.members { map[member.band] = member.ssidOn }
+        // 和列表里的开关同一个口径：radio 关着就是关着。
+        // 只看 `ssidOn` 的话，radio 被关掉的频段在编辑页里会显示成开，
+        // 保存时又被写回 `disabled=0`，顺手把它打开了。
+        for member in group.members { map[member.band] = member.ssidOn && !member.radioOff }
         _bandOn = State(initialValue: map)
     }
 

@@ -2056,7 +2056,8 @@ private struct NetVap {
     func saveBand(_ band: WifiBandInfo, ssid: String, key: String,
                   hidden: Bool, enabled: Bool,
                   channel: String? = nil, width: String? = nil,
-                  power: Int? = nil) async -> String? {
+                  power: Int? = nil,
+                  encryption: String? = nil, randomBSSID: Bool? = nil) async -> String? {
         guard connected else { return "还没连上路由器" }
         guard band.editable else { return "读不到这个频段的配置段名，改不了" }
 
@@ -2072,7 +2073,12 @@ private struct NetVap {
         if name.count > 32 { return "Wi-Fi 名称不能超过 32 个字符" }
 
         // 有密码的那种加密（psk2 / sae-mixed …）才管密码；`none` 时不动 `key`。
-        let needsKey = !band.encryption.isEmpty && band.encryption != "none"
+        //
+        // 这里必须看「这次要写下去的」（`encryption`），不能只看旧的 `band.encryption`：
+        // 在表单里从 WPA2 切到「无密码」时，旧值仍是 psk2，会拿空密码去撞 8–63 位校验，
+        // 用户看到的是「密码要 8–63 个字符」，永远存不成无密码。
+        let finalEncryption = encryption ?? band.encryption
+        let needsKey = !finalEncryption.isEmpty && finalEncryption != "none"
         let secret = key.trimmingCharacters(in: .whitespacesAndNewlines)
         let keyChanged = needsKey && secret != band.key
         if keyChanged, secret.count < 8 || secret.count > 63 {
@@ -2083,7 +2089,21 @@ private struct NetVap {
         lines.append("uci -q set wireless.\(band.section).ssid=\(shQuote(name))")
         if keyChanged { lines.append("uci -q set wireless.\(band.section).key=\(shQuote(secret))") }
         lines.append("uci -q set wireless.\(band.section).hidden='\(hidden ? "1" : "0")'")
+        if let encryption {
+            lines.append("uci -q set wireless.\(band.section).encryption=\(shQuote(encryption))")
+            // 换成「无密码」时留着旧 key，hostapd 仍按 WPA 起（有些固件会直接不起），
+            // 设备也搜到一个「有锁」的网络却连不上。
+            if encryption == "none" {
+                lines.append("uci -q delete wireless.\(band.section).key 2>/dev/null; true")
+            }
+        }
+        if let randomBSSID {
+            lines.append("uci -q set wireless.\(band.section).random_bssid='\(randomBSSID ? "1" : "0")'")
+        }
         lines.append("uci -q set wireless.\(band.section).disabled='\(enabled ? "0" : "1")'")
+        if enabled {
+            lines.append("uci -q set wireless.\(band.section).init='1'")
+        }
         // 打开时顺手把整个 radio 也拉起来：这台机器出现过「主 SSID 开着、radio 被关」
         // 的状态，只改 VAP 的话开关看着亮了、信号还是没有。
         if enabled, !band.radio.isEmpty {
@@ -2108,6 +2128,8 @@ private struct NetVap {
         lines.append("echo @@SSID; uci -q get wireless.\(band.section).ssid")
         lines.append("echo @@HIDDEN; uci -q get wireless.\(band.section).hidden")
         lines.append("echo @@OFF; uci -q get wireless.\(band.section).disabled")
+        lines.append("echo @@ENC; uci -q get wireless.\(band.section).encryption")
+        lines.append("echo @@RBSS; uci -q get wireless.\(band.section).random_bssid")
         if !band.radio.isEmpty {
             lines.append("echo @@CH; uci -q get wireless.\(band.radio).channel")
             lines.append("echo @@HT; uci -q get wireless.\(band.radio).htmode")
@@ -2128,6 +2150,16 @@ private struct NetVap {
             guard hiddenBack == (hidden ? "1" : "0") else { return "隐藏开关没写进去" }
             let offBack = (sections["OFF"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard offBack == (enabled ? "0" : "1") else { return "启用开关没写进去" }
+            if let encryption {
+                let back = (sections["ENC"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard back == encryption else { return "安全性没写进去（读回来是「\(back)」）" }
+            }
+            if let randomBSSID {
+                let back = (sections["RBSS"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let want = randomBSSID ? "1" : "0"
+                // 旧固件本来就没有这一项、写进去也不会回显时，别把保存判成失败。
+                guard back.isEmpty || back == want else { return "随机 BSSID 没写进去" }
+            }
             if let channel {
                 let back = (sections["CH"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 guard back == channel else { return "信道没写进去（读回来是「\(back)」）" }
@@ -2174,6 +2206,10 @@ private struct NetVap {
         var lines: [String] = []
         for member in group.members where !member.section.isEmpty {
             lines.append("uci -q set wireless.\(member.section).disabled='\(off)'")
+            // `init='1'` 是 GL 固件给 VAP 打的「该初始化」标记。少了它，
+            // 某些固件 reload 之后只会把配置改掉、不重建这个 VAP——
+            // 界面上开着，手机却搜不到（官方 App 的开关也一直在写这一项）。
+            lines.append("uci -q set wireless.\(member.section).init='1'")
             if on, !member.radio.isEmpty {
                 lines.append("uci -q set wireless.\(member.radio).disabled='0'")
             }
@@ -2226,6 +2262,72 @@ private struct NetVap {
             // 配置已经确认写进去了，最后才重启无线（这一步会断线，见 reloadWireless）
             await reloadWireless()
             // 界面自己 refresh（saveBand 的做法一致），这里不重复采一轮
+            return nil
+        } catch {
+            return describe(error)
+        }
+    }
+
+    /// 移除一整组附加网络（访客 / IoT / 多链路）。返回 `nil` 表示成功。
+    ///
+    /// **不 `uci delete`**：这几条 `wifi-iface` 是固件预置的模板段，段名（`ra1` / `rai1`）
+    /// 和 MTK 的 vifidx 绑在一起；真删掉再创建会把索引搞乱，那个频段直接起不来。
+    /// 官方 App 的「移除」也是同一套：`disabled=1` + `init=0`，配置留着但不再启用，
+    /// 界面回到「未创建」，下次「添加」就是把同一批段重新初始化。
+    @discardableResult
+    func deleteWifiGroup(_ group: WifiNetGroup) async -> String? {
+        guard connected else { return "还没连上路由器" }
+        guard group.kind != .main else { return "主网络不能移除" }
+        guard !group.members.isEmpty else { return "这组网络还没建，没有可移除的配置" }
+
+        var lines: [String] = []
+        for member in group.members where !member.section.isEmpty {
+            lines.append("uci -q set wireless.\(member.section).disabled='1'")
+            lines.append("uci -q set wireless.\(member.section).init='0'")
+        }
+        if group.kind == .mlo {
+            lines.append("uci -q set wireless.mld0.disabled='1'")
+        }
+        let net = group.kind.networkName
+        if !net.isEmpty {
+            lines.append("uci -q set network.\(net).disabled='1'")
+            lines.append("uci -q commit network")
+        }
+        lines.append("uci -q commit wireless")
+        // 桥接先撤，免得 hostapd 重启时还有 VAP 往 br-guest / br-iot 上挂。
+        if !net.isEmpty {
+            lines.append("ifdown \(net) >/dev/null 2>&1")
+        }
+
+        var expect: [(String, String)] = []
+        for member in group.members where !member.section.isEmpty {
+            expect.append((member.section, "1"))
+            lines.append("echo \"@@RB \(member.section) $(uci -q get wireless.\(member.section).disabled)\"")
+        }
+        if group.kind == .mlo {
+            expect.append(("mld0", "1"))
+            lines.append("echo \"@@RB mld0 $(uci -q get wireless.mld0.disabled)\"")
+        }
+        if !net.isEmpty {
+            expect.append((net, "1"))
+            lines.append("echo \"@@RB \(net) $(uci -q get network.\(net).disabled)\"")
+        }
+        lines.append("echo @@DONE ok")
+
+        do {
+            let text = try await execute(lines.joined(separator: "; "), timeout: 60)
+            guard text.contains("@@DONE ok") else { return "路由器没有回应，配置可能没写进去" }
+            var readBack: [String: String] = [:]
+            for raw in text.split(separator: "\n") {
+                let parts = raw.split(separator: " ").map(String.init)
+                guard parts.count >= 3, parts[0] == "@@RB" else { continue }
+                readBack[parts[1]] = parts[2].trimmingCharacters(in: .whitespaces)
+            }
+            for (name, want) in expect where readBack[name] != want {
+                let got = readBack[name] ?? "空"
+                return "「\(name)」没停用（读回来是「\(got)」）"
+            }
+            await reloadWireless()
             return nil
         } catch {
             return describe(error)
@@ -2376,6 +2478,7 @@ private struct NetVap {
             if let bandOn {
                 let on = bandOn[member.band] ?? false
                 lines.append("uci -q set wireless.\(member.section).disabled='\(on ? "0" : "1")'")
+                if on { lines.append("uci -q set wireless.\(member.section).init='1'") }
                 // 打开某个频段时顺手把整个 radio 也拉起来（这台机器出现过 radio 被关、
                 // SSID 配置还开着的情况；只改 VAP 的话开关亮了、信号还是没有）。
                 if on, !member.radio.isEmpty {
@@ -2561,6 +2664,7 @@ private struct NetVap {
                 lines.append("uci -q set wireless.\(section).ssid=\(shQuote(name))")
                 lines.append("uci -q set wireless.\(section).key=\(shQuote(secret))")
                 lines.append("uci -q set wireless.\(section).disabled='0'")
+                lines.append("uci -q set wireless.\(section).init='1'")
                 lines.append("uci -q set wireless.\(section).hidden='0'")
             }
             lines.append("uci -q set network.\(net).disabled='0'")
