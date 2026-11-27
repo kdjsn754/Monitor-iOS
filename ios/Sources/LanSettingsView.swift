@@ -33,6 +33,16 @@ struct LanSettingsView: View {
 
     private static let leaseOptions = ["1h", "12h", "1d", "7d", "infinite"]
 
+    private var dirty: Bool {
+        guard seeded,
+              let start = Int(info.dhcpStart),
+              let limit = Int(info.dhcpLimit), limit > 0 else { return false }
+        let originalLease = info.dhcpLease.isEmpty ? "12h" : info.dhcpLease
+        return startText != String(start)
+            || endText != String(start + limit - 1)
+            || lease != originalLease
+    }
+
     var body: some View {
         Form {
             portsSection
@@ -57,7 +67,7 @@ struct LanSettingsView: View {
             ToolbarItem(placement: .topBarTrailing) {
                 if busy {
                     ProgressView().controlSize(.small)
-                } else {
+                } else if dirty {
                     Button("保存") { Task { await save() } }
                         .fontWeight(.semibold)
                         .navBarTint()
@@ -142,6 +152,7 @@ struct LanSettingsView: View {
                 }
             }
             .pickerStyle(.menu)
+            .disabled(busy)
             .adaptiveRowBackground()
 
             valueRow("地址池", poolLabel)
@@ -163,6 +174,7 @@ struct LanSettingsView: View {
                 .keyboardType(.numberPad)
                 .monospacedDigit()
                 .frame(width: 46)
+                .disabled(busy)
         }
         .adaptiveRowBackground()
     }

@@ -120,29 +120,75 @@ struct FrameRateBoostProbe: UIViewRepresentable {
 
 private final class ProbeView: UIView {
     private var timer: Timer?
+    private var observingLifecycle = false
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        timer?.invalidate()
-        timer = nil
-        guard let window = window else { return }
-        walk(window)
-        // 0.25 秒：切页本身有 0.25s 动画，手指真正开始拖之前必然已经扫过一轮，
-        // 不会出现「刚切过来那一下没有 boost」。再短只是白烧 CPU。
-        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+        stopTimer()
+        if window == nil {
+            stopLifecycleObservers()
+            return
+        }
+        startLifecycleObservers()
+        if let window { walk(window) }
+        startTimerIfNeeded()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    private func startTimerIfNeeded() {
+        guard timer == nil, window != nil else { return }
+        // 0.6 秒 + `.default` 模式：只在空闲期扫描新挂载的滚动视图，
+        // 滚动手势追踪期间不触发递归遍历，避免抢占滚动帧预算。
+        let timer = Timer(timeInterval: 0.6, repeats: true) { [weak self] _ in
             guard let self, let window = self.window else { return }
             self.walk(window)
         }
-        RunLoop.main.add(timer, forMode: .common)
+        RunLoop.main.add(timer, forMode: .default)
         self.timer = timer
     }
 
-    /// 不写 deinit 去 invalidate：`UIView` 的 deinit 是 nonisolated，在 Swift 5.9 下
-    /// 摸 MainActor 隔离的 `timer` 会有隔离警告。而视图被移除时 `didMoveToWindow`
-    /// 一定会带着 `window == nil` 先跑一遍，上面第一行就把 timer 停掉了，够用。
+    private func stopTimer() {
+        timer?.invalidate()
+        timer = nil
+    }
 
-    /// 递归登记视图树里的 UIScrollView。视图树深度通常几十层，
-    /// 0.25 秒扫一遍（几千次类型判断）的开销可以忽略。
+    private func startLifecycleObservers() {
+        guard !observingLifecycle else { return }
+        observingLifecycle = true
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleDidEnterBackground),
+            name: UIApplication.didEnterBackgroundNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleWillEnterForeground),
+            name: UIApplication.willEnterForegroundNotification,
+            object: nil
+        )
+    }
+
+    private func stopLifecycleObservers() {
+        guard observingLifecycle else { return }
+        observingLifecycle = false
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func handleDidEnterBackground() {
+        stopTimer()
+    }
+
+    @objc private func handleWillEnterForeground() {
+        guard let window else { return }
+        walk(window)
+        startTimerIfNeeded()
+    }
+
+    /// 递归登记视图树里的 UIScrollView。
     private func walk(_ view: UIView, depth: Int = 0) {
         guard depth < 64 else { return }
         if let scroll = view as? UIScrollView {

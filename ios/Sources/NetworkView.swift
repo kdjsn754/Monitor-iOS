@@ -34,6 +34,8 @@ struct NetworkView: View {
     @State private var pendingDeleteClient: NetClient?
     @State private var deletingClient = false
     @State private var editingBand: WifiBandInfo?
+    @State private var editingMainBand: WifiBandInfo?
+    @State private var pendingDisableBand: WifiBandInfo?
     @State private var editingClient: NetClient?
     /// 无线分组编辑页（v3.0.0）。
     @State private var editingGroup: WifiNetGroup?
@@ -45,6 +47,8 @@ struct NetworkView: View {
     @State private var showUplink = false
     /// 无线二级页（点「无线」卡右上角「更多」进来，v3.2.5）。
     @State private var showWifi = false
+    /// 跨页跳转过来时若网络数据还没加载完，先暂存目标，等加载完成立刻滚动。
+    @State private var pendingFocus: String?
 
     private var info: NetworkInfo { model.network }
 
@@ -64,7 +68,7 @@ struct NetworkView: View {
                         // 以前直接拿默认值画，「出口 = 未联网、LAN IP = —、0 台」
                         // 先出现一遍，数据一到整张图从灰变蓝、叶子从无到有，
                         // 就是用户说的「数据等一会突然闪出来」。
-                        LoadedSwap(loaded: info.loaded) {
+                        LoadedSwap(loaded: info.loaded, alignment: .center) {
                             topology(openLan: { showLan = true },
                                      openUplink: { showUplink = true })
                         } placeholder: {
@@ -99,7 +103,11 @@ struct NetworkView: View {
                     }
                 }
                 .sheet(item: $editingBand) { band in
-                    BandEditorSheet(band: band)
+                    BandEditorSheet(band: band, isLastLive: isLastLiveBand(band))
+                        .presentationBackground(Color.clear)
+                }
+                .sheet(item: $editingMainBand) { band in
+                    WifiBandSheet(band: band, isLastLive: isLastLiveBand(band))
                         .presentationBackground(Color.clear)
                 }
                 .sheet(item: $editingClient) { client in
@@ -147,10 +155,34 @@ struct NetworkView: View {
                                 .padding(.top, 2)
                             }
                         }
+                    } else if let band = pendingDisableBand {
+                        SheetOverlay(onDismiss: { pendingDisableBand = nil }) {
+                            SheetOverlayCard {
+                                Text("关闭最后一个在广播的频段？")
+                                    .font(.system(size: 17, weight: .semibold))
+                                Text("关闭 \(band.bandName) 后主网络将停止所有无线广播，当前手机可能会立刻断开连接。")
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                HStack(spacing: 10) {
+                                    SheetOverlayButton(title: "取消") { pendingDisableBand = nil }
+                                    SheetOverlayButton(title: "仍要关闭", tint: .red) {
+                                        pendingDisableBand = nil
+                                        Task { await toggleBand(band, to: false) }
+                                    }
+                                }
+                                .padding(.top, 2)
+                            }
+                        }
                     }
                 }
             }
             .onChange(of: model.networkFocus) { _, _ in scrollToFocus(proxy) }
+            .onChange(of: info.loaded) { _, loaded in
+                guard loaded, let focus = pendingFocus else { return }
+                pendingFocus = nil
+                performScroll(focus, proxy: proxy, delayMs: 120)
+            }
             .onAppear { scrollToFocus(proxy) }
         }
     }
@@ -162,19 +194,19 @@ struct NetworkView: View {
         refreshing = false
     }
 
-    /// 把网络页滚到概览点的那一处（v3.3.3）。
-    ///
-    /// **为什么先等一下**：跨页跳转是「切标签 + 设落点」两步，切过去的这一瞬间
-    /// 网络页还没按新宽度完成布局，立刻 `scrollTo` 会拿上一帧的内容高度算，
-    /// 结果是滚不动——用户看到的就是「只换了标签页」。等切页动画（约 0.25s）
-    /// 落定再滚即可，320ms 肉眼察觉不到。
-    ///
-    /// 落点在读到的这一帧就清空：只滚一次，用户之后自己往下拉不会被拽回去。
     private func scrollToFocus(_ proxy: ScrollViewProxy) {
         guard let focus = model.networkFocus else { return }
         model.networkFocus = nil
+        guard info.loaded else {
+            pendingFocus = focus
+            return
+        }
+        performScroll(focus, proxy: proxy, delayMs: 320)
+    }
+
+    private func performScroll(_ focus: String, proxy: ScrollViewProxy, delayMs: UInt64) {
         Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 320_000_000)
+            try? await Task.sleep(nanoseconds: delayMs * 1_000_000)
             withAnimation(.easeOut(duration: 0.25)) {
                 if focus.hasPrefix("client:") {
                     proxy.scrollTo(String(focus.dropFirst("client:".count)), anchor: .center)
@@ -243,8 +275,8 @@ struct NetworkView: View {
                     )
             }
             .overlay {
-                RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .strokeBorder(Color(.separator).opacity(0.45), lineWidth: 0.6)
+                AdaptiveBorder(shape: RoundedRectangle(cornerRadius: 24, style: .continuous),
+                               width: 0.6, strength: 0.45)
             }
     }
 
@@ -415,10 +447,18 @@ struct NetworkView: View {
         // 现在大字说**几根线在用**（「1 个口在用」），小字说**这条线多快**
         // （「1Gbps」），数字后面都带单位，不用再猜。
         let lanUp = info.lanUpPorts
+        let wiredCaption: String
+        if lanUp.isEmpty {
+            wiredCaption = "点开看端口"
+        } else if info.lanSpeedLabel == "—" {
+            wiredCaption = "已连接"
+        } else {
+            wiredCaption = "\(info.lanSpeedLabel)bps"
+        }
         out.append(TopoLeaf(id: "wired",
                             title: "有线",
                             value: lanUp.isEmpty ? "未接网线" : "\(lanUp.count) 个口在用",
-                            caption: lanUp.isEmpty ? "点开看端口" : "\(info.lanSpeedLabel)bps",
+                            caption: wiredCaption,
                             icon: "cable.connector",
                             color: NetPalette.wired,
                             on: info.lanOK,
@@ -470,9 +510,9 @@ struct NetworkView: View {
                 AdaptiveFill(shape: RoundedRectangle(cornerRadius: 16, style: .continuous),
                              color: Color(.systemBackground))
                     .overlay {
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .strokeBorder(leaf.on ? leaf.color.opacity(0.28) : Color(.separator).opacity(0.4),
-                                          lineWidth: 0.8)
+                        AdaptiveBorder(shape: RoundedRectangle(cornerRadius: 16, style: .continuous),
+                                       color: leaf.on ? leaf.color : Color(.separator),
+                                       width: 0.8, strength: leaf.on ? 0.55 : 0.45)
                     }
                     .shadow(color: Color.black.opacity(0.04), radius: 5, y: 2)
             }
@@ -537,8 +577,8 @@ struct NetworkView: View {
                     ])
                 }
             } placeholder: {
-                // 4 行网格 + DNS + 累计流量，和真实内容同样的行数与行高。
-                metricsSkeleton(rows: 6)
+                // 4 行双列 + DNS 单列 + 累计流量双列，与真实结构严格同型同高。
+                metricsSkeleton([2, 2, 2, 2, 1, 2])
             }
             // **v2.9.5 去掉「重新连接」**（用户 2026-11-15：「去掉上网瓦片的重新连接按钮」）。
             // 它一直是这一卡里唯一的动作，和下面「设备」区的操作挤在一起看着像两套东西；
@@ -627,9 +667,9 @@ struct NetworkView: View {
         let total = groups.reduce(0) { $0 + $1.clients }
         let rows = wifiRows(groups)
         return card("无线", icon: "wifi",
-                    // 首帧不写「更多」：那个位置拿到数据后会变成「N 台」，字会跳一次。
+                    // 首帧不写「更多」，也不提前出现不可点的箭头。
                     trailing: !info.loaded ? "" : (total > 0 ? "\(total) 台" : "更多"),
-                    trailingAction: { showWifi = true }) {
+                    trailingAction: info.loaded ? { showWifi = true } : nil) {
             LoadedSwap(loaded: info.loaded) {
                 VStack(spacing: 0) {
                     if rows.isEmpty {
@@ -711,7 +751,11 @@ struct NetworkView: View {
     private func wifiRowView(_ row: WifiRow) -> some View {
         HStack(spacing: 12) {
             Button {
-                editingGroup = row.group
+                if let member = row.member {
+                    editingMainBand = member
+                } else {
+                    editingGroup = row.group
+                }
             } label: {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(row.ssid.isEmpty ? "—" : row.ssid)
@@ -728,7 +772,7 @@ struct NetworkView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .disabled(!row.group.editable)
+            .disabled(row.member.map { !$0.editable } ?? !row.group.editable)
 
             // 写入期间把开关换成转圈：重启无线要 6~8 秒（见 `reloadWireless`），
             // 只把开关置灰的话看着就是「点了没反应」。
@@ -783,22 +827,35 @@ struct NetworkView: View {
         })
     }
 
-    /// 单个频段（主网络那一行）的开关：走 `saveBand`，其余字段原样传，只动启用位。
+    private func isLastLiveBand(_ band: WifiBandInfo) -> Bool {
+        guard band.ssidOn && !band.radioOff else { return false }
+        let main = info.wifiGroups.first { $0.kind == .main }
+        let liveCount = main?.members.filter { $0.ssidOn && !$0.radioOff }.count ?? 0
+        return liveCount <= 1
+    }
+
+    /// 单个频段（主网络那一行）的开关：走 `setBandEnabled`，关掉最后一个在广播频段时先弹确认。
     private func memberBinding(_ member: WifiBandInfo) -> Binding<Bool> {
         Binding(get: { member.ssidOn }, set: { value in
             guard !busyGroups.contains(member.id) else { return }
-            busyGroups.insert(member.id)
-            Task {
-                let problem = await model.saveBand(member, ssid: member.ssid, key: member.key,
-                                                   hidden: member.hidden, enabled: value)
-                busyGroups.remove(member.id)
-                if let problem {
-                    model.notice = Notice(kind: .fail, title: "没切换成功", detail: problem)
-                } else {
-                    await model.manualRefresh()
-                }
+            if !value, isLastLiveBand(member) {
+                pendingDisableBand = member
+                return
             }
+            Task { await toggleBand(member, to: value) }
         })
+    }
+
+    private func toggleBand(_ member: WifiBandInfo, to value: Bool) async {
+        guard !busyGroups.contains(member.id) else { return }
+        busyGroups.insert(member.id)
+        let problem = await model.setBandEnabled(member, value)
+        busyGroups.remove(member.id)
+        if let problem {
+            model.notice = Notice(kind: .fail, title: "没切换成功", detail: problem)
+        } else {
+            await model.manualRefresh()
+        }
     }
 
     // MARK: - 设备
@@ -816,25 +873,9 @@ struct NetworkView: View {
                 } else {
                     ForEach(info.clients) { client in
                         if client.id != info.clients.first?.id { divider }
-                        Button {
-                            editingClient = client
-                        } label: {
-                            clientRow(client)
-                        }
-                        .buttonStyle(.plain)
-                        // 概览点某一台时按这个 id 滚到它（v3.3.3）。
-                        .id(client.id)
-                        // 单条删除（v3.2.7）：只给离线设备挂，在线的那台删了也会被下一轮
-                        // 扫描写回来。长按是快捷入口，编辑页底部还有一个同样的。
-                        .contextMenu {
-                            if !client.online {
-                                Button(role: .destructive) {
-                                    pendingDeleteClient = client
-                                } label: {
-                                    Label("删除这条记录", systemImage: "trash")
-                                }
-                            }
-                        }
+                        clientRowButton(client)
+                            // 概览点某一台时按这个 id 滚到它（v3.3.3）。
+                            .id(client.id)
                     }
                     if !offline.isEmpty {
                         divider
@@ -846,7 +887,30 @@ struct NetworkView: View {
                     }
                 }
             } placeholder: {
-                clientRowsSkeleton(3)
+                ClientRowSkeleton(count: 3, showChevron: true)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func clientRowButton(_ client: NetClient) -> some View {
+        let button = Button {
+            editingClient = client
+        } label: {
+            clientRow(client)
+        }
+        .buttonStyle(.plain)
+
+        // 单条删除（v3.2.7）：只给离线设备挂右键菜单，在线设备不再挂空菜单。
+        if client.online {
+            button
+        } else {
+            button.contextMenu {
+                Button(role: .destructive) {
+                    pendingDeleteClient = client
+                } label: {
+                    Label("删除这条记录", systemImage: "trash")
+                }
             }
         }
     }
@@ -945,12 +1009,10 @@ struct NetworkView: View {
     /// 同一个 App 四套数值。现在四个根页共用 `UI` 那一份（见 DesignSystem.swift）。
     // MARK: - 首帧占位（v3.4.10）
 
-    /// 拓扑的占位：出口胶囊 → 竖线 → 圆环 → 两行字 → 三片叶子，形状与真图一致，只是全灰。
-    ///
-    /// 要的是**等高**：整块从灰换成彩色，页面不会整体上下跳一格。
+    /// 拓扑的占位：出口胶囊 → 竖线 → 圆环 → 两行字 → 分叉线 → 三片叶子，与真图同构同高。
     private var topologySkeleton: some View {
         VStack(spacing: 0) {
-            SkeletonBar(width: 132, height: 30, radius: 15)
+            SkeletonBar(width: 132, height: 32, radius: 16)
             Capsule()
                 .fill(Color.primary.opacity(0.06))
                 .frame(width: 2, height: 20)
@@ -964,36 +1026,45 @@ struct NetworkView: View {
                         .frame(width: 88, height: 88)
                 }
                 .padding(.bottom, 3)
-                SkeletonBar(width: 84, height: 15)
-                SkeletonBar(width: 104, height: 12)
+                SkeletonBar(width: 84, height: 14)
+                    .frame(height: 18)
+                SkeletonBar(width: 104, height: 11)
+                    .frame(height: 15)
                 HStack(spacing: 8) {
-                    SkeletonBar(width: 60, height: 22, radius: 11)
-                    SkeletonBar(width: 60, height: 22, radius: 11)
+                    SkeletonBar(width: 64, height: 26, radius: 13)
+                    SkeletonBar(width: 64, height: 26, radius: 13)
                 }
                 .padding(.top, 3)
             }
             .padding(.vertical, 10)
+            TopoForkSkeleton(spacing: Self.leafSpacing)
             HStack(alignment: .top, spacing: Self.leafSpacing) {
                 ForEach(0..<3, id: \.self) { _ in
                     VStack(spacing: 5) {
                         Circle()
-                            .fill(Color.primary.opacity(0.05))
+                            .fill(Color.primary.opacity(0.06))
                             .frame(width: 34, height: 34)
                             .padding(.bottom, 2)
-                        SkeletonBar(width: 52, height: 12)
-                        SkeletonBar(width: 40, height: 9)
-                        SkeletonBar(width: 34, height: 9)
+                        SkeletonBar(width: 48, height: 12)
+                            .frame(height: 16)
+                        SkeletonBar(width: 56, height: 10)
+                            .frame(height: 13)
+                        SkeletonBar(width: 38, height: 9)
+                            .frame(height: 12)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 11)
                     .padding(.horizontal, 4)
                     .background {
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .fill(Color.primary.opacity(0.035))
+                        AdaptiveFill(shape: RoundedRectangle(cornerRadius: 16, style: .continuous),
+                                     color: Color(.systemBackground))
+                            .overlay {
+                                AdaptiveBorder(shape: RoundedRectangle(cornerRadius: 16, style: .continuous),
+                                               width: 0.8, strength: 0.45)
+                            }
                     }
                 }
             }
-            .padding(.top, 16)
         }
         .padding(.horizontal, 14)
         .padding(.top, 18)
@@ -1002,16 +1073,18 @@ struct NetworkView: View {
         .background { topologyPanel }
     }
 
-    /// 数据网格（`metricGrid`）的占位：每格「小标签 + 值」两根灰条，行高与真内容一致。
-    private func metricsSkeleton(rows: Int, columns: Int = 2) -> some View {
+    /// 数据网格（`metricGrid`）的占位：按行指定列数，行高与真内容一致。
+    private func metricsSkeleton(_ columnsPerRow: [Int]) -> some View {
         VStack(spacing: 0) {
-            ForEach(0..<max(1, rows), id: \.self) { index in
+            ForEach(Array(columnsPerRow.enumerated()), id: \.offset) { index, columns in
                 if index > 0 { divider }
                 HStack(alignment: .top, spacing: 12) {
                     ForEach(0..<max(1, columns), id: \.self) { _ in
-                        VStack(alignment: .leading, spacing: 6) {
-                            SkeletonBar(width: 30, height: 10)
-                            SkeletonBar(width: 82, height: 14)
+                        VStack(alignment: .leading, spacing: 3) {
+                            SkeletonBar(width: 32, height: 10)
+                                .frame(height: 14, alignment: .leading)
+                            SkeletonBar(width: columns == 1 ? 164 : 84, height: 13)
+                                .frame(height: 18, alignment: .leading)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -1021,44 +1094,22 @@ struct NetworkView: View {
         }
     }
 
-    /// 无线卡的占位：两行「SSID + 频段详情」。
+    /// 无线卡的占位：两行「SSID + 频段详情」加开关占位，与 `wifiRowView` 同高。
     private var wifiSkeleton: some View {
         VStack(spacing: 0) {
             ForEach(0..<2, id: \.self) { index in
                 if index > 0 { divider }
-                HStack(spacing: 10) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        SkeletonBar(width: 96, height: 15)
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        SkeletonBar(width: 96, height: 14)
+                            .frame(height: 18, alignment: .leading)
                         SkeletonBar(width: 138, height: 11)
+                            .frame(height: 15, alignment: .leading)
                     }
-                    Spacer(minLength: 8)
-                    SkeletonBar(width: 42, height: 24, radius: 12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    SkeletonBar(width: 51, height: 31, radius: 15.5)
                 }
-                .padding(.vertical, 10)
-            }
-        }
-    }
-
-    /// 设备行的占位：图标方底 + 名字/副标题 + 右侧两行数字，和 `clientRow` 同高。
-    private func clientRowsSkeleton(_ count: Int = 3) -> some View {
-        VStack(spacing: 0) {
-            ForEach(0..<max(1, count), id: \.self) { index in
-                if index > 0 { divider }
-                HStack(spacing: 10) {
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .fill(Color.primary.opacity(0.07))
-                        .frame(width: 30, height: 30)
-                    VStack(alignment: .leading, spacing: 6) {
-                        SkeletonBar(width: 88, height: 13)
-                        SkeletonBar(width: 132, height: 10)
-                    }
-                    Spacer(minLength: 8)
-                    VStack(alignment: .trailing, spacing: 6) {
-                        SkeletonBar(width: 46, height: 11)
-                        SkeletonBar(width: 34, height: 9)
-                    }
-                }
-                .padding(.vertical, 9)
+                .padding(.vertical, UI.rowPadding)
             }
         }
     }
@@ -1158,9 +1209,11 @@ private struct BandEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     let band: WifiBandInfo
+    var isLastLive: Bool = false
 
     @State private var ssid: String
     @State private var key: String
+    @State private var revealKey = false
     @State private var hidden: Bool
     @State private var enabled: Bool
     @State private var channel: String
@@ -1169,8 +1222,9 @@ private struct BandEditorSheet: View {
     @State private var busy = false
     @State private var errorText: String?
 
-    init(band: WifiBandInfo) {
+    init(band: WifiBandInfo, isLastLive: Bool = false) {
         self.band = band
+        self.isLastLive = isLastLive
         _ssid = State(initialValue: band.ssid)
         _key = State(initialValue: band.key)
         _hidden = State(initialValue: band.hidden)
@@ -1200,12 +1254,29 @@ private struct BandEditorSheet: View {
                     .adaptiveRowBackground()
 
                     if needsKey {
-                        HStack {
+                        HStack(spacing: 8) {
                             Text("密码")
-                            SecureField("", text: $key)
-                                .multilineTextAlignment(.trailing)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
+                            Spacer(minLength: 8)
+                            Group {
+                                if revealKey {
+                                    TextField("8–63 位字符", text: $key)
+                                } else {
+                                    SecureField("8–63 位字符", text: $key)
+                                }
+                            }
+                            .multilineTextAlignment(.trailing)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+
+                            Button {
+                                revealKey.toggle()
+                            } label: {
+                                Image(systemName: revealKey ? "eye.slash" : "eye")
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(revealKey ? "隐藏密码" : "显示密码")
                         }
                         .adaptiveRowBackground()
                     }
@@ -1215,7 +1286,16 @@ private struct BandEditorSheet: View {
                         .adaptiveRowBackground()
                     Toggle("启用", isOn: $enabled)
                         .blueSwitch()
+                        .disabled(isLastLive && enabled)
                         .adaptiveRowBackground()
+                }
+                if isLastLive {
+                    Section {
+                        Text("这是当前主网络最后一个在广播的频段；如需关闭，请返回列表确认后再操作。")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .adaptiveRowBackground()
+                    }
                 }
 
                 Section {
@@ -1282,10 +1362,26 @@ private struct BandEditorSheet: View {
 
     private func save() async {
         guard !busy else { return }
+        let cleanSSID = ssid.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanSSID.isEmpty else {
+            errorText = "网络名称不能为空"
+            return
+        }
+        if needsKey {
+            let validASCII = key.unicodeScalars.allSatisfy { $0.value >= 0x20 && $0.value <= 0x7E }
+            guard key.count >= 8, key.count <= 63, validASCII else {
+                errorText = "密码需要 8–63 位可见 ASCII 字符"
+                return
+            }
+        }
+        if isLastLive, !enabled {
+            errorText = "不能在这里直接关闭最后一个在广播的频段"
+            return
+        }
         busy = true
         errorText = nil
         let problem = await model.saveBand(band,
-                                           ssid: ssid,
+                                           ssid: cleanSSID,
                                            key: key,
                                            hidden: hidden,
                                            enabled: enabled,
@@ -1296,7 +1392,7 @@ private struct BandEditorSheet: View {
         guard let problem else {
             model.notice = Notice(kind: .ok,
                                   title: "\(band.bandName) 已保存",
-                                  detail: ssid)
+                                  detail: cleanSSID)
             dismiss()
             await model.manualRefresh()
             return
@@ -1596,8 +1692,13 @@ private struct ClientEditorSheet: View {
 
     private func save() async {
         guard !busy else { return }
-        busy = true
         errorText = nil
+        let trimmedIP = address.trimmingCharacters(in: .whitespaces)
+        if pinned, trimmedIP.isEmpty {
+            errorText = "请填写固定 IP 地址"
+            return
+        }
+        busy = true
 
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         if trimmed != originalName,
@@ -1607,7 +1708,7 @@ private struct ClientEditorSheet: View {
             return
         }
 
-        let target = pinned ? address.trimmingCharacters(in: .whitespaces) : ""
+        let target = pinned ? trimmedIP : ""
         if target != client.reservedIP,
            let problem = await model.setReservedIP(mac: client.mac, ip: target) {
             busy = false
@@ -1687,7 +1788,7 @@ private struct ClientClassSheet: View {
                     // 深色下是 #3A3A3C，比卡片底亮一档——用 `systemGray5/6` 会跟卡片同色，
                     // 圆整个看不见。
                     Circle()
-                        .fill(on ? Color.accentColor : Color(.systemGray4))
+                        .fill(on ? Color.blue : Color(.systemGray4))
                         .frame(width: 56, height: 56)
                     DeviceGlyph(kind: item, size: 34)
                         .foregroundStyle(on ? Color.white : Color(.systemGray))
@@ -1768,6 +1869,44 @@ private struct TopoFork: View {
                 let color = leaf.on ? leaf.color : Color(.systemGray4)
                 context.stroke(branch,
                                with: .color(color.opacity(leaf.on ? 0.55 : 0.9)),
+                               style: StrokeStyle(lineWidth: 1.6, lineCap: .round))
+            }
+        }
+        .drawingGroup()
+        .frame(height: 40)
+        .accessibilityHidden(true)
+    }
+}
+
+/// 拓扑分叉线的首帧占位：同构 40pt 高度的三路灰色弧线，防止真图出来时整块高度下推。
+private struct TopoForkSkeleton: View {
+    let spacing: CGFloat
+
+    var body: some View {
+        Canvas { context, size in
+            guard size.width > 1 else { return }
+            let count: CGFloat = 3
+            let column = (size.width - spacing * (count - 1)) / count
+            let midX = size.width / 2
+            let branchY = size.height * 0.42
+            let color = Color.primary.opacity(0.08)
+
+            var trunk = Path()
+            trunk.move(to: CGPoint(x: midX, y: 0))
+            trunk.addLine(to: CGPoint(x: midX, y: branchY))
+            context.stroke(trunk,
+                           with: .color(color),
+                           style: StrokeStyle(lineWidth: 1.6, lineCap: .round))
+
+            for index in 0..<3 {
+                let cx = column * CGFloat(index) + spacing * CGFloat(index) + column / 2
+                var branch = Path()
+                branch.move(to: CGPoint(x: midX, y: branchY))
+                branch.addQuadCurve(to: CGPoint(x: cx, y: size.height),
+                                    control: CGPoint(x: cx,
+                                                     y: branchY + (size.height - branchY) * 0.62))
+                context.stroke(branch,
+                               with: .color(color),
                                style: StrokeStyle(lineWidth: 1.6, lineCap: .round))
             }
         }

@@ -98,6 +98,15 @@ struct CardRule: View {
     }
 }
 
+/// 卡片里的竖分隔线：0.5pt 宽，与 `CardRule` 同色同粗细。
+struct CardVerticalRule: View {
+    var body: some View {
+        Rectangle()
+            .fill(Color(.separator).opacity(0.45))
+            .frame(width: 0.5)
+    }
+}
+
 /// 卡片标题本身：**图标 + 16pt 半粗主色字**。
 ///
 /// 标题是每张卡最该先被看见的东西（用户 2026-11-19 原话）。图标固定 18pt 宽、
@@ -259,7 +268,25 @@ struct MetricCell: View {
     }
 }
 
-/// 首帧占位条（v3.4.10）。
+/// 骨架微呼吸修饰符：只在展示期间柔和起伏；内容加载完毕后随视图销毁，零常驻开销。
+private struct SkeletonPulseModifier: ViewModifier {
+    let active: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var dimmed = false
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(active && !reduceMotion && dimmed ? 0.55 : 1)
+            .onAppear {
+                guard active, !reduceMotion, !dimmed else { return }
+                withAnimation(.easeInOut(duration: 1.05).repeatForever(autoreverses: true)) {
+                    dimmed = true
+                }
+            }
+    }
+}
+
+/// 首帧占位条（v3.4.10 重做）。
 ///
 /// **为什么需要**：数据是 SSH 采回来的，从「页面出现」到「第一轮采集到手」之间
 /// 有 0.3–2 秒。这段空窗里如果照默认值渲染，用户看到的就是「CPU 0%、温度无传感器、
@@ -267,16 +294,18 @@ struct MetricCell: View {
 /// 等一会突然闪出来」。
 ///
 /// 规矩（所有页面共用）：**没采到过一次就画占位，不画默认值**；占位必须和真实内容
-/// 同高，卡片高度不许跳；数据到手后 0.28 秒淡入，不「啪」地出现。
+/// 同高，卡片高度不许跳；数据到手后平滑淡入，不「啪」地出现。
 struct SkeletonBar: View {
     var width: CGFloat? = nil
     var height: CGFloat = 12
     var radius: CGFloat = 6
+    var animated: Bool = true
 
     var body: some View {
         RoundedRectangle(cornerRadius: radius, style: .continuous)
-            .fill(Color.primary.opacity(0.085))
+            .fill(Color.primary.opacity(0.09))
             .frame(width: width, height: height)
+            .modifier(SkeletonPulseModifier(active: animated))
     }
 }
 
@@ -306,22 +335,25 @@ struct SkeletonLines: View {
 /// 「占位 → 真实内容」的切换：数据第一次到手时淡入，之后原地更新不再有过渡动画。
 ///
 /// 用淡入而不是默认的「直接换」：卡里突然出现一片彩色数字，视觉上是「闪」；
-/// 0.28 秒的透明度过渡把它变成「浮现」，同时不会像移动/缩放那样把布局推来推去。
+/// 0.24 秒的透明度过渡把它变成「浮现」，同时不会像移动/缩放那样把布局推来推去。
 struct LoadedSwap<Content: View, Placeholder: View>: View {
     private let loaded: Bool
+    private let alignment: Alignment
     private let content: () -> Content
     private let placeholder: () -> Placeholder
 
     init(loaded: Bool,
+         alignment: Alignment = .topLeading,
          @ViewBuilder content: @escaping () -> Content,
          @ViewBuilder placeholder: @escaping () -> Placeholder) {
         self.loaded = loaded
+        self.alignment = alignment
         self.content = content
         self.placeholder = placeholder
     }
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
+        ZStack(alignment: alignment) {
             if loaded {
                 content()
                     .transition(.opacity)
@@ -330,7 +362,7 @@ struct LoadedSwap<Content: View, Placeholder: View>: View {
                     .transition(.opacity)
             }
         }
-        .animation(.easeOut(duration: 0.28), value: loaded)
+        .animation(.easeOut(duration: 0.24), value: loaded)
     }
 }
 

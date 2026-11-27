@@ -118,3 +118,42 @@ struct ClientDetailLine: View {
         .lineLimit(1)
     }
 }
+
+/// 概览与网络页共用的设备行首帧占位：图标槽与左右两列行高同真行一致。
+struct ClientRowSkeleton: View {
+    var count: Int = 3
+    var showChevron: Bool = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(0..<max(1, count), id: \.self) { index in
+                if index > 0 { CardRule() }
+                HStack(spacing: 10) {
+                    SkeletonBar(width: 30, height: 30, radius: 9)
+                    VStack(alignment: .leading, spacing: 3) {
+                        SkeletonBar(width: 96, height: 14)
+                            .frame(height: 18, alignment: .leading)
+                        SkeletonBar(width: 136, height: 11)
+                            .frame(height: 15, alignment: .leading)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    VStack(alignment: .trailing, spacing: 3) {
+                        SkeletonBar(width: 48, height: 12)
+                            .frame(height: 16, alignment: .trailing)
+                        SkeletonBar(width: 36, height: 10)
+                            .frame(height: 13, alignment: .trailing)
+                    }
+                    .padding(.trailing, showChevron ? 6 : 0)
+
+                    if showChevron {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Color.primary.opacity(0.12))
+                    }
+                }
+                .padding(.vertical, 9)
+            }
+        }
+    }
+}

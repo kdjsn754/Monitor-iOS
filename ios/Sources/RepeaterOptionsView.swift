@@ -38,7 +38,8 @@ struct RepeaterOptionsView: View {
 
     /// 和路由器上的值比：有任何一项不同就算「未保存」。
     private var dirty: Bool {
-        enabled != rep.enabled || switchMode != rep.switchMode
+        guard seeded else { return false }
+        return enabled != rep.enabled || switchMode != rep.switchMode
             || lockBand != rep.lockBand || smartReconnect != rep.smartReconnect
             || disguise != rep.disguise || autoPortal != rep.autoPortal
     }
@@ -216,7 +217,6 @@ struct RepeaterOptionsView: View {
                                                               enabled: enabled) {
                 busy = false
                 errorText = problem
-                refill()
                 return
             }
         }
@@ -233,7 +233,6 @@ struct RepeaterOptionsView: View {
                                                               autoPortal: autoPortal) {
                 busy = false
                 errorText = problem
-                refill()
                 return
             }
         }

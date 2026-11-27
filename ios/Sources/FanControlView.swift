@@ -63,7 +63,9 @@ struct FanControlView: View {
             .padding(.horizontal, 16)
             .padding(.top, 6)
             .padding(.bottom, 28)
+            .background(ScrollBounceTuning())
         }
+        .scrollBounceBehavior(.basedOnSize)
         .themedScrollBackground()
         .navigationTitle("风扇控制")
         .navigationBarTitleDisplayMode(.inline)
@@ -230,7 +232,7 @@ struct FanControlView: View {
                 }
                 .padding(.vertical, 2)
 
-                Divider().padding(.vertical, 10)
+                CardRule().padding(.vertical, 10)
 
                 // 分段只改**草稿**，按「应用到路由器」才真正下发（v1.28.28）。
                 HStack(spacing: 8) {
@@ -266,27 +268,45 @@ struct FanControlView: View {
                               maxPercent: Double(draft.maxPercent),
                               currentTemp: model.fan.temperature)
 
-                Divider()
+                CardRule()
 
                 VStack(spacing: 0) {
                     paramRow("起转温度", value: $draft.startTemp, range: 35...85, unit: "°C")
                     paramRow("温度墙", value: $draft.wallTemp, range: 35...95, unit: "°C")
                     paramRow("保护温度", value: $draft.criticalTemp, range: 35...105, unit: "°C")
                     paramRow("回差", value: $draft.hysteresis, range: 1...10, unit: "°C")
-                    Divider().padding(.vertical, 8)
+                    CardRule().padding(.vertical, 8)
                     paramRow("起转 PWM", value: $draft.startPercent, range: 0...100, unit: "%")
                     paramRow("最大 PWM", value: $draft.maxPercent, range: 0...100, unit: "%")
                     paramRow("轮询间隔", value: $draft.pollInterval, range: 1...30, unit: "s")
                 }
             }
-            // 依赖关系就地夹紧：插件的校验规则是「温度墙 ≥ 起转+5、保护 ≥ 温度墙+3」，
-            // 不满足时 commit 会被静默拒绝，界面却还显示着自己那套数字。
+            // 温度曲线与转速双向联动夹紧：
+            // 始终维持 35 <= startTemp <= wallTemp - 5 <= criticalTemp - 8，以及 0 <= startPercent <= maxPercent。
             .onChange(of: draft.startTemp) { _, new in
-                if draft.wallTemp < new + 5 { draft.wallTemp = min(new + 5, 95) }
+                let start = min(max(new, 35), 85)
+                if start != new { draft.startTemp = start }
+                if draft.wallTemp < start + 5 { draft.wallTemp = min(start + 5, 95) }
                 if draft.criticalTemp < draft.wallTemp + 3 { draft.criticalTemp = min(draft.wallTemp + 3, 105) }
             }
             .onChange(of: draft.wallTemp) { _, new in
-                if draft.criticalTemp < new + 3 { draft.criticalTemp = min(new + 3, 105) }
+                let minWall = 40
+                let wall = min(max(new, minWall), 95)
+                if wall != new { draft.wallTemp = wall }
+                if draft.startTemp > wall - 5 { draft.startTemp = max(35, wall - 5) }
+                if draft.criticalTemp < wall + 3 { draft.criticalTemp = min(wall + 3, 105) }
+            }
+            .onChange(of: draft.criticalTemp) { _, new in
+                let critical = min(max(new, 43), 105)
+                if critical != new { draft.criticalTemp = critical }
+                if draft.wallTemp > critical - 3 { draft.wallTemp = max(40, critical - 3) }
+                if draft.startTemp > draft.wallTemp - 5 { draft.startTemp = max(35, draft.wallTemp - 5) }
+            }
+            .onChange(of: draft.startPercent) { _, new in
+                if draft.maxPercent < new { draft.maxPercent = new }
+            }
+            .onChange(of: draft.maxPercent) { _, new in
+                if draft.startPercent > new { draft.startPercent = new }
             }
         }
     }

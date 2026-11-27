@@ -323,21 +323,23 @@ struct WifiKvRow: View {
 struct WifiPrimaryButton: View {
     let text: String
     var tint: Color = WifiPalette.accent
+    var enabled: Bool = true
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Text(text)
                 .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(enabled ? Color.white : Color.secondary)
                 .frame(maxWidth: .infinity)
                 .frame(height: 42)
                 .background {
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(tint)
+                        .fill(enabled ? tint : Color.primary.opacity(0.08))
                 }
         }
         .buttonStyle(.plain)
+        .disabled(!enabled)
     }
 }
 
@@ -378,6 +380,7 @@ struct WifiKeyRow: View {
     var onShare: (() -> Void)? = nil
 
     @State private var copied = false
+    @State private var copyResetTask: Task<Void, Never>?
 
     var body: some View {
         HStack(spacing: 7) {
@@ -400,8 +403,10 @@ struct WifiKeyRow: View {
             Button {
                 onCopy()
                 copied = true
-                Task {
+                copyResetTask?.cancel()
+                copyResetTask = Task {
                     try? await Task.sleep(nanoseconds: 1_600_000_000)
+                    guard !Task.isCancelled else { return }
                     copied = false
                 }
             } label: {
@@ -438,13 +443,13 @@ struct WifiKeyRow: View {
 /// 主网络：频段频谱 → 各频段 SSID → 无线配置（信道 / 频宽 / 功率）。
 struct WifiMainPage: View {
     @Environment(AppModel.self) private var model: AppModel
+    @Binding var busyBands: Set<String>
+    @Binding var externalError: String?
+    let onConfirmClose: (WifiBandInfo) -> Void
 
     @State private var editingBand: WifiBandInfo?
     @State private var editingRadio: WifiBandInfo?
-    /// 正在等用户确认「关掉最后一个频段」。
-    @State private var pendingClose: WifiBandInfo?
     @State private var qrTarget: WifiQrPayload?
-    @State private var busyBands: Set<String> = []
     @State private var revealed: Set<String> = []
     @State private var errorText: String?
 
@@ -542,34 +547,18 @@ struct WifiMainPage: View {
         .scrollBounceBehavior(.basedOnSize)
         .sheet(item: $editingBand) { band in
             WifiBandSheet(band: band, isLastLive: liveBands.count <= 1)
+                .presentationBackground(Color.clear)
         }
         .sheet(item: $editingRadio) { band in
             WifiRadioEditorSheet(band: band)
+                .presentationBackground(Color.clear)
         }
         .sheet(item: $qrTarget) { payload in
             WifiQrSheet(payload: payload)
+                .presentationBackground(Color.clear)
         }
-        .overlay {
-            if let pendingClose {
-                SheetOverlay(onDismiss: { self.pendingClose = nil }) {
-                    SheetOverlayCard {
-                        Text("关闭 \(wifiShortBand(pendingClose.band)) 的主 Wi-Fi")
-                            .font(.headline)
-                        Text("请确保至少还有一个频段的 Wi-Fi 开着。全部关掉后，手机和电脑会立刻断开这台路由器，只能插网线或按机身上的开关才能恢复。")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        HStack(spacing: 10) {
-                            SheetOverlayButton(title: "取消") { self.pendingClose = nil }
-                            SheetOverlayButton(title: "确认关闭", tint: .red) {
-                                let band = pendingClose
-                                self.pendingClose = nil
-                                commitBand(band, on: false)
-                            }
-                        }
-                    }
-                }
-            }
+        .onChange(of: externalError) { _, next in
+            if let next { errorText = next }
         }
     }
 
@@ -859,9 +848,8 @@ struct WifiMainPage: View {
     private func setBand(_ band: WifiBandInfo, on: Bool) {
         guard !busyBands.contains(band.id) else { return }
         // 关掉最后一个还在广播的频段 = 手机立刻掉线、也没法再连回来打开它。
-        // 官方在这一步先弹一句「请确保至少有一个频段开着」，这里照做。
         if !on, liveBands.count <= 1 {
-            pendingClose = band
+            onConfirmClose(band)
             return
         }
         commitBand(band, on: on)
@@ -944,12 +932,13 @@ struct WifiSidePage: View {
     @Environment(AppModel.self) private var model: AppModel
 
     let kind: WifiNetGroup.Kind
+    @Binding var busy: Bool
+    @Binding var externalError: String?
+    let onConfirmDelete: (WifiNetGroup) -> Void
 
-    @State private var editing = false
+    @State private var editingGroup: WifiNetGroup?
     @State private var creating = false
-    @State private var confirmingDelete = false
     @State private var qrTarget: WifiQrPayload?
-    @State private var busy = false
     @State private var revealed = false
     @State private var errorText: String?
 
@@ -982,37 +971,20 @@ struct WifiSidePage: View {
             .padding(.bottom, 44)
         }
         .scrollBounceBehavior(.basedOnSize)
-        .sheet(isPresented: $editing) {
-            if let group { WifiGroupEditorSheet(group: group) }
+        .sheet(item: $editingGroup) { group in
+            WifiGroupEditorSheet(group: group)
+                .presentationBackground(Color.clear)
         }
         .sheet(isPresented: $creating) {
             WifiGroupCreateSheet(kind: kind, available: createBands)
+                .presentationBackground(Color.clear)
         }
         .sheet(item: $qrTarget) { payload in
             WifiQrSheet(payload: payload)
+                .presentationBackground(Color.clear)
         }
-        .overlay {
-            if confirmingDelete, let group {
-                SheetOverlay(onDismiss: { confirmingDelete = false }) {
-                    SheetOverlayCard {
-                        Text("移除\(kind.title)")
-                            .font(.headline)
-                        Text("将停用并重置这组网络的配置，已连入的设备会断开连接。配置段会留着（不删除），下次「添加」还是用同一批模板段。")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Text(group.ssid.isEmpty ? "未命名" : group.ssid)
-                            .font(.subheadline.weight(.semibold))
-                        HStack(spacing: 10) {
-                            SheetOverlayButton(title: "取消") { confirmingDelete = false }
-                            SheetOverlayButton(title: "确认移除", tint: .red) {
-                                confirmingDelete = false
-                                remove(group)
-                            }
-                        }
-                    }
-                }
-            }
+        .onChange(of: externalError) { _, next in
+            if let next { errorText = next }
         }
     }
 
@@ -1260,13 +1232,14 @@ struct WifiSidePage: View {
                 WifiKvRow(label: "推荐加密方式", value: "WPA3")
             }
 
-            // 多链路 v3.4.8 起也能建：写 `wireless.mld0` + 每个成员 + `/etc/config/mlo`
-            //（写法见 `AppModel.createWifiGroup` 的取证表）。
-            WifiPrimaryButton(text: addTitle, tint: WifiPalette.accent) { creating = true }
-                .padding(.top, 12)
-                .padding(.bottom, 2)
+            let singleBandMlo = kind == .mlo && createBands.count < 2
+            WifiPrimaryButton(text: addTitle, tint: WifiPalette.accent, enabled: !singleBandMlo) {
+                creating = true
+            }
+            .padding(.top, 12)
+            .padding(.bottom, 2)
 
-            if kind == .mlo, createBands.count < 2 {
+            if singleBandMlo {
                 Text("这台路由器只有一个频段，聚不起多链路。")
                     .font(.system(size: 11.5))
                     .foregroundStyle(.tertiary)
@@ -1331,11 +1304,11 @@ struct WifiSidePage: View {
                 WifiSoftButton(text: "修改",
                                tint: tint,
                                ink: ink,
-                               enabled: group.editable) { editing = true }
+                               enabled: group.editable && !busy) { editingGroup = group }
                 WifiSoftButton(text: "删除",
                                tint: danger,
                                ink: danger,
-                               enabled: group.editable) { confirmingDelete = true }
+                               enabled: group.editable && !busy) { onConfirmDelete(group) }
             }
             .padding(.top, 12)
 
@@ -1357,7 +1330,7 @@ struct WifiSidePage: View {
     private func ssidRow(_ group: WifiNetGroup) -> some View {
         HStack(spacing: 11) {
             Button {
-                if group.editable { editing = true }
+                if group.editable { editingGroup = group }
             } label: {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(group.ssid.isEmpty ? "未命名" : group.ssid)
@@ -1414,23 +1387,6 @@ struct WifiSidePage: View {
                 errorText = problem
                 model.notice = Notice(kind: .fail, title: "没切换成功", detail: problem)
             } else {
-                await model.manualRefresh()
-            }
-        }
-    }
-
-    private func remove(_ group: WifiNetGroup) {
-        guard !busy else { return }
-        busy = true
-        errorText = nil
-        Task {
-            let problem = await model.deleteWifiGroup(group)
-            busy = false
-            if let problem {
-                errorText = problem
-                model.notice = Notice(kind: .fail, title: "没移除成功", detail: problem)
-            } else {
-                model.notice = Notice(kind: .ok, title: "\(kind.title)已移除", detail: group.ssid)
                 await model.manualRefresh()
             }
         }
@@ -1568,21 +1524,20 @@ private struct GuestViz: View {
         .frame(maxWidth: .infinity)
         .padding(.vertical, vertical)
         .background {
-            RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .fill(nodeFill(strong: strong, tint: tint))
+            if strong {
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .fill(isOn ? tint.opacity(0.12) : Color.primary.opacity(0.06))
+            } else {
+                AdaptiveFill(shape: RoundedRectangle(cornerRadius: radius, style: .continuous),
+                             color: Color(.secondarySystemGroupedBackground))
+            }
         }
         .overlay {
-            RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .strokeBorder(isOn ? tint.opacity(strong ? 0.40 : 0.35) : Color.primary.opacity(0.10),
-                              lineWidth: 0.8)
+            AdaptiveBorder(shape: RoundedRectangle(cornerRadius: radius, style: .continuous),
+                           color: isOn ? tint : Color.primary,
+                           width: 0.8,
+                           strength: isOn ? (strong ? 0.55 : 0.45) : 0.2)
         }
-    }
-
-    private func nodeFill(strong: Bool, tint: Color) -> Color {
-        if strong {
-            return isOn ? tint.opacity(0.12) : Color.primary.opacity(0.06)
-        }
-        return Color(.secondarySystemGroupedBackground)
     }
 
     private func connector(active: Bool, tint: Color) -> some View {
@@ -1670,15 +1625,14 @@ private struct IotViz: View {
             .padding(.vertical, 9)
             .frame(height: 84)
             .background {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color(.secondarySystemGroupedBackground))
+                AdaptiveFill(shape: RoundedRectangle(cornerRadius: 12, style: .continuous),
+                             color: Color(.secondarySystemGroupedBackground))
             }
             .overlay {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(sample != nil && isOn
-                                  ? WifiPalette.iot.opacity(0.42)
-                                  : Color.primary.opacity(0.10),
-                                  lineWidth: 0.8)
+                AdaptiveBorder(shape: RoundedRectangle(cornerRadius: 12, style: .continuous),
+                               color: sample != nil && isOn ? WifiPalette.iot : Color.primary,
+                               width: 0.8,
+                               strength: sample != nil && isOn ? 0.55 : 0.2)
             }
         }
     }

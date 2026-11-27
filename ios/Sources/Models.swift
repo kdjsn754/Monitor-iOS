@@ -810,7 +810,8 @@ struct WifiBandInfo: Identifiable, Equatable {
         case "", "none": return "无密码"
         case "psk2", "psk2+ccmp", "psk2+tkip+ccmp": return "WPA2"
         case "psk", "psk+ccmp": return "WPA"
-        case "sae", "sae-mixed", "psk3", "sae+ccmp": return encryption == "sae" ? "WPA3" : "WPA3 混合"
+        case "sae", "sae+ccmp", "psk3": return "WPA3"
+        case "sae-mixed": return "WPA3 混合"
         case "psk-mixed", "psk-mixed+ccmp": return "WPA/WPA2 混合"
         default: return encryption.uppercased()
         }
@@ -846,7 +847,7 @@ enum WifiSecurity: String, CaseIterable, Identifiable {
     static func match(_ raw: String) -> WifiSecurity? {
         switch raw {
         case "psk2", "psk2+ccmp", "psk2+tkip+ccmp": return .wpa2
-        case "sae-mixed", "psk-mixed", "psk-mixed+ccmp": return .mixed
+        case "sae-mixed": return .mixed
         case "sae", "sae+ccmp", "psk3": return .wpa3
         case "", "none": return .open
         default: return nil
@@ -1077,15 +1078,20 @@ struct ProxySubscription: Identifiable, Hashable {
         return host + " · " + Self.relative(date)
     }
 
+    private static let relativeDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "M 月 d 日更新"
+        return formatter
+    }()
+
     static func relative(_ date: Date) -> String {
         let seconds = Date().timeIntervalSince(date)
         if seconds < 60 { return "刚刚更新" }
         if seconds < 3600 { return "\(Int(seconds / 60)) 分钟前更新" }
         if seconds < 86_400 { return "\(Int(seconds / 3600)) 小时前更新" }
         if seconds < 86_400 * 7 { return "\(Int(seconds / 86_400)) 天前更新" }
-        let formatter = DateFormatter()
-        formatter.dateFormat = "M 月 d 日更新"
-        return formatter.string(from: date)
+        return relativeDateFormatter.string(from: date)
     }
 }
 
@@ -1171,14 +1177,19 @@ struct SubscriptionUsage: Hashable {
         return left == 0 ? "已过期" : "剩 \(left) 天"
     }
 
+    private static let expireDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "yy-MM-dd"
+        return formatter
+    }()
+
     /// 到期那一行的文案：`12-01 到期 · 剩 21 天` / `长期有效` / 过期后 `已过期`。
     var expireText: String? {
         guard let expire else { return nil }
         if expire == 0 { return "长期有效" }
         let date = Date(timeIntervalSince1970: expire)
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yy-MM-dd"
-        let day = formatter.string(from: date)
+        let day = Self.expireDateFormatter.string(from: date)
         guard let left = daysLeft() else { return day + " 到期" }
         if left == 0 { return day + " · 已过期" }
         return day + " · 剩 \(left) 天"

@@ -2,11 +2,36 @@ import SwiftUI
 import WebKit
 import Foundation
 
+struct PanelTarget: Identifiable {
+    let id = UUID()
+    let url: URL
+    var title: String = "控制面板"
+    var autoLoginUser: String? = nil
+    var autoLoginPassword: String? = nil
+}
+
 struct PanelView: View {
     let url: URL
     var title: String = "控制面板"
     var autoLoginUser: String? = nil
     var autoLoginPassword: String? = nil
+
+    init(url: URL,
+         title: String = "控制面板",
+         autoLoginUser: String? = nil,
+         autoLoginPassword: String? = nil) {
+        self.url = url
+        self.title = title
+        self.autoLoginUser = autoLoginUser
+        self.autoLoginPassword = autoLoginPassword
+    }
+
+    init(target: PanelTarget) {
+        self.url = target.url
+        self.title = target.title
+        self.autoLoginUser = target.autoLoginUser
+        self.autoLoginPassword = target.autoLoginPassword
+    }
     @Environment(\.dismiss) private var dismiss
     @State private var progress: Double = 0
     @State private var error: String?
@@ -228,8 +253,8 @@ private struct PanelWebView: UIViewRepresentable {
         // .automatic 会再缩一次，网页底栏就又浮起来、底下重新露出底色（v2.3.6）。
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.isOpaque = true
-        webView.backgroundColor = .white
-        webView.scrollView.backgroundColor = .white
+        webView.backgroundColor = .systemBackground
+        webView.scrollView.backgroundColor = .systemBackground
         context.coordinator.webView = webView
         context.coordinator.observe()
         context.coordinator.loadedURL = url
@@ -498,12 +523,16 @@ private struct PanelWebView: UIViewRepresentable {
         """#
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            let nsError = error as NSError
+            if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled { return }
             cancelProgressWatchdog()
             self.error.wrappedValue = error.localizedDescription
             progress.wrappedValue = 0
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            let nsError = error as NSError
+            if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled { return }
             cancelProgressWatchdog()
             self.error.wrappedValue = error.localizedDescription
             progress.wrappedValue = 0
@@ -530,9 +559,9 @@ private struct PanelWebView: UIViewRepresentable {
                   return true;
                 })();
                 """
-                webView.evaluateJavaScript(script) { result, _ in
+                webView.evaluateJavaScript(script) { [weak self] result, _ in
                     if (result as? Bool) != true {
-                        self.attemptAutoLogin()
+                        self?.attemptAutoLogin()
                     }
                 }
             }
@@ -550,6 +579,7 @@ private struct PanelWebView: UIViewRepresentable {
         }
 
         deinit {
+            progressWatchdog?.cancel()
             if let observer {
                 NotificationCenter.default.removeObserver(observer)
             }

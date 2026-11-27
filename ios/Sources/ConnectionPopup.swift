@@ -114,9 +114,16 @@ struct ConnectionPopupView: View {
                             style: StrokeStyle(lineWidth: 3, lineCap: .round))
                     .frame(width: 62, height: 62)
                     .rotationEffect(.degrees(spin ? 360 : 0))
-                    .animation(.linear(duration: 1).repeatForever(autoreverses: false),
+                    .animation(spin ? .linear(duration: 1).repeatForever(autoreverses: false) : nil,
                                value: spin)
-                    .onAppear { spin = true }
+                    .onAppear { restartSpin() }
+                    .onChange(of: phase) { _, next in
+                        if next.isConnecting {
+                            restartSpin()
+                        } else {
+                            spin = false
+                        }
+                    }
             }
 
             if phase.isConnecting {
@@ -133,6 +140,14 @@ struct ConnectionPopupView: View {
     /// 连接中已经改用 RouterGlyph，这里只剩「成功 / 失败」两种符号。
     private var iconName: String {
         phase.isConnected ? "checkmark" : "exclamationmark"
+    }
+
+    private func restartSpin() {
+        spin = false
+        DispatchQueue.main.async {
+            guard phase.isConnecting else { return }
+            spin = true
+        }
     }
 
     // MARK: - 步骤

@@ -150,6 +150,11 @@ struct AppBackground: View {
     @AppStorage(BackgroundImageStore.versionKey) private var version = 0
     @State private var shownImage: UIImage?
 
+    init() {
+        let enabled = UserDefaults.standard.bool(forKey: BackgroundImageStore.onKey)
+        _shownImage = State(initialValue: enabled ? BackgroundImageStore.shared.image : nil)
+    }
+
     var body: some View {
         ZStack {
             gradient
@@ -722,5 +727,68 @@ extension View {
     /// 圆角数值散在四个文件里，改一处样式要翻四遍。
     func cardTapShape(radius: CGFloat = 14) -> some View {
         contentShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+    }
+}
+
+/// 顶层轻量操作提示浮层：把散落在 20 多处的 `model.notice`（成功/失败/说明）统一呈现在主界面顶部。
+struct NoticeToast: View {
+    let notice: Notice
+    let onDismiss: () -> Void
+
+    @Environment(\.colorScheme) private var scheme
+
+    private var tint: Color {
+        switch notice.kind {
+        case .ok: return .green
+        case .fail: return .red
+        case .info: return .blue
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: notice.symbol)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(tint)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(notice.title)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                if !notice.detail.isEmpty {
+                    Text(notice.detail)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Spacer(minLength: 4)
+
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 24, height: 24)
+                    .background(Color.primary.opacity(0.08), in: Circle())
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("关闭提示")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .strokeBorder(tint.opacity(scheme == .dark ? 0.35 : 0.25), lineWidth: 0.75)
+                }
+        }
+        .shadow(color: .black.opacity(scheme == .dark ? 0.35 : 0.12), radius: 14, y: 6)
+        .padding(.horizontal, 18)
     }
 }

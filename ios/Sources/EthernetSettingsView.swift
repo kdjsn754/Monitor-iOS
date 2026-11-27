@@ -237,6 +237,5 @@ struct EthernetSettingsView: View {
             return
         }
         errorText = problem
-        refill()
     }
 }

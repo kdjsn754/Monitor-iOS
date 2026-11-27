@@ -6,7 +6,7 @@ import SwiftUI
 /// 控制面板 v2.0.1 从「状态与操作」卡的下半段拆出来，独立成卡。
 struct ProxyView: View {
     @Environment(AppModel.self) private var model: AppModel
-    @State private var showPanel = false
+    @State private var panelTarget: PanelTarget?
     @State private var showConfigPicker = false
     @State private var showAddSubscription = false
     @State private var isChecking = false
@@ -15,6 +15,10 @@ struct ProxyView: View {
 
     private var oc: OpenClashInfo { model.openClash }
     private var metrics: OpenClashMetrics { model.ocMetrics }
+    /// 内核在跑且第一拍指标尚未回来（或插件状态尚未探测完）时，实时状态展示骨架。
+    private var liveLoading: Bool {
+        !model.ocStateLoaded || (oc.installed && oc.running && !model.ocMetricsLoaded)
+    }
     /// 只要确认装着就按运行状态上色；其余情况一律灰色（不能给「没装」和「没读过」配色）。
     private var accent: Color {
         guard oc.installed else { return .gray }
@@ -54,7 +58,13 @@ struct ProxyView: View {
                     // 现在未探测完先按「连接中」渲染（`panelBadge` 本来就有这一态），
                     // 和 heroCard 里「未探测完就先把两排按钮灰着画出来」是同一个思路：
                     // 先占住位置，别让布局跳。
-                    if oc.installed || !model.ocStateLoaded { ProxyPanelCard(showPanel: $showPanel) }
+                    if oc.installed || !model.ocStateLoaded {
+                        ProxyPanelCard {
+                            if let url = oc.panelURL {
+                                panelTarget = PanelTarget(url: url)
+                            }
+                        }
+                    }
                     configCard
                     accessCard
                 }
@@ -122,10 +132,8 @@ struct ProxyView: View {
             }
             // 控制面板改 fullScreenCover（v2.3.5，用户要求全屏）：WebView 自带导航栏
             // 和「关闭」钮，盖住底栏反而更像「进了面板」；半屏 sheet 会露出底下的页面。
-            .fullScreenCover(isPresented: $showPanel) {
-                if let url = oc.panelURL {
-                    PanelView(url: url)
-                }
+            .fullScreenCover(item: $panelTarget) { target in
+                PanelView(target: target)
             }
             // 两个弹窗都改成 push 独立页（v2.1.7）：本页本来就跑在自己的 NavigationStack 里，
             // 弹窗会把底栏整个盖住，也让「返回」多一层圆角卡片的边界感。
@@ -333,22 +341,23 @@ struct ProxyView: View {
     }
 
     /// 上半：两列速率，各自下面挂「本次累计」。
-    /// 中间那条竖线用 `Divider()`——它自己会撑到两边内容的高度，不用手算线段长度。
     private var trafficRow: some View {
-        HStack(spacing: 0) {
+        let inactive = model.ocStateLoaded && (!oc.installed || !oc.running)
+        return HStack(spacing: 0) {
             rateColumn("下载", value: formatSpeed(metrics.download),
                        total: formatBytes(Double(metrics.downloadTotal)),
                        icon: "arrow.down.circle.fill", color: .blue,
-                       loading: !model.ocMetricsLoaded)
+                       loading: liveLoading)
 
-            Divider()
+            CardVerticalRule()
 
             rateColumn("上传", value: formatSpeed(metrics.upload),
                        total: formatBytes(Double(metrics.uploadTotal)),
                        icon: "arrow.up.circle.fill", color: .purple,
-                       loading: !model.ocMetricsLoaded)
+                       loading: liveLoading)
                 .padding(.leading, 14)
         }
+        .opacity(inactive ? 0.65 : 1)
     }
 
     private func rateColumn(_ label: String, value: String, total: String,
@@ -358,41 +367,41 @@ struct ProxyView: View {
             Label(label, systemImage: icon)
                 .font(.system(size: 12))
                 .foregroundStyle(color)
-            if loading {
-                // 首帧不写「0 B/s」：内核还没问到，写 0 是假结论，数据一到会跳一下。
-                SkeletonBar(width: 86, height: 20, radius: 7)
-                    .frame(height: 27, alignment: .leading)
-            } else {
+            LoadedSwap(loaded: !loading) {
                 Text(value)
                     .font(.system(size: 22, weight: .semibold))
                     .monospacedDigit()
                     .foregroundStyle(color)
                     .lineLimit(1)
                     .minimumScaleFactor(0.6)
+            } placeholder: {
+                SkeletonBar(width: 86, height: 20, radius: 7)
+                    .frame(height: 27, alignment: .leading)
             }
-            if loading {
-                SkeletonBar(width: 68, height: 10)
-            } else {
+            LoadedSwap(loaded: !loading) {
                 Text("累计 \(total)")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
+            } placeholder: {
+                SkeletonBar(width: 68, height: 10)
+                    .frame(height: 13, alignment: .leading)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// 下半：2×2 指标表。格子没有底色，只靠一横一竖两条细线分格，
-    /// 高度和重量都比上面的速率低一档——它本来就是「顺带看一眼」的信息。
+    /// 下半：2×2 指标表。格子没有底色，只靠统一细线分格。
     private var statsGrid: some View {
-        let loading = !model.ocMetricsLoaded
+        let loading = liveLoading
+        let inactive = model.ocStateLoaded && (!oc.installed || !oc.running)
         return VStack(spacing: 0) {
             HStack(spacing: 0) {
                 statCell("连接数", "\(metrics.connections)",
                          icon: "point.3.connected.trianglepath.dotted", color: .teal,
                          loading: loading)
-                Divider()
+                CardVerticalRule()
                 statCell("内存", formatBytes(Double(metrics.memory)),
                          icon: "memorychip", color: .indigo,
                          loading: loading)
@@ -400,14 +409,14 @@ struct ProxyView: View {
             }
             .padding(.vertical, 8)
 
-            Divider()
+            CardRule()
 
             HStack(spacing: 0) {
                 // CPU 和概览页的 CPU 圆环用同一个主色蓝，不再用橙——橙色留给温度和告警。
                 statCell("CPU", String(format: "%.1f%%", metrics.cpu),
                          icon: "cpu", color: .blue,
                          loading: loading)
-                Divider()
+                CardVerticalRule()
                 statCell("负载", String(format: "%.1f%%", metrics.load),
                          icon: "speedometer", color: .purple,
                          loading: loading)
@@ -415,6 +424,7 @@ struct ProxyView: View {
             }
             .padding(.vertical, 8)
         }
+        .opacity(inactive ? 0.65 : 1)
     }
 
     /// 一格指标：小图标 + 「名称 / 数值」两行，没有底也没有边。
@@ -431,15 +441,15 @@ struct ProxyView: View {
                 Text(label)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
-                if loading {
-                    SkeletonBar(width: 44, height: 13)
-                        .frame(height: 18, alignment: .leading)
-                } else {
+                LoadedSwap(loaded: !loading) {
                     Text(value)
                         .font(.system(size: 15, weight: .semibold))
                         .monospacedDigit()
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
+                } placeholder: {
+                    SkeletonBar(width: 44, height: 13)
+                        .frame(height: 18, alignment: .leading)
                 }
             }
 
@@ -659,6 +669,7 @@ struct ProxyView: View {
         }
         .buttonStyle(.plain)
         .disabled(dimmed)
+        .opacity(dimmed ? 0.48 : 1)
     }
 
     private var configTitle: String {
@@ -855,7 +866,7 @@ struct ProxyView: View {
 /// 和 2 秒那条节奏彻底脱钩。
 private struct ProxyPanelCard: View {
     @Environment(AppModel.self) private var model
-    @Binding var showPanel: Bool
+    let onOpenPanel: () -> Void
 
     private var oc: OpenClashInfo { model.openClash }
 
@@ -885,7 +896,7 @@ private struct ProxyPanelCard: View {
                     .truncationMode(.middle)
 
                 Button {
-                    showPanel = true
+                    onOpenPanel()
                 } label: {
                     HStack(spacing: 7) {
                         Image(systemName: "safari.fill")

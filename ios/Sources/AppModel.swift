@@ -1214,9 +1214,8 @@ final class AppModel {
             updateSensors(temp: sections["TEMP"] ?? "",
                           fan: sections["FAN"] ?? "",
                           pwm: sections["FANPWM"] ?? "")
-            let temp = firstLine(sections["TEMP"] ?? "")
-            let fan = firstLine(sections["FAN"] ?? "")
-            if !temp.isEmpty || !fan.isEmpty { sensorsLoaded = true }
+            // 无温度/风扇传感器的机型，节点存在但输出为空——只要拿到段就收口，不再一直画占位。
+            if sections["TEMP"] != nil || sections["FAN"] != nil { sensorsLoaded = true }
         }
         if items.contains(.flash) {
             updateFlash(sections["FLASH"] ?? "")
@@ -3959,8 +3958,8 @@ private struct NetVap {
             value.cpuCores = Int(firstLine(sections["CPUCORES"])) ?? 0
             value.firmware = parseRelease(sections["RELEASE"] ?? "")
             routerInfo = value
-            // 有一段读到了就算「问过」，页面不再画占位。全空（命令没跑通）时保持 false。
-            if !value.model.isEmpty || !value.hostname.isEmpty || !value.kernel.isEmpty {
+            // 命令执行成功且返回了段数据就算问过（极简固件即使缺某些字段也不卡死骨架）。
+            if !sections.isEmpty || !value.model.isEmpty || !value.hostname.isEmpty || !value.kernel.isEmpty {
                 infoLoaded = true
             }
             // 名称留空的连接靠这个标题，采到就存下来。

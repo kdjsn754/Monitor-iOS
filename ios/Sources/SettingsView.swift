@@ -12,7 +12,7 @@ struct SettingsView: View {
     @AppStorage("themeMode") private var themeMode = "light"
     @State private var confirmLogout = false
     @State private var editorRoute: ConnectionEditorRoute?
-    @State private var showRouterWeb = false
+    @State private var webPanelTarget: PanelTarget?
     /// 切换连接的半屏选择器（自绘，不再用系统的列表/菜单）。
     @State private var showSwitcher = false
     // 背景卡的选图 / 裁切 / 透明度状态全在 `BackgroundCard` 自己身上：
@@ -25,15 +25,8 @@ struct SettingsView: View {
                     routerCard
                         // 三个弹窗挂在同一个视图上容易互相抢，网页后台这张挂到卡片上。
                         // fullScreenCover（v2.3.5，用户要求全屏）：和代理页控制面板一致。
-                        .fullScreenCover(isPresented: $showRouterWeb) {
-                            if let url = model.routerWebURL {
-                                PanelView(
-                                    url: url,
-                                    title: "路由器网页后台",
-                                    autoLoginUser: model.currentProfile?.user,
-                                    autoLoginPassword: model.currentPassword
-                                )
-                            }
+                        .fullScreenCover(item: $webPanelTarget) { target in
+                            PanelView(target: target)
                         }
                     appearanceCard
                     BackgroundCard()
@@ -182,7 +175,14 @@ struct SettingsView: View {
             }
 
             Button {
-                showRouterWeb = true
+                if let url = model.routerWebURL {
+                    webPanelTarget = PanelTarget(
+                        url: url,
+                        title: "路由器网页后台",
+                        autoLoginUser: model.currentProfile?.user,
+                        autoLoginPassword: model.currentPassword
+                    )
+                }
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "globe")

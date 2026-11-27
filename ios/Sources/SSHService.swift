@@ -71,6 +71,8 @@ final class SSHService: @unchecked Sendable {
         }
     }
 
+    private static let libssh2Ready: Int32 = libssh2_init(0)
+
     func connect(host: String, port: Int, user: String, password: String,
                  timeout: TimeInterval = 8) async throws {
         // 取消标记在派发之前就清掉：万一用户点「停止」比队列排到还早，
@@ -83,7 +85,7 @@ final class SSHService: @unchecked Sendable {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             queue.async {
                 self.closeLocked()
-                libssh2_init(0)
+                _ = Self.libssh2Ready
 
                 do {
                     try self.handshakeLocked(host: host, port: port, user: user,
@@ -151,95 +153,135 @@ final class SSHService: @unchecked Sendable {
         adopted = true
     }
 
-    /// 非阻塞 connect + poll 自己控时。
+    /// 非阻塞 connect + poll 自己控时（支持 IPv4 / IPv6 / 主机名解析）。
     ///
     /// 阻塞式 `connect()` 在目标不在同一网段时不会按 SO_SNDTIMEO 返回，
     /// 而要等内核把 SYN 重试完（约 75 秒）——界面就一直卡在「正在连接」。
-    /// 这里改成 200ms 切片轮询，超时可控，中途还能被 cancelAttempt() 打断。
+    /// 这里改成 `getaddrinfo` 解析全部候选地址，逐个做 200ms 切片轮询，超时可控，
+    /// 中途还能被 cancelAttempt() 打断。
     private func openSocket(host: String, port: Int, timeout: TimeInterval) throws -> Int32 {
-        let fd = socket(AF_INET, SOCK_STREAM, 0)
-        guard fd >= 0 else {
-            throw AppError.message("无法创建 TCP socket")
+        let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedHost.isEmpty else {
+            throw AppError.message("路由器地址不能为空")
         }
 
-        // 所有失败出口都走这里：先摘掉 pendingFD 再 close，
-        // 免得 fd 号被系统复用后，后续的 cancelAttempt 误伤别人的 socket。
-        func abort(_ error: Error) -> Error {
-            setPendingFD(-1)
-            Darwin.close(fd)
-            return error
-        }
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_STREAM
 
-        setSocketTimeouts(fd, seconds: 10)
-
-        var address = sockaddr_in()
-        address.sin_family = sa_family_t(AF_INET)
-        address.sin_port = in_port_t(UInt16(port).bigEndian)
-        let parsed = host.withCString { pointer in
-            inet_pton(AF_INET, pointer, &address.sin_addr)
-        }
-        guard parsed == 1 else {
-            throw abort(AppError.message("路由器地址不是有效的 IPv4"))
-        }
-
-        let flags = fcntl(fd, F_GETFL, 0)
-        let baseFlags = flags < 0 ? Int32(0) : flags
-        _ = fcntl(fd, F_SETFL, baseFlags | O_NONBLOCK)
-        setPendingFD(fd)
-
-        let result = withUnsafePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+        var resultList: UnsafeMutablePointer<addrinfo>?
+        let gaiCode = trimmedHost.withCString { hostPtr in
+            String(port).withCString { portPtr in
+                getaddrinfo(hostPtr, portPtr, &hints, &resultList)
             }
         }
-        if result != 0 {
+        guard gaiCode == 0, let firstAddr = resultList else {
+            let reason = gaiCode != 0 ? String(cString: gai_strerror(gaiCode)) : "无可用地址"
+            throw AppError.message("无法解析路由器地址「\(trimmedHost)」：\(reason)")
+        }
+        defer { freeaddrinfo(firstAddr) }
+
+        let deadline = Date().addingTimeInterval(timeout)
+        var lastError: Error = AppError.message("无法建立到「\(trimmedHost)」的 TCP 连接")
+
+        var cursor: UnsafeMutablePointer<addrinfo>? = firstAddr
+        while let current = cursor {
+            cursor = current.pointee.ai_next
+            if isCancelled { throw AppError.cancelled }
+
+            let info = current.pointee
+            let fd = socket(info.ai_family, info.ai_socktype, info.ai_protocol)
+            guard fd >= 0 else {
+                let code = errno
+                lastError = AppError.message("无法创建 TCP socket（errno \(code)）")
+                continue
+            }
+
+            func closeAttempt(_ error: Error) -> Error {
+                setPendingFD(-1)
+                Darwin.close(fd)
+                return error
+            }
+
+            var noSigPipe: Int32 = 1
+            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+            setSocketTimeouts(fd, seconds: 10)
+
+            let flags = fcntl(fd, F_GETFL, 0)
+            let baseFlags = flags < 0 ? Int32(0) : flags
+            _ = fcntl(fd, F_SETFL, baseFlags | O_NONBLOCK)
+            setPendingFD(fd)
+
+            let result = Darwin.connect(fd, info.ai_addr, info.ai_addrlen)
+            if result == 0 {
+                _ = fcntl(fd, F_SETFL, baseFlags)
+                return fd
+            }
+
             let code = errno
             if isCancelled {
-                throw abort(AppError.cancelled)
+                throw closeAttempt(AppError.cancelled)
             }
             guard code == EINPROGRESS || code == EALREADY else {
-                throw abort(AppError.message(
+                lastError = closeAttempt(AppError.message(
                     "TCP 连接失败：\(String(cString: strerror(code)))（errno \(code)）"
                 ))
+                continue
             }
 
-            let deadline = Date().addingTimeInterval(timeout)
             var connected = false
+            var candidateError: Error?
             while !connected {
                 if isCancelled {
-                    throw abort(AppError.cancelled)
+                    throw closeAttempt(AppError.cancelled)
                 }
+                if Date() >= deadline {
+                    candidateError = AppError.message(
+                        "连接超时：\(Int(timeout)) 秒内路由器没有响应，请确认手机和路由器在同一网段。"
+                    )
+                    break
+                }
+                let sliceMs = max(20, min(200, Int32(deadline.timeIntervalSinceNow * 1000)))
                 var descriptor = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
-                let ready = poll(&descriptor, 1, 200)
+                let ready = poll(&descriptor, 1, sliceMs)
                 if ready > 0 {
                     var socketError: Int32 = 0
                     var length = socklen_t(MemoryLayout<Int32>.size)
                     getsockopt(fd, SOL_SOCKET, SO_ERROR, &socketError, &length)
                     if socketError != 0 {
-                        throw abort(AppError.message(
+                        candidateError = AppError.message(
                             "TCP 连接失败：\(String(cString: strerror(socketError)))"
-                        ))
+                        )
+                        break
                     }
                     connected = true
                 } else if ready == 0 {
-                    if Date() > deadline {
-                        throw abort(AppError.message(
+                    if Date() >= deadline {
+                        candidateError = AppError.message(
                             "连接超时：\(Int(timeout)) 秒内路由器没有响应，请确认手机和路由器在同一网段。"
-                        ))
+                        )
+                        break
                     }
                 } else {
-                    let code = errno
-                    if code == EINTR { continue }
-                    throw abort(AppError.message(
-                        "TCP 连接失败：\(String(cString: strerror(code)))（errno \(code)）"
-                    ))
+                    let pollErr = errno
+                    if pollErr == EINTR { continue }
+                    candidateError = AppError.message(
+                        "TCP 连接失败：\(String(cString: strerror(pollErr)))（errno \(pollErr)）"
+                    )
+                    break
                 }
+            }
+
+            if connected {
+                // 恢复阻塞模式，后续 libssh2 读写靠 SO_RCVTIMEO 控时。
+                _ = fcntl(fd, F_SETFL, baseFlags)
+                return fd
+            } else {
+                lastError = closeAttempt(candidateError ?? lastError)
             }
         }
 
-        // 恢复阻塞模式，后续 libssh2 读写靠 SO_RCVTIMEO 控时。
-        _ = fcntl(fd, F_SETFL, baseFlags)
-        return fd
+        throw lastError
     }
 
     /// 改 socket 的收发超时。`probe()` 用它把等待压到零点几秒，探完再恢复成 10 秒。
@@ -356,6 +398,9 @@ final class SSHService: @unchecked Sendable {
         // CPU and keep the router's shell busy).
         let deadline = Date().addingTimeInterval(max(timeout, floor))
         while true {
+            if Date() >= deadline {
+                throw AppError.message("读取 SSH 输出超时")
+            }
             let read = buffer.withUnsafeMutableBufferPointer { pointer in
                 libssh2_channel_read_ex(
                     channel,
@@ -365,11 +410,17 @@ final class SSHService: @unchecked Sendable {
                 )
             }
             if read > 0 {
-                output.append(contentsOf: buffer.prefix(read).map { UInt8(bitPattern: $0) })
+                buffer.withUnsafeBufferPointer { ptr in
+                    ptr.withMemoryRebound(to: UInt8.self) { bytes in
+                        if let base = bytes.baseAddress {
+                            output.append(base, count: read)
+                        }
+                    }
+                }
             } else if read == 0 {
                 break
             } else if read == Int(LIBSSH2_ERROR_EAGAIN) {
-                if Date() > deadline {
+                if Date() >= deadline {
                     throw AppError.message("读取 SSH 输出超时")
                 }
                 usleep(20_000)

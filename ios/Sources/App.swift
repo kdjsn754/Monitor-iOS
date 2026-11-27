@@ -35,6 +35,9 @@ struct RootView: View {
     @State private var connectStartedAt: Date?
     /// 「正在恢复连接」浮层是否已经该亮了（v3.3.8，慢 0.35 秒，避免白闪）。
     @State private var recoveringVisible = false
+    @State private var recoveringTask: Task<Void, Never>?
+    @State private var popupDismissTask: Task<Void, Never>?
+    @State private var noticeDismissTask: Task<Void, Never>?
 
     var body: some View {
         ZStack {
@@ -49,10 +52,10 @@ struct RootView: View {
                     LoginView()
                 }
             }
-            // 连接弹窗盖着的时候，底下的页面一律不吃点击。
-            // 否则能在「正在连接」的弹窗背后把路由器的「…」菜单点开，两个浮层叠在一起。
+            // 连接弹窗或可见的重连/操作遮罩盖着时，底下的页面才禁止点击。
+            // 0.35s 重连宽限期内尚未显示浮层，不应锁死页面点击。
             .allowsHitTesting(popupPhase == nil
-                              && !model.reconnecting
+                              && !(model.reconnecting && recoveringVisible)
                               && model.activityTitle == nil)
             if let phase = popupPhase {
                 ConnectionPopupView(
@@ -95,6 +98,18 @@ struct RootView: View {
                 .transition(.opacity)
             }
         }
+        .overlay(alignment: .top) {
+            if model.connected, let notice = model.notice {
+                NoticeToast(notice: notice) {
+                    noticeDismissTask?.cancel()
+                    noticeDismissTask = nil
+                    model.notice = nil
+                }
+                .padding(.top, 6)
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .zIndex(3)
+            }
+        }
         // v3.3.7：滚动期间把刷新率顶到 120。
         // 挂在这里是为了覆盖**所有**页面——探针每 0.25s 扫一遍窗口视图树，
         // 把找到的 UIScrollView（SwiftUI 的 ScrollView / Form / List 底下都是它）
@@ -103,9 +118,12 @@ struct RootView: View {
         .preferredColorScheme(colorScheme)
         .tint(.blue)
         .animation(.easeInOut(duration: 0.2), value: popupPhase)
+        .animation(.easeInOut(duration: 0.2), value: model.notice)
         .onAppear { migrateThemeModeIfNeeded() }
         .onChange(of: model.connecting) { _, isConnecting in
             if isConnecting {
+                popupDismissTask?.cancel()
+                popupDismissTask = nil
                 connectStartedAt = Date()
                 popupPhase = .connecting
             } else if popupPhase?.isConnecting == true {
@@ -121,20 +139,33 @@ struct RootView: View {
             }
         }
         .onChange(of: model.connected) { _, isConnected in
-            if isConnected, popupPhase?.isConnecting == true {
+            if isConnected, !model.connecting, !model.lastConnectFailed, popupPhase?.isConnecting == true {
                 finishPopup()
             }
         }
         .onChange(of: model.reconnecting) { _, isRecovering in
+            recoveringTask?.cancel()
+            recoveringTask = nil
             guard isRecovering else {
                 if recoveringVisible { recoveringVisible = false }
                 return
             }
             // 0.35 秒还没好才亮浮层：快的时候用户根本不该看到这层遮罩。
-            Task {
+            recoveringTask = Task {
                 try? await Task.sleep(nanoseconds: 350_000_000)
-                guard model.reconnecting else { return }
+                guard !Task.isCancelled, model.reconnecting else { return }
                 withAnimation(.easeInOut(duration: 0.15)) { recoveringVisible = true }
+            }
+        }
+        .onChange(of: model.notice) { _, notice in
+            noticeDismissTask?.cancel()
+            noticeDismissTask = nil
+            guard let notice else { return }
+            let delayNs: UInt64 = notice.kind == .fail ? 4_500_000_000 : 3_200_000_000
+            noticeDismissTask = Task {
+                try? await Task.sleep(nanoseconds: delayNs)
+                guard !Task.isCancelled, model.notice == notice else { return }
+                model.notice = nil
             }
         }
         .onChange(of: scenePhase) { _, phase in
@@ -160,9 +191,11 @@ struct RootView: View {
 
     /// 连上了：先让弹窗停一下显示成功，再自己收起来。
     private func finishPopup() {
+        popupDismissTask?.cancel()
         popupPhase = .connected
-        Task {
+        popupDismissTask = Task {
             try? await Task.sleep(nanoseconds: 900_000_000)
+            guard !Task.isCancelled else { return }
             if popupPhase?.isConnected == true {
                 withAnimation { popupPhase = nil }
             }
@@ -170,6 +203,8 @@ struct RootView: View {
     }
 
     private func dismissPopup() {
+        popupDismissTask?.cancel()
+        popupDismissTask = nil
         withAnimation { popupPhase = nil }
         connectStartedAt = nil
     }
@@ -177,6 +212,8 @@ struct RootView: View {
     /// 用户主动停止：先收弹窗再让 model 收尾，
     /// 这样 connected 回落时不会被上面的 onChange 误判成「连接成功」。
     private func cancelConnect() {
+        popupDismissTask?.cancel()
+        popupDismissTask = nil
         withAnimation { popupPhase = nil }
         connectStartedAt = nil
         model.cancelConnect()
@@ -189,6 +226,8 @@ struct RootView: View {
             dismissPopup()
             return
         }
+        popupDismissTask?.cancel()
+        popupDismissTask = nil
         connectStartedAt = Date()
         popupPhase = .connecting
         Task { await model.connect(profile: target.profile, password: target.password) }
@@ -518,7 +557,6 @@ struct LoginView: View {
         }
         .buttonStyle(GlassProminentButtonStyle())
         .disabled(model.connecting)
-        .opacity(model.connecting ? 0.65 : 1)
         .padding(.top, 4)
     }
 

@@ -88,6 +88,7 @@ struct UplinkSettingsView: View {
             .padding(.top, 12)
             // 底栏是浮在内容上的玻璃条：不自己留这一截，最后一行会被它盖住。
             .padding(.bottom, 44)
+            .background(ScrollBounceTuning())
         }
         .scrollBounceBehavior(.basedOnSize)
         .themedScrollBackground()
@@ -180,6 +181,8 @@ struct UplinkSettingsView: View {
                                 .font(.system(size: 15))
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
+                                .submitLabel(.join)
+                                .onSubmit { Task { await join(target) } }
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 10)
                                 .background {
@@ -268,8 +271,12 @@ struct UplinkSettingsView: View {
                 metricRow(("IP 地址", emptyDash(info.uplinkIP), nil),
                           ("网关", emptyDash(info.uplinkGateway), nil))
                 CardRule()
-                metricRow(("信号", signalText, nil),
-                          ("在线时长", info.uplinkUptime > 0 ? durationLabel(info.uplinkUptime) : "—", nil))
+                if info.uplink == .repeater {
+                    metricRow(("信号", signalText, nil),
+                              ("在线时长", info.uplinkUptime > 0 ? durationLabel(info.uplinkUptime) : "—", nil))
+                } else {
+                    metricRow(("在线时长", info.uplinkUptime > 0 ? durationLabel(info.uplinkUptime) : "—", nil))
+                }
                 CardRule()
                 metricRow(("DNS", emptyDash(info.uplinkDNS.prefix(2).joined(separator: "  ")), nil))
             }
@@ -506,11 +513,14 @@ struct UplinkSettingsView: View {
             HStack(alignment: .top, spacing: 12) {
                 MetricCell(label: "频段", value: rep.band.isEmpty ? "—" : bandLabel(rep.band))
                 MetricCell(label: "信道", value: rep.channel > 0 ? "CH \(rep.channel)" : "—")
-                MetricCell(label: "BSSID",
-                           value: rep.currentBSSID.isEmpty ? (rep.bssid.isEmpty ? "—" : rep.bssid)
-                                                           : rep.currentBSSID)
             }
             .padding(.vertical, UI.rowPadding)
+
+            CardRule()
+            MetricCell(label: "BSSID",
+                       value: rep.currentBSSID.isEmpty ? (rep.bssid.isEmpty ? "—" : rep.bssid)
+                                                       : rep.currentBSSID)
+                .padding(.vertical, UI.rowPadding)
 
             CardRule()
             Button {
@@ -814,7 +824,7 @@ struct UplinkSettingsView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer(minLength: 8)
-            if tetherOn {
+            if info.uplink == .tethering {
                 Text("使用中")
                     .font(UI.label())
                     .foregroundStyle(NetPalette.wan)
@@ -1036,6 +1046,10 @@ struct UplinkSettingsView: View {
         }
         joinKey = ""
         joinReveal = false
+        if !item.secured {
+            await join(item)
+            return
+        }
         pendingJoin = item
     }
 
@@ -1051,8 +1065,8 @@ struct UplinkSettingsView: View {
                                                        autoPortal: rep.autoPortal,
                                                        band: item.band.isEmpty ? nil : item.band)
         busy = false
-        surveys = []
         guard let problem else {
+            surveys = []
             model.notice = Notice(kind: .ok, title: "已连接",
                                   detail: item.bandLabel.isEmpty ? item.ssid : "\(item.ssid) · \(item.bandLabel)")
             try? await Task.sleep(nanoseconds: 2_000_000_000)

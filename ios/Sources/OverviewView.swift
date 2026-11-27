@@ -97,12 +97,12 @@ struct OverviewView: View {
             RouterGlyph(size: 36)
             VStack(alignment: .leading, spacing: 3) {
                 // 型号要到第一轮 `refreshInfo` 才回来。以前拿 "OpenWrt" 顶这一段，
-                // 数据一到变成本机型号，标题行会「换一次字」；现在先画一根等高的占位条。
-                if model.infoLoaded {
+                // 数据一到变成本机型号，标题行会「换一次字」；现在先画一根等高的占位条并淡入。
+                LoadedSwap(loaded: model.infoLoaded) {
                     Text(model.routerInfo.model.isEmpty ? "OpenWrt" : model.routerInfo.model)
                         .font(UI.title())
-                } else {
-                    SkeletonBar(width: 108, height: 15)
+                } placeholder: {
+                    SkeletonBar(width: 112, height: 15)
                         .frame(height: 21, alignment: .leading)
                 }
                 HStack(spacing: 5) {
@@ -156,27 +156,29 @@ struct OverviewView: View {
                 speedValue("下载", value: formatSpeed(model.stats.download),
                            color: .blue, icon: "arrow.down.circle.fill",
                            loading: !model.statsLoaded)
-                Rectangle()
-                    .fill(Color(.separator).opacity(0.45))
-                    .frame(width: 0.5, height: 34)
+                CardVerticalRule()
+                    .frame(height: 34)
                 speedValue("上传", value: formatSpeed(model.stats.upload),
                            color: .purple, icon: "arrow.up.circle.fill",
                            loading: !model.statsLoaded)
             }
             SpeedSparkline(points: model.history)
-            HStack {
-                if model.statsLoaded {
+            LoadedSwap(loaded: model.statsLoaded) {
+                HStack {
                     Text("本次会话 ↓ \(formatBytes(model.stats.sessionDownload))")
                     Spacer()
                     Text("↑ \(formatBytes(model.stats.sessionUpload))")
-                } else {
+                }
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            } placeholder: {
+                HStack {
                     SkeletonBar(width: 96, height: 10)
                     Spacer()
                     SkeletonBar(width: 64, height: 10)
                 }
+                .frame(height: 14, alignment: .leading)
             }
-            .font(.system(size: 11))
-            .foregroundStyle(.secondary)
         }
     }
 
@@ -189,16 +191,16 @@ struct OverviewView: View {
             Label(label, systemImage: icon)
                 .font(UI.tileTitle())
                 .foregroundStyle(color)
-            if loading {
-                SkeletonBar(width: 88, height: 20, radius: 7)
-                    // 22pt 半粗数字的行高约 27，占位条撑住这一格，卡片不会先矮后高。
-                    .frame(height: 27, alignment: .leading)
-            } else {
+            LoadedSwap(loaded: !loading) {
                 Text(value)
                     .font(.system(size: UI.heroSize, weight: .semibold).monospacedDigit())
                     .foregroundStyle(color)
                     .lineLimit(1)
                     .minimumScaleFactor(0.65)
+            } placeholder: {
+                SkeletonBar(width: 88, height: 20, radius: 7)
+                    // 22pt 半粗数字的行高约 27，占位条撑住这一格，卡片不会先矮后高。
+                    .frame(height: 27, alignment: .leading)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -273,29 +275,35 @@ struct OverviewView: View {
     private var flashSkeleton: some View {
         HStack(alignment: .center, spacing: 16) {
             Circle()
-                .stroke(Color.primary.opacity(0.07), lineWidth: 11)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 11)
                 .frame(width: 98, height: 98)
 
             VStack(spacing: 11) {
-                skeletonLine(width: 64)
-                skeletonLine(width: 88)
-                Divider().opacity(0.35)
-                skeletonLine(width: 54)
+                flashSkeletonRow(labelWidth: 28, valueWidth: 64)
+                flashSkeletonRow(labelWidth: 28, valueWidth: 84)
+                CardRule()
+                HStack(spacing: 6) {
+                    SkeletonBar(width: 36, height: 11)
+                    Spacer(minLength: 4)
+                    SkeletonBar(width: 56, height: 12)
+                }
+                .frame(height: 15)
             }
         }
         .frame(maxWidth: .infinity, minHeight: 98, alignment: .leading)
     }
 
-    /// 一行「左标签 + 右数值」的占位。
-    private func skeletonLine(width: CGFloat) -> some View {
+    /// 一行「圆点 + 左标签 + 右数值」的占位，与 `flashRow` 15pt 数值行同高。
+    private func flashSkeletonRow(labelWidth: CGFloat, valueWidth: CGFloat) -> some View {
         HStack(spacing: 7) {
             Circle()
-                .fill(Color.primary.opacity(0.06))
+                .fill(Color.primary.opacity(0.07))
                 .frame(width: 8, height: 8)
-            SkeletonBar(width: 34, height: 11)
+            SkeletonBar(width: labelWidth, height: 11)
             Spacer(minLength: 6)
-            SkeletonBar(width: width, height: 13)
+            SkeletonBar(width: valueWidth, height: 14)
         }
+        .frame(height: 18)
     }
 
     /// 闪存的一行：色点 → 名称 → 容量数字。
@@ -369,7 +377,8 @@ struct OverviewView: View {
                         model.stats.load5,
                         model.stats.load15
                     ),
-                    loading: !model.statsLoaded
+                    loading: !model.statsLoaded,
+                    noteLoading: !model.statsLoaded || !model.infoLoaded
                 )
                 HardwareGauge(
                     title: "内存",
@@ -474,41 +483,34 @@ struct OverviewView: View {
                               color: Color, badge: String? = nil,
                               showsChevron: Bool = false,
                               loading: Bool = false) -> some View {
-        HStack(spacing: 10) {
+        let tileColor = loading ? Color.secondary : color
+        return HStack(spacing: 10) {
             ZStack {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    // 格子改成白底之后（v1.28.27），这块 18% 主色方底是整格里唯一还带颜色的块面，
-                    // 图标不会飘在白色上显得没着落。再淡一点就会糊成一片灰。
-                    .fill(color.opacity(0.18))
+                    .fill(loading ? Color.primary.opacity(0.07) : color.opacity(0.18))
                     .frame(width: 36, height: 36)
 
                 Image(systemName: icon)
                     .font(.system(size: 17, weight: .medium))
-                    .foregroundStyle(color)
+                    .foregroundStyle(tileColor)
             }
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
-                    // v3.3.1：瓦片标题是这块格子最该先被看见的东西（用户 2026-11-19：
-                    // 「各瓦片的标题不应该最首要吗现在又小又灰」），从 11pt 灰字
-                    // 升到 13pt 半粗主色字；下面的数值仍是 15pt 半粗，两者同为主色。
                     Text(title)
                         .font(UI.tileTitle())
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
-                    if let badge {
+                    if !loading, let badge {
                         Text(badge)
                             .font(UI.badge())
                             .foregroundStyle(color)
                     }
                 }
                 // 首帧不写「无传感器」：那会被读成「这台机器没有这个传感器」，
-                // 而真实情况只是「还没问到」。占位条读到之后才换成结论。
-                if loading {
-                    SkeletonBar(width: 52, height: 13)
-                        .frame(height: 18, alignment: .leading)
-                } else {
+                // 而真实情况只是「还没问到」。占位条读到之后才平滑换入结论。
+                LoadedSwap(loaded: !loading) {
                     HStack(alignment: .firstTextBaseline, spacing: 3) {
                         Text(value)
                             .font(.system(size: 15, weight: .semibold))
@@ -521,6 +523,9 @@ struct OverviewView: View {
                                 .lineLimit(1)
                         }
                     }
+                } placeholder: {
+                    SkeletonBar(width: 54, height: 13)
+                        .frame(height: 18, alignment: .leading)
                 }
             }
 
@@ -643,48 +648,30 @@ struct OverviewView: View {
         }
     }
 
-    /// 设备卡的占位：顶行结论 + 三行设备 + 底部入口，和真实内容同一副骨架。
-    ///
-    /// 三行是按「预览最多三台」定的；真实台数少于三台时卡片会短一点，
-    /// 那是数据本身的样子，不是首帧跳变。
+    /// 设备卡的占位：顶行结论 + 共享三行设备 + 底部入口，和真实内容同一副骨架。
     private var devicesSkeleton: some View {
         VStack(spacing: 0) {
             HStack(spacing: 6) {
-                SkeletonBar(width: 26, height: 20, radius: 6)
+                SkeletonBar(width: 28, height: 20, radius: 6)
                 SkeletonBar(width: 46, height: 12)
                 Spacer(minLength: 8)
-                SkeletonBar(width: 92, height: 16, radius: 8)
+                SkeletonBar(width: 92, height: 18, radius: 9)
             }
+            .frame(height: 26)
             .padding(.bottom, 10)
 
             CardRule()
 
-            ForEach(0..<3, id: \.self) { index in
-                if index > 0 { CardRule() }
-                HStack(spacing: 10) {
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .fill(Color.primary.opacity(0.07))
-                        .frame(width: 30, height: 30)
-                    VStack(alignment: .leading, spacing: 6) {
-                        SkeletonBar(width: 88, height: 13)
-                        SkeletonBar(width: 132, height: 10)
-                    }
-                    Spacer(minLength: 8)
-                    VStack(alignment: .trailing, spacing: 6) {
-                        SkeletonBar(width: 46, height: 11)
-                        SkeletonBar(width: 34, height: 9)
-                    }
-                }
-                .padding(.vertical, 9)
-            }
+            ClientRowSkeleton(count: 3, showChevron: false)
 
             CardRule()
 
             HStack(spacing: 5) {
-                SkeletonBar(width: 52, height: 12)
+                SkeletonBar(width: 54, height: 12)
                 Spacer(minLength: 6)
-                SkeletonBar(width: 38, height: 11)
+                SkeletonBar(width: 36, height: 11)
             }
+            .frame(height: 16)
             .padding(.vertical, 10)
         }
     }
@@ -744,9 +731,6 @@ struct OverviewView: View {
     }
 
     private var systemContent: some View {
-        // 七行信息的行数固定，首帧只是值不对：以前先写七行 "--"，数据一到整列变字。
-        // 现在没到之前画灰条——高度不变，只换「有没有内容」。
-        // 前五行来自 `refreshInfo`（静态），后两行来自每轮的 `core`。
         let rows: [(String, String)] = [
             ("主机名", model.routerInfo.hostname.isEmpty ? "--" : model.routerInfo.hostname),
             ("型号", model.routerInfo.model.isEmpty ? "--" : model.routerInfo.model),
@@ -756,22 +740,27 @@ struct OverviewView: View {
             ("运行时间", formatUptime(model.stats.uptime)),
             ("负载", String(format: "%.2f", model.stats.load))
         ]
-        let staticReady = model.infoLoaded
-        let liveReady = model.statsLoaded
+        // 整张系统信息卡一次平滑淡入，避免前 5 行后 2 行分批闪烁。
+        let ready = model.infoLoaded && model.statsLoaded
 
-        return VStack(spacing: 0) {
-            ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
-                if index > 0 { CardRule() }
-                if index < 5 ? staticReady : liveReady {
+        return LoadedSwap(loaded: ready) {
+            VStack(spacing: 0) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+                    if index > 0 { CardRule() }
                     InfoRow(label: row.0, value: row.1)
-                } else {
+                }
+            }
+        } placeholder: {
+            VStack(spacing: 0) {
+                ForEach(0..<rows.count, id: \.self) { index in
+                    if index > 0 { CardRule() }
                     HStack {
                         SkeletonBar(width: 48, height: 12)
                         Spacer()
-                        SkeletonBar(width: index == 4 ? 120 : 92, height: 12)
+                        SkeletonBar(width: index == 4 ? 124 : 92, height: 12)
                     }
-                    // 和 `InfoRow` 同高（15pt 一行 + 上下各 9），换的时候不跳。
-                    .frame(height: 37)
+                    .frame(height: 18)
+                    .padding(.vertical, 9)
                 }
             }
         }
@@ -879,6 +868,12 @@ private struct HardwareGauge: View {
     let detail: String
     /// 首帧占位：右上角「8 核」和底下那行负载先不显示数字。
     var loading: Bool = false
+    /// 右上角补充说明的独立占位控制（默认与 `loading` 一致）。
+    var noteLoading: Bool? = nil
+
+    private var isNoteLoading: Bool {
+        noteLoading ?? loading
+    }
 
     var body: some View {
         VStack(spacing: 8) {
@@ -898,28 +893,30 @@ private struct HardwareGauge: View {
 
                 Spacer(minLength: 4)
 
-                if loading {
-                    SkeletonBar(width: 26, height: 9)
-                } else {
+                LoadedSwap(loaded: !isNoteLoading, alignment: .trailing) {
                     Text(note)
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
+                } placeholder: {
+                    SkeletonBar(width: 28, height: 9)
+                        .frame(height: 12, alignment: .trailing)
                 }
             }
 
             RingGauge(percent: percent, accent: accent, diameter: 88, lineWidth: 10,
                       loading: loading)
 
-            if loading {
-                SkeletonBar(width: 84, height: 9)
-            } else {
+            LoadedSwap(loaded: !loading, alignment: .center) {
                 Text(detail)
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.6)
+            } placeholder: {
+                SkeletonBar(width: 86, height: 9)
+                    .frame(height: 12, alignment: .center)
             }
         }
         .padding(10)

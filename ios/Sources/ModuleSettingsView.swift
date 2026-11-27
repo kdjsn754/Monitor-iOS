@@ -5,7 +5,7 @@ struct ModuleSettingsView: View {
     @State private var editMode: EditMode = .active
 
     private var visibleCount: Int {
-        model.moduleOrder.count - model.hiddenModules.count
+        model.visibleModules.count
     }
 
     var body: some View {

@@ -70,6 +70,13 @@ struct WifiSettingsView: View {
 
     /// 当前停在哪一页。顶栏点按和左右滑动共用这一个值。
     @State private var tab: WifiNetTab = .main
+    @State private var refreshing = false
+    /// 从子页面上提的破坏性操作确认（盖住顶栏，锁住横向滑动）。
+    @State private var pendingCloseBand: WifiBandInfo?
+    @State private var pendingDeleteGroup: WifiNetGroup?
+    @State private var busyBands: Set<String> = []
+    @State private var busySideKinds: Set<WifiNetGroup.Kind> = []
+    @State private var overlayError: String?
 
     private var info: NetworkInfo { model.network }
 
@@ -79,10 +86,6 @@ struct WifiSettingsView: View {
     }
 
     /// 正在广播的组，顶栏在对应那格右侧点一颗绿点。
-    ///
-    /// 主网络不靠 `mainGroup.isOn` 判：那一组还带着 `network.lan` 的状态，
-    /// 而「有没有在广播」看的是各频段的 `ssidOn && !radioOff`（`WifiBandInfo.up`）。
-    /// 访客 / IoT / 多链路才有独立的 `network.*` 段，用组的状态。
     private var liveTabs: Set<WifiNetTab> {
         var set: Set<WifiNetTab> = []
         if info.bands.contains(where: \.up) { set.insert(.main) }
@@ -97,7 +100,7 @@ struct WifiSettingsView: View {
             if info.bands.isEmpty {
                 ScrollView {
                     CardPanel("读不到无线配置", icon: "wifi.slash") {
-                        Text("这一拍没取到频段信息，下拉刷新一次。")
+                        Text("这一拍没取到频段信息，请点右上角刷新。")
                             .font(UI.row())
                             .foregroundStyle(.secondary)
                             .padding(.vertical, 6)
@@ -114,15 +117,34 @@ struct WifiSettingsView: View {
                         .padding(.bottom, 8)
 
                     TabView(selection: $tab) {
-                        WifiMainPage()
-                            .tag(WifiNetTab.main)
-                        WifiSidePage(kind: .guest)
-                            .tag(WifiNetTab.guest)
-                        WifiSidePage(kind: .iot)
-                            .tag(WifiNetTab.iot)
+                        WifiMainPage(
+                            busyBands: $busyBands,
+                            externalError: $overlayError,
+                            onConfirmClose: { pendingCloseBand = $0 }
+                        )
+                        .tag(WifiNetTab.main)
+                        WifiSidePage(
+                            kind: .guest,
+                            busy: sideBusyBinding(.guest),
+                            externalError: $overlayError,
+                            onConfirmDelete: { pendingDeleteGroup = $0 }
+                        )
+                        .tag(WifiNetTab.guest)
+                        WifiSidePage(
+                            kind: .iot,
+                            busy: sideBusyBinding(.iot),
+                            externalError: $overlayError,
+                            onConfirmDelete: { pendingDeleteGroup = $0 }
+                        )
+                        .tag(WifiNetTab.iot)
                         if info.mloSupported {
-                            WifiSidePage(kind: .mlo)
-                                .tag(WifiNetTab.mlo)
+                            WifiSidePage(
+                                kind: .mlo,
+                                busy: sideBusyBinding(.mlo),
+                                externalError: $overlayError,
+                                onConfirmDelete: { pendingDeleteGroup = $0 }
+                            )
+                            .tag(WifiNetTab.mlo)
                         }
                     }
                     .tabViewStyle(.page(indexDisplayMode: .never))
@@ -133,9 +155,110 @@ struct WifiSettingsView: View {
         .primaryButtons()
         .navigationTitle("无线")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                if refreshing {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Button {
+                        Task { await refresh() }
+                    } label: {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                    }
+                    .navBarTint()
+                    .accessibilityLabel("刷新无线配置")
+                }
+            }
+        }
         // MLO 那段消失时（换机器 / 重新采集）别把页面停在空页上。
         .onChange(of: info.mloSupported) { _, supported in
             if !supported && tab == .mlo { tab = .main }
+        }
+        .overlay {
+            if let band = pendingCloseBand {
+                SheetOverlay(onDismiss: { pendingCloseBand = nil }) {
+                    SheetOverlayCard {
+                        Text("关闭 \(wifiShortBand(band.band)) 的主 Wi-Fi")
+                            .font(.headline)
+                        Text("请确保至少还有一个频段的 Wi-Fi 开着。全部关掉后，手机和电脑会立刻断开这台路由器，只能插网线或按机身上的开关才能恢复。")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack(spacing: 10) {
+                            SheetOverlayButton(title: "取消") { pendingCloseBand = nil }
+                            SheetOverlayButton(title: "确认关闭", tint: .red) {
+                                pendingCloseBand = nil
+                                Task { await disableMainBand(band) }
+                            }
+                        }
+                    }
+                }
+            } else if let group = pendingDeleteGroup {
+                SheetOverlay(onDismiss: { pendingDeleteGroup = nil }) {
+                    SheetOverlayCard {
+                        Text("移除\(group.kind.title)")
+                            .font(.headline)
+                        Text("将停用并重置这组网络的配置，已连入的设备会断开连接。配置段会留着（不删除），下次「添加」还是用同一批模板段。")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(group.ssid.isEmpty ? "未命名" : group.ssid)
+                            .font(.subheadline.weight(.semibold))
+                        HStack(spacing: 10) {
+                            SheetOverlayButton(title: "取消") { pendingDeleteGroup = nil }
+                            SheetOverlayButton(title: "确认移除", tint: .red) {
+                                pendingDeleteGroup = nil
+                                Task { await removeSideGroup(group) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func sideBusyBinding(_ kind: WifiNetGroup.Kind) -> Binding<Bool> {
+        Binding(
+            get: { busySideKinds.contains(kind) },
+            set: { active in
+                if active { busySideKinds.insert(kind) } else { busySideKinds.remove(kind) }
+            }
+        )
+    }
+
+    private func refresh() async {
+        guard !refreshing else { return }
+        refreshing = true
+        await model.manualRefresh()
+        refreshing = false
+    }
+
+    private func disableMainBand(_ band: WifiBandInfo) async {
+        guard !busyBands.contains(band.id) else { return }
+        busyBands.insert(band.id)
+        overlayError = nil
+        let problem = await model.setBandEnabled(band, false)
+        busyBands.remove(band.id)
+        if let problem {
+            overlayError = problem
+            model.notice = Notice(kind: .fail, title: "没切换成功", detail: problem)
+        } else {
+            await model.manualRefresh()
+        }
+    }
+
+    private func removeSideGroup(_ group: WifiNetGroup) async {
+        guard !busySideKinds.contains(group.kind) else { return }
+        busySideKinds.insert(group.kind)
+        overlayError = nil
+        let problem = await model.deleteWifiGroup(group)
+        busySideKinds.remove(group.kind)
+        if let problem {
+            overlayError = problem
+            model.notice = Notice(kind: .fail, title: "没移除成功", detail: problem)
+        } else {
+            model.notice = Notice(kind: .ok, title: "\(group.kind.title)已移除", detail: group.ssid)
+            await model.manualRefresh()
         }
     }
 }
@@ -183,12 +306,12 @@ private struct WifiModeBar: View {
         }
         .padding(4)
         .background {
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .fill(Color(.secondarySystemGroupedBackground))
+            AdaptiveFill(shape: RoundedRectangle(cornerRadius: 13, style: .continuous),
+                         color: Color(.secondarySystemGroupedBackground))
         }
         .overlay {
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
+            AdaptiveBorder(shape: RoundedRectangle(cornerRadius: 13, style: .continuous),
+                           width: 0.5, strength: 0.45)
         }
     }
 }
@@ -321,7 +444,10 @@ struct WifiErrorNote: View {
 private struct WifiSaveButton: View {
     let title: String
     let busy: Bool
+    var disabled: Bool = false
     let action: () -> Void
+
+    private var unavailable: Bool { busy || disabled }
 
     var body: some View {
         Button(action: action) {
@@ -330,17 +456,17 @@ private struct WifiSaveButton: View {
                 Text(busy ? "保存中…" : title)
                     .font(.system(size: 15.5, weight: .semibold))
             }
-            .foregroundStyle(.white)
+            .foregroundStyle(disabled && !busy ? Color.secondary : Color.white)
             .frame(maxWidth: .infinity)
             .frame(height: 48)
             .background {
                 RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .fill(busy ? Color(.systemGray3) : NetPalette.wan)
+                    .fill(unavailable ? Color(.systemGray3) : WifiPalette.accent)
             }
             .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
         }
         .buttonStyle(.plain)
-        .disabled(busy)
+        .disabled(unavailable)
     }
 }
 
@@ -649,13 +775,14 @@ struct WifiBandSheet: View {
                 return
             }
         }
+        let finalKey = security.needsKey ? key.trimmingCharacters(in: .whitespacesAndNewlines) : ""
         busy = true
         errorText = nil
         // 认不出来的老加密（`owe` / `psk2+tkip+ccmp`）且用户没动过：不写 encryption，
         // 免得「只改了个名字」把固件原有的组合压成别的。
         let encryption: String? = (securityTouched || WifiSecurity.match(band.encryption) != nil)
             ? security.rawValue : nil
-        let problem = await model.saveBand(band, ssid: name, key: key,
+        let problem = await model.saveBand(band, ssid: name, key: finalKey,
                                            hidden: hidden, enabled: enabled,
                                            encryption: encryption,
                                            randomBSSID: randomBSSID)
@@ -928,13 +1055,13 @@ struct WifiGroupEditorSheet: View {
                     .minimumScaleFactor(0.8)
                 Spacer(minLength: 0)
             }
-            .foregroundStyle(selected ? NetPalette.wan : Color.secondary)
+            .foregroundStyle(selected ? WifiPalette.ink : Color.secondary)
             .padding(.horizontal, 9)
             .padding(.vertical, 9)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(selected ? NetPalette.wan.opacity(0.12) : Color(.tertiarySystemFill))
+                    .fill(selected ? WifiPalette.accent.opacity(0.12) : Color(.tertiarySystemFill))
             }
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
@@ -991,6 +1118,7 @@ struct WifiGroupEditorSheet: View {
                         ))
                         .labelsHidden()
                         .blueSwitch()
+                        .disabled(busy)
                     }
                     .padding(.vertical, UI.rowPadding)
                 }
@@ -1011,13 +1139,14 @@ struct WifiGroupEditorSheet: View {
                 HStack(spacing: 9) {
                     Image(systemName: "eye.slash")
                         .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.blue)
+                        .foregroundStyle(WifiPalette.ink)
                         .frame(width: 18, alignment: .leading)
                     Text("隐藏网络").font(UI.row())
                     Spacer(minLength: 8)
                     Toggle("", isOn: $hidden)
                         .labelsHidden()
                         .blueSwitch()
+                        .disabled(busy)
                 }
                 .padding(.vertical, UI.rowPadding)
 
@@ -1026,13 +1155,14 @@ struct WifiGroupEditorSheet: View {
                 HStack(spacing: 9) {
                     Image(systemName: "shuffle")
                         .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.blue)
+                        .foregroundStyle(WifiPalette.ink)
                         .frame(width: 18, alignment: .leading)
                     Text("随机 BSSID").font(UI.row())
                     Spacer(minLength: 8)
                     Toggle("", isOn: $randomBSSID)
                         .labelsHidden()
                         .blueSwitch()
+                        .disabled(busy)
                 }
                 .padding(.vertical, UI.rowPadding)
             }
@@ -1045,16 +1175,34 @@ struct WifiGroupEditorSheet: View {
             errorText = bandProblem
             return
         }
+        let name = ssid.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.count <= 32 else {
+            errorText = "Wi-Fi 名称要 1–32 个字符"
+            return
+        }
+        let secret = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        if security.needsKey {
+            guard secret.count >= 8, secret.count <= 63 else {
+                errorText = "密码要 8–63 个字符"
+                return
+            }
+            guard !secret.contains(where: { $0.isWhitespace || !$0.isASCII }) else {
+                errorText = "密码不能包含空格或中文字符"
+                return
+            }
+        }
         busy = true
         errorText = nil
         let encryption: String? = (securityTouched || group.security != nil) ? security.rawValue : nil
-        let problem = await model.saveWifiGroup(group, ssid: ssid, key: key, hidden: hidden,
+        let problem = await model.saveWifiGroup(group, ssid: name,
+                                                key: security.needsKey ? secret : "",
+                                                hidden: hidden,
                                                 encryption: encryption,
                                                 randomBSSID: randomBSSID,
                                                 bandOn: bandOn)
         busy = false
         guard let problem else {
-            model.notice = Notice(kind: .ok, title: "\(group.kind.title)已保存", detail: ssid)
+            model.notice = Notice(kind: .ok, title: "\(group.kind.title)已保存", detail: name)
             dismiss()
             await model.manualRefresh()
             return
@@ -1415,7 +1563,7 @@ struct WifiGroupCreateSheet: View {
                     formCard
                     if !available.isEmpty { bandsCard }
                     if let errorText { WifiErrorNote(text: errorText) { self.errorText = nil } }
-                    WifiSaveButton(title: "创建", busy: busy) {
+                    WifiSaveButton(title: "创建", busy: busy, disabled: tooFewBands) {
                         Task { await create() }
                     }
                     .padding(.top, 2)
@@ -1452,9 +1600,7 @@ struct WifiGroupCreateSheet: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(kind.title)
                     .font(UI.title(.semibold))
-                Text(kind == .mlo
-                     ? "把两个频段合成一条链路，Wi-Fi 7 设备连上会更快；其它设备照旧连主网络。"
-                     : "为它单独起一个名字和密码，主网络的密码不用告诉客人。")
+                Text(introDescription)
                     .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1462,6 +1608,17 @@ struct WifiGroupCreateSheet: View {
             Spacer(minLength: 0)
         }
         .cardSurface()
+    }
+
+    private var introDescription: String {
+        switch kind {
+        case .mlo:
+            return "把两个频段合成一条链路，Wi-Fi 7 设备连上会更快；其它设备照旧连主网络。"
+        case .iot:
+            return "给智能家居设备准备的独立 2.4 GHz 网络，与主网隔离。"
+        default:
+            return "为它单独起一个名字和密码，主网络的密码不用告诉客人。"
+        }
     }
 
     private var formCard: some View {
@@ -1564,16 +1721,32 @@ struct WifiGroupCreateSheet: View {
     private func create() async {
         guard !busy else { return }
         if tooFewBands {
-            errorText = "多链路 (MLO) 至少要选两个频段，才能把两条链路聚起来"
+            errorText = available.count < 2
+                ? "单频段设备不支持建立多链路 (MLO)"
+                : "多链路 (MLO) 至少要选两个频段，才能把两条链路聚起来"
+            return
+        }
+        let name = ssid.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.count <= 32 else {
+            errorText = "Wi-Fi 名称要 1–32 个字符"
+            return
+        }
+        let secret = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard secret.count >= 8, secret.count <= 63 else {
+            errorText = "密码要 8–63 个字符"
+            return
+        }
+        guard !secret.contains(where: { $0.isWhitespace || !$0.isASCII }) else {
+            errorText = "密码不能包含空格或中文字符"
             return
         }
         busy = true
         errorText = nil
-        let problem = await model.createWifiGroup(kind, ssid: ssid, key: key,
+        let problem = await model.createWifiGroup(kind, ssid: name, key: secret,
                                                  bands: selectedBands)
         busy = false
         guard let problem else {
-            model.notice = Notice(kind: .ok, title: "已创建", detail: ssid)
+            model.notice = Notice(kind: .ok, title: "已创建", detail: name)
             dismiss()
             await model.manualRefresh()
             return
