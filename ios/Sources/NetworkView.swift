@@ -868,21 +868,23 @@ struct NetworkView: View {
                         ? clientsSummary(online: online.count, offline: offline.count)
                         : "") {
             LoadedSwap(loaded: info.loaded) {
-                if info.clients.isEmpty {
-                    emptyLine
-                } else {
-                    ForEach(info.clients) { client in
-                        if client.id != info.clients.first?.id { divider }
-                        clientRowButton(client)
-                            // 概览点某一台时按这个 id 滚到它（v3.3.3）。
-                            .id(client.id)
-                    }
-                    if !offline.isEmpty {
-                        divider
-                        actionRow(clearingOffline ? "正在清除…" : "清除离线记录",
-                                  symbol: "trash",
-                                  busy: clearingOffline) {
-                            Task { await clearOffline() }
+                VStack(spacing: 0) {
+                    if info.clients.isEmpty {
+                        emptyLine
+                    } else {
+                        ForEach(info.clients) { client in
+                            if client.id != info.clients.first?.id { divider }
+                            clientRowButton(client)
+                                // 概览点某一台时按这个 id 滚到它（v3.3.3）。
+                                .id(client.id)
+                        }
+                        if !offline.isEmpty {
+                            divider
+                            actionRow(clearingOffline ? "正在清除…" : "清除离线记录",
+                                      symbol: "trash",
+                                      busy: clearingOffline) {
+                                Task { await clearOffline() }
+                            }
                         }
                     }
                 }

@@ -355,11 +355,15 @@ struct LoadedSwap<Content: View, Placeholder: View>: View {
     var body: some View {
         ZStack(alignment: alignment) {
             if loaded {
-                content()
-                    .transition(.opacity)
+                VStack(alignment: alignment.horizontal, spacing: 0) {
+                    content()
+                }
+                .transition(.opacity)
             } else {
-                placeholder()
-                    .transition(.opacity)
+                VStack(alignment: alignment.horizontal, spacing: 0) {
+                    placeholder()
+                }
+                .transition(.opacity)
             }
         }
         .animation(.easeOut(duration: 0.24), value: loaded)
