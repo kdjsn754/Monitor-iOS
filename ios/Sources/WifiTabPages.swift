@@ -940,7 +940,9 @@ struct WifiSidePage: View {
 
     private var info: NetworkInfo { model.network }
     private var group: WifiNetGroup? { info.wifiGroups.first { $0.kind == kind } }
-    private var hasNet: Bool { !(group?.members.isEmpty ?? true) }
+    /// 已经创建过（不是「固件预置了模板段」）。删除后要回到「＋ 添加」，
+    /// 所以不能只看 `members` 在不在。
+    private var hasNet: Bool { group?.isCreated == true }
     private var isOn: Bool { group?.isOn ?? false }
 
     private var tint: Color { kind == .iot ? WifiPalette.iot : WifiPalette.accent }
@@ -1223,9 +1225,21 @@ struct WifiSidePage: View {
                 WifiKvRow(label: "推荐加密方式", value: "WPA3")
             }
 
-            WifiPrimaryButton(text: addTitle, tint: WifiPalette.accent) { creating = true }
-                .padding(.top, 12)
-                .padding(.bottom, 2)
+            if kind == .mlo {
+                // `createWifiGroup` 只能就地启用 `network=guest|iot` 的模板段；
+                // 多链路的段是按 `mld0.iface` / `mld` 认的，这里还没有对应的创建通道。
+                // 摆一个点了必然报错的按钮，比不摆更糟。
+                Text("多链路需要先在路由器后台创建一次，App 里才能改它的名称和密码。")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 10)
+                    .padding(.horizontal, 2)
+            } else {
+                WifiPrimaryButton(text: addTitle, tint: WifiPalette.accent) { creating = true }
+                    .padding(.top, 12)
+                    .padding(.bottom, 2)
+            }
         }
     }
 

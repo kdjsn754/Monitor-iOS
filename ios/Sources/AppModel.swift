@@ -1916,6 +1916,9 @@ private struct NetVap {
             // 随机 BSSID 是**每个 wifi-iface 自己**的一项（官方「启用随机化的 BSSID」）。
             // 读不到时按开算：GL 出厂默认就是开的。
             item.randomBSSID = (wifi["wireless.\(vap.section).random_bssid"] ?? "1") != "0"
+            // 「已初始化」= `init=1` 或它本身在广播。官方用 `m["init"] == "1" || ssidOn`，
+            // 用来区分「固件预置的模板段」和「用户真的建过这个网络」。
+            item.initialized = (wifi["wireless.\(vap.section).init"] ?? "0") == "1" || item.ssidOn
             item.dfsEnabled = (wifi["wireless.\(vap.radio).dfs_enable"] ?? "0") == "1"
             let radioOff = (wifi["wireless.\(vap.radio).disabled"] ?? "0") == "1"
             item.radioOff = radioOff
@@ -2640,7 +2643,7 @@ private struct NetVap {
     func createWifiGroup(_ kind: WifiNetGroup.Kind, ssid: String, key: String) async -> String? {
         guard connected else { return "还没连上路由器" }
         let net = kind.networkName
-        guard !net.isEmpty else { return "这组网络不能用这个入口创建" }
+        guard !net.isEmpty else { return "多链路要在路由器后台创建，App 里只能改已建好的那一组" }
 
         let name = ssid.trimmingCharacters(in: .whitespacesAndNewlines)
         if name.isEmpty { return "Wi-Fi 名称不能为空" }

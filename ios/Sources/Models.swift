@@ -730,6 +730,12 @@ struct WifiBandInfo: Identifiable, Equatable {
     var hidden = false
     /// 成员是否用随机 BSSID（`random_bssid=1`）。官方默认开，关掉就是固定 MAC。
     var randomBSSID = true
+    /// 这一条 `wifi-iface` 是否「已初始化」（UCI `init=1`，或它本身在广播）。
+    ///
+    /// GL 固件在 `/etc/config/wireless` 里预置了访客 / IoT 的模板段，`disabled=1` 但段一直在。
+    /// 只看「段存在」会把从未创建的组当成已建，界面就少掉「添加」入口；
+    /// 删除（`disabled=1` + `init=0`）之后也会回不到未创建态。默认 `true` 兼容没有 `init` 的旧固件。
+    var initialized = true
     /// 所在 radio 是否被关掉（`wireless.<radio>.disabled=1`）。
     /// 和成员自己的 `disabled` 是两回事：整频段关了，这个频段上所有网络都没有。
     var radioOff = false
@@ -898,6 +904,17 @@ struct WifiNetGroup: Identifiable, Equatable {
     var id: String { kind.rawValue }
 
     var isOn: Bool { broadcasting && networkOn }
+
+    /// 这组网络是否已经「创建」过（决定页面显示控制行还是「＋ 添加」）。
+    ///
+    /// 和官方同一个口径：主网络看有没有成员；附加网络看 `isOn`、`network` 段是否启用、
+    /// 或有没有任何成员被标记为已初始化。删除不是 `uci delete`（模板段要留着），
+    /// 所以不能只看 `members.isEmpty`——那样删完还是「已建」。
+    var isCreated: Bool {
+        guard !members.isEmpty else { return false }
+        if kind == .main { return true }
+        return isOn || networkOn || members.contains { $0.initialized }
+    }
 
     /// 「2.4 GHz + 5 GHz」这种频段串。
     var bandSummary: String {
