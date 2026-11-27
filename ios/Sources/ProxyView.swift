@@ -93,7 +93,7 @@ struct ProxyView: View {
                         .controlSize(.small)
                         .frame(width: 38, height: 38)
                 } else {
-                    HeaderButton("arrow.clockwise") {
+                    HeaderButton("arrow.triangle.2.circlepath") {
                         Task { await refresh() }
                     }
                 }
@@ -101,7 +101,7 @@ struct ProxyView: View {
             // 不挂 .refreshable（v2.1.8）：导航栏整条被隐藏之后，系统下拉刷新控件
             // 没有导航栏可以依附，顶部 inset 只能由滚动视图自己估，于是下拉时内容
             // 被推下去约 60pt、松手再弹回，观感就是「页面跳一下」。这一页顶部本来
-            // 就有一颗刷新按钮（PageHeader 的 arrow.clockwise），下拉是重复入口。
+            // 就有一颗刷新按钮（PageHeader 的 arrow.triangle.2.circlepath），下拉是重复入口。
             // 刷新只在右上角按钮里做。
             // 订阅条数要显示在配置卡的副标题里，进页面就先读一次；
             // 刚连上时状态还没到、上面这一次会直接返回，所以再挂一个 onChange 补读。

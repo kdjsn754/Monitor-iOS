@@ -61,6 +61,25 @@ enum TabGlyphImage {
                 // （深色模式下叠白色会穿帮）。
                 cg.setFillColor(UIColor.black.cgColor)
                 cg.fillPath(using: .evenOdd)
+
+                // 实心态必须沿同一条路径再描一遍 1.7（v3.3.6）：
+                // 空心是「描边」，笔画有一半涨在轮廓外面（0.85）；实心只填不描，
+                // 外形就比空心小一圈。四枚图标在 24pt 画布里差 7~8%
+                // （实心跨度 20.8~21.0，空心 22.5~22.7），切换标签时看着
+                // 就是「选中之后图标变小了」（用户 2026-11-23 反馈）。
+                //
+                // **这笔描边必须排在擦除之前（v3.4.4）**。以前它排在擦除之后，
+                // 于是球边缘 0.85 的宽度被重新涂黑，正好盖住经纬线伸到边缘的那一段：
+                // 网络图标选中后四个方向的白色端点全被削平，看着像「内部白色的四角
+                // 不完整」（用户 2026-11-27 截图指出）。挪到前面之后白线能一直通到
+                // 球边，四个断口补齐，粗细和位置都不用动。
+                cg.addPath(glyph.outline.cgPath)
+                cg.setStrokeColor(UIColor.black.cgColor)
+                cg.setLineWidth(1.7)
+                cg.setLineCap(.round)
+                cg.setLineJoin(.round)
+                cg.strokePath()
+
                 if let cut = glyph.cut {
                     // 对勾不走 even-odd：它的带状轮廓在拐角处会自交，
                     // even-odd 把重叠区少数一次，就在钩尖下漏出那一小块
@@ -75,19 +94,6 @@ enum TabGlyphImage {
                     cg.strokePath()
                     cg.setBlendMode(.normal)
                 }
-                // 实心态必须沿同一条路径再描一遍 1.7（v3.3.6）：
-                // 空心是「描边」，笔画有一半涨在轮廓外面（0.85）；实心只填不描，
-                // 外形就比空心小一圈。四枚图标在 24pt 画布里差 7~8%
-                // （实心跨度 20.8~21.0，空心 22.5~22.7），切换标签时看着
-                // 就是「选中之后图标变小了」（用户 2026-11-23 反馈）。
-                // 描边排在挖空之后：球的两条圈会伸到外沿附近，后描能把被啃掉的
-                // 球边缘补回来，圈看起来像从边缘下面穿过去。
-                cg.addPath(glyph.outline.cgPath)
-                cg.setStrokeColor(UIColor.black.cgColor)
-                cg.setLineWidth(1.7)
-                cg.setLineCap(.round)
-                cg.setLineJoin(.round)
-                cg.strokePath()
             } else {
                 cg.setStrokeColor(UIColor.black.cgColor)
                 cg.setLineWidth(1.7)

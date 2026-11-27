@@ -83,7 +83,7 @@ struct NetworkView: View {
                             .controlSize(.small)
                             .frame(width: 38, height: 38)
                     } else {
-                        HeaderButton("arrow.clockwise") {
+                        HeaderButton("arrow.triangle.2.circlepath") {
                             Task { await refresh() }
                         }
                     }
