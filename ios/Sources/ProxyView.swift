@@ -320,7 +320,7 @@ struct ProxyView: View {
                 trafficRow
                     .padding(.bottom, 13)
 
-                Divider()
+                CardRule()
 
                 statsGrid
                     .padding(.top, 12)
@@ -338,34 +338,47 @@ struct ProxyView: View {
         HStack(spacing: 0) {
             rateColumn("下载", value: formatSpeed(metrics.download),
                        total: formatBytes(Double(metrics.downloadTotal)),
-                       icon: "arrow.down.circle.fill", color: .blue)
+                       icon: "arrow.down.circle.fill", color: .blue,
+                       loading: !model.ocMetricsLoaded)
 
             Divider()
 
             rateColumn("上传", value: formatSpeed(metrics.upload),
                        total: formatBytes(Double(metrics.uploadTotal)),
-                       icon: "arrow.up.circle.fill", color: .purple)
+                       icon: "arrow.up.circle.fill", color: .purple,
+                       loading: !model.ocMetricsLoaded)
                 .padding(.leading, 14)
         }
     }
 
     private func rateColumn(_ label: String, value: String, total: String,
-                            icon: String, color: Color) -> some View {
+                            icon: String, color: Color,
+                            loading: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Label(label, systemImage: icon)
                 .font(.system(size: 12))
                 .foregroundStyle(color)
-            Text(value)
-                .font(.system(size: 22, weight: .semibold))
-                .monospacedDigit()
-                .foregroundStyle(color)
-                .lineLimit(1)
-                .minimumScaleFactor(0.6)
-            Text("累计 \(total)")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
+            if loading {
+                // 首帧不写「0 B/s」：内核还没问到，写 0 是假结论，数据一到会跳一下。
+                SkeletonBar(width: 86, height: 20, radius: 7)
+                    .frame(height: 27, alignment: .leading)
+            } else {
+                Text(value)
+                    .font(.system(size: 22, weight: .semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(color)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+            }
+            if loading {
+                SkeletonBar(width: 68, height: 10)
+            } else {
+                Text("累计 \(total)")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -373,13 +386,16 @@ struct ProxyView: View {
     /// 下半：2×2 指标表。格子没有底色，只靠一横一竖两条细线分格，
     /// 高度和重量都比上面的速率低一档——它本来就是「顺带看一眼」的信息。
     private var statsGrid: some View {
-        VStack(spacing: 0) {
+        let loading = !model.ocMetricsLoaded
+        return VStack(spacing: 0) {
             HStack(spacing: 0) {
                 statCell("连接数", "\(metrics.connections)",
-                         icon: "point.3.connected.trianglepath.dotted", color: .teal)
+                         icon: "point.3.connected.trianglepath.dotted", color: .teal,
+                         loading: loading)
                 Divider()
                 statCell("内存", formatBytes(Double(metrics.memory)),
-                         icon: "memorychip", color: .indigo)
+                         icon: "memorychip", color: .indigo,
+                         loading: loading)
                     .padding(.leading, 14)
             }
             .padding(.vertical, 8)
@@ -389,10 +405,12 @@ struct ProxyView: View {
             HStack(spacing: 0) {
                 // CPU 和概览页的 CPU 圆环用同一个主色蓝，不再用橙——橙色留给温度和告警。
                 statCell("CPU", String(format: "%.1f%%", metrics.cpu),
-                         icon: "cpu", color: .blue)
+                         icon: "cpu", color: .blue,
+                         loading: loading)
                 Divider()
                 statCell("负载", String(format: "%.1f%%", metrics.load),
-                         icon: "speedometer", color: .purple)
+                         icon: "speedometer", color: .purple,
+                         loading: loading)
                     .padding(.leading, 14)
             }
             .padding(.vertical, 8)
@@ -401,7 +419,8 @@ struct ProxyView: View {
 
     /// 一格指标：小图标 + 「名称 / 数值」两行，没有底也没有边。
     private func statCell(_ label: String, _ value: String,
-                          icon: String, color: Color) -> some View {
+                          icon: String, color: Color,
+                          loading: Bool = false) -> some View {
         HStack(spacing: 9) {
             Image(systemName: icon)
                 .font(.system(size: 12, weight: .medium))
@@ -412,11 +431,16 @@ struct ProxyView: View {
                 Text(label)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
-                Text(value)
-                    .font(.system(size: 15, weight: .semibold))
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
+                if loading {
+                    SkeletonBar(width: 44, height: 13)
+                        .frame(height: 18, alignment: .leading)
+                } else {
+                    Text(value)
+                        .font(.system(size: 15, weight: .semibold))
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                }
             }
 
             Spacer(minLength: 0)

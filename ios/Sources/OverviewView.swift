@@ -96,8 +96,15 @@ struct OverviewView: View {
             // 比右边两行文字矮一截，看着像「贴上去的小图标」。36 才和两行文字等高。
             RouterGlyph(size: 36)
             VStack(alignment: .leading, spacing: 3) {
-                Text(model.routerInfo.model.isEmpty ? "OpenWrt" : model.routerInfo.model)
-                    .font(.system(size: 17, weight: .semibold))
+                // 型号要到第一轮 `refreshInfo` 才回来。以前拿 "OpenWrt" 顶这一段，
+                // 数据一到变成本机型号，标题行会「换一次字」；现在先画一根等高的占位条。
+                if model.infoLoaded {
+                    Text(model.routerInfo.model.isEmpty ? "OpenWrt" : model.routerInfo.model)
+                        .font(UI.title())
+                } else {
+                    SkeletonBar(width: 108, height: 15)
+                        .frame(height: 21, alignment: .leading)
+                }
                 HStack(spacing: 5) {
                     Circle().fill(model.connected ? .green : .orange)
                         .frame(width: 7, height: 7)
@@ -147,41 +154,61 @@ struct OverviewView: View {
         VStack(spacing: 10) {
             HStack {
                 speedValue("下载", value: formatSpeed(model.stats.download),
-                           color: .blue, icon: "arrow.down.circle.fill")
+                           color: .blue, icon: "arrow.down.circle.fill",
+                           loading: !model.statsLoaded)
                 Rectangle()
                     .fill(Color(.separator).opacity(0.45))
                     .frame(width: 0.5, height: 34)
                 speedValue("上传", value: formatSpeed(model.stats.upload),
-                           color: .purple, icon: "arrow.up.circle.fill")
+                           color: .purple, icon: "arrow.up.circle.fill",
+                           loading: !model.statsLoaded)
             }
             SpeedSparkline(points: model.history)
             HStack {
-                Text("本次会话 ↓ \(formatBytes(model.stats.sessionDownload))")
-                Spacer()
-                Text("↑ \(formatBytes(model.stats.sessionUpload))")
+                if model.statsLoaded {
+                    Text("本次会话 ↓ \(formatBytes(model.stats.sessionDownload))")
+                    Spacer()
+                    Text("↑ \(formatBytes(model.stats.sessionUpload))")
+                } else {
+                    SkeletonBar(width: 96, height: 10)
+                    Spacer()
+                    SkeletonBar(width: 64, height: 10)
+                }
             }
             .font(.system(size: 11))
             .foregroundStyle(.secondary)
         }
     }
 
-    private func speedValue(_ label: String, value: String, color: Color, icon: String) -> some View {
+    /// 一格速率。`loading` 时数值位置画一根同高的占位条——
+    /// 首帧不写「0 B/s」：那是假的，数据一到会整个跳一下。
+    private func speedValue(_ label: String, value: String,
+                            color: Color, icon: String,
+                            loading: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Label(label, systemImage: icon)
                 .font(UI.tileTitle())
                 .foregroundStyle(color)
-            Text(value)
-                .font(.system(size: UI.heroSize, weight: .semibold).monospacedDigit())
-                .foregroundStyle(color)
-                .lineLimit(1)
-                .minimumScaleFactor(0.65)
+            if loading {
+                SkeletonBar(width: 88, height: 20, radius: 7)
+                    // 22pt 半粗数字的行高约 27，占位条撑住这一格，卡片不会先矮后高。
+                    .frame(height: 27, alignment: .leading)
+            } else {
+                Text(value)
+                    .font(.system(size: UI.heroSize, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(color)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.65)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var flashContent: some View {
         let info = model.flashInfo
-        return Group {
+        // 首帧不写「正在读取闪存信息…」：那句话本身占 30pt，数据一到换成 118pt 的
+        // 圆环 + 三行，整张卡「长高」，下面所有卡一起往下跳。改成同高的占位。
+        return LoadedSwap(loaded: model.flashLoaded) {
             if info.hasData {
                 VStack(alignment: .leading, spacing: 12) {
                     // 和 CPU / 内存同一套圆环：中间是已用百分比，
@@ -202,7 +229,7 @@ struct OverviewView: View {
                                      color: flashTone(info.usedFraction))
                             flashRow("剩余", bytes: info.available,
                                      color: flashTrackDot)
-                            Divider().opacity(0.5)
+                            CardRule()
                             HStack(spacing: 6) {
                                 Text("总容量")
                                     .font(.system(size: 11))
@@ -229,13 +256,45 @@ struct OverviewView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                Text("正在读取闪存信息…")
+                // 问过一次但真的读不到（少见）：给一句确定的结论，别一直转。
+                Text("读不到闪存容量")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 6)
+                    .frame(maxWidth: .infinity, minHeight: 98, alignment: .leading)
             }
+        } placeholder: {
+            flashSkeleton
+        }
+    }
+
+    /// 闪存卡的占位：左边一个空环、右边三行灰条，和真实内容的骨架一致。
+    private var flashSkeleton: some View {
+        HStack(alignment: .center, spacing: 16) {
+            Circle()
+                .stroke(Color.primary.opacity(0.07), lineWidth: 11)
+                .frame(width: 98, height: 98)
+
+            VStack(spacing: 11) {
+                skeletonLine(width: 64)
+                skeletonLine(width: 88)
+                Divider().opacity(0.35)
+                skeletonLine(width: 54)
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: 98, alignment: .leading)
+    }
+
+    /// 一行「左标签 + 右数值」的占位。
+    private func skeletonLine(width: CGFloat) -> some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(Color.primary.opacity(0.06))
+                .frame(width: 8, height: 8)
+            SkeletonBar(width: 34, height: 11)
+            Spacer(minLength: 6)
+            SkeletonBar(width: width, height: 13)
         }
     }
 
@@ -309,7 +368,8 @@ struct OverviewView: View {
                         model.stats.load,
                         model.stats.load5,
                         model.stats.load15
-                    )
+                    ),
+                    loading: !model.statsLoaded
                 )
                 HardwareGauge(
                     title: "内存",
@@ -317,7 +377,8 @@ struct OverviewView: View {
                     accent: .indigo,
                     percent: model.memoryFraction * 100,
                     note: "可用 \(formatBytes(Double(max(0, model.stats.memoryTotal - model.stats.memoryUsed))))",
-                    detail: "\(formatBytes(Double(model.stats.memoryUsed))) / \(formatBytes(Double(model.stats.memoryTotal)))"
+                    detail: "\(formatBytes(Double(model.stats.memoryUsed))) / \(formatBytes(Double(model.stats.memoryTotal)))",
+                    loading: !model.statsLoaded
                 )
             }
 
@@ -328,7 +389,8 @@ struct OverviewView: View {
                     value: model.stats.temperature.map { String(format: "%.1f", $0) } ?? "无传感器",
                     unit: model.stats.temperature == nil ? nil : "°C",
                     color: temperatureTone,
-                    badge: temperatureBadge
+                    badge: temperatureBadge,
+                    loading: !model.sensorsLoaded
                 )
                 // 风扇这张可以点开控制面板（gl-fanctrl）。图标静态，不再跟着转速旋转：
                 // 一块指甲盖大的图标每秒转半圈，除了抢滚动帧、让眼睛一直瞟到它，
@@ -343,7 +405,8 @@ struct OverviewView: View {
                         unit: model.stats.fanRPM == nil ? nil : "RPM",
                         color: fanTone,
                         badge: fanBadge,
-                        showsChevron: true
+                        showsChevron: true,
+                        loading: !model.sensorsLoaded
                     )
                 }
                 .buttonStyle(.plain)
@@ -409,7 +472,8 @@ struct OverviewView: View {
     private func hardwareTile(icon: String, title: String, value: String,
                               unit: String? = nil,
                               color: Color, badge: String? = nil,
-                              showsChevron: Bool = false) -> some View {
+                              showsChevron: Bool = false,
+                              loading: Bool = false) -> some View {
         HStack(spacing: 10) {
             ZStack {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -439,16 +503,23 @@ struct OverviewView: View {
                             .foregroundStyle(color)
                     }
                 }
-                HStack(alignment: .firstTextBaseline, spacing: 3) {
-                    Text(value)
-                        .font(.system(size: 15, weight: .semibold))
-                        .monospacedDigit()
-                        .lineLimit(1)
-                    if let unit {
-                        Text(unit)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.secondary)
+                // 首帧不写「无传感器」：那会被读成「这台机器没有这个传感器」，
+                // 而真实情况只是「还没问到」。占位条读到之后才换成结论。
+                if loading {
+                    SkeletonBar(width: 52, height: 13)
+                        .frame(height: 18, alignment: .leading)
+                } else {
+                    HStack(alignment: .firstTextBaseline, spacing: 3) {
+                        Text(value)
+                            .font(.system(size: 15, weight: .semibold))
+                            .monospacedDigit()
                             .lineLimit(1)
+                        if let unit {
+                            Text(unit)
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
                     }
                 }
             }
@@ -497,74 +568,127 @@ struct OverviewView: View {
         let offline = clients.count - online.count
         let preview = Array(online.prefix(3))
 
-        return VStack(spacing: 0) {
-            Button { openClients() } label: {
-                HStack(alignment: .center, spacing: 6) {
-                    HStack(alignment: .firstTextBaseline, spacing: 4) {
-                        Text("\(online.count)")
-                            .font(.system(size: 22, weight: .semibold, design: .rounded))
-                            .monospacedDigit()
-                            .foregroundStyle(.primary)
-                        Text("台在线")
-                            .font(.system(size: 13))
-                            .foregroundStyle(.secondary)
-                    }
-
-                    if offline > 0 {
-                        Text("\(offline) 台离线")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background { Capsule().fill(Color(.systemGray5)) }
-                    }
-
-                    Spacer(minLength: 8)
-                    accessPills(online)
-                }
-                .padding(.bottom, 10)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            if clients.isEmpty {
-                Divider()
-                Text("—")
-                    .font(.system(size: 15))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 10)
-            } else {
-                if !preview.isEmpty {
-                    Divider()
-                    ForEach(preview) { client in
-                        if client.id != preview.first?.id { Divider().opacity(0.6) }
-                        Button { openClients(client.id) } label: { deviceRow(client) }
-                            .buttonStyle(.plain)
-                    }
-                }
-
-                Divider()
+        // 首帧不写「0 台在线 / —」：设备名单要从 `gl-clients` 拿，
+        // 冷启动那一两秒报 0 台，数据一到整段三行设备「长出来」，下面的卡跟着往下跳。
+        return LoadedSwap(loaded: model.network.loaded) {
+            VStack(spacing: 0) {
                 Button { openClients() } label: {
-                    HStack(spacing: 5) {
-                        Text("查看全部")
-                            .font(.system(size: 13, weight: .medium))
-                        Spacer(minLength: 6)
-                        Text("\(clients.count) 台")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 10, weight: .semibold))
+                    HStack(alignment: .center, spacing: 6) {
+                        HStack(alignment: .firstTextBaseline, spacing: 4) {
+                            Text("\(online.count)")
+                                .font(.system(size: 22, weight: .semibold, design: .rounded))
+                                .monospacedDigit()
+                                .foregroundStyle(.primary)
+                            Text("台在线")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
+                        }
+
+                        if offline > 0 {
+                            Text("\(offline) 台离线")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background { Capsule().fill(Color(.systemGray5)) }
+                        }
+
+                        Spacer(minLength: 8)
+                        accessPills(online)
                     }
-                    .foregroundStyle(Color(.systemBlue))
-                    .padding(.vertical, 10)
+                    .padding(.bottom, 10)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+
+                if clients.isEmpty {
+                    CardRule()
+                    Text("—")
+                        .font(.system(size: 15))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 10)
+                } else {
+                    if !preview.isEmpty {
+                        CardRule()
+                        ForEach(preview) { client in
+                            if client.id != preview.first?.id { CardRule() }
+                            Button { openClients(client.id) } label: { deviceRow(client) }
+                                .buttonStyle(.plain)
+                        }
+                    }
+
+                    CardRule()
+                    Button { openClients() } label: {
+                        HStack(spacing: 5) {
+                            Text("查看全部")
+                                .font(.system(size: 13, weight: .medium))
+                            Spacer(minLength: 6)
+                            Text("\(clients.count) 台")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .foregroundStyle(Color(.systemBlue))
+                        .padding(.vertical, 10)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
             }
+        } placeholder: {
+            devicesSkeleton
         }
     }
+
+    /// 设备卡的占位：顶行结论 + 三行设备 + 底部入口，和真实内容同一副骨架。
+    ///
+    /// 三行是按「预览最多三台」定的；真实台数少于三台时卡片会短一点，
+    /// 那是数据本身的样子，不是首帧跳变。
+    private var devicesSkeleton: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                SkeletonBar(width: 26, height: 20, radius: 6)
+                SkeletonBar(width: 46, height: 12)
+                Spacer(minLength: 8)
+                SkeletonBar(width: 92, height: 16, radius: 8)
+            }
+            .padding(.bottom, 10)
+
+            CardRule()
+
+            ForEach(0..<3, id: \.self) { index in
+                if index > 0 { CardRule() }
+                HStack(spacing: 10) {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(Color.primary.opacity(0.07))
+                        .frame(width: 30, height: 30)
+                    VStack(alignment: .leading, spacing: 6) {
+                        SkeletonBar(width: 88, height: 13)
+                        SkeletonBar(width: 132, height: 10)
+                    }
+                    Spacer(minLength: 8)
+                    VStack(alignment: .trailing, spacing: 6) {
+                        SkeletonBar(width: 46, height: 11)
+                        SkeletonBar(width: 34, height: 9)
+                    }
+                }
+                .padding(.vertical, 9)
+            }
+
+            CardRule()
+
+            HStack(spacing: 5) {
+                SkeletonBar(width: 52, height: 12)
+                Spacer(minLength: 6)
+                SkeletonBar(width: 38, height: 11)
+            }
+            .padding(.vertical, 10)
+        }
+    }
+
 
     /// 顶部右侧的两枚彩点胶囊：无线几台、有线几台。
     /// 只报「有人的那一路」，都为空就不占位。
@@ -620,20 +744,36 @@ struct OverviewView: View {
     }
 
     private var systemContent: some View {
-        VStack(spacing: 0) {
-            InfoRow(label: "主机名", value: model.routerInfo.hostname.isEmpty ? "--" : model.routerInfo.hostname)
-            Divider()
-            InfoRow(label: "型号", value: model.routerInfo.model.isEmpty ? "--" : model.routerInfo.model)
-            Divider()
-            InfoRow(label: "架构", value: model.routerInfo.architecture.isEmpty ? "--" : model.routerInfo.architecture)
-            Divider()
-            InfoRow(label: "固件", value: model.routerInfo.firmware.isEmpty ? "--" : model.routerInfo.firmware)
-            Divider()
-            InfoRow(label: "内核", value: model.routerInfo.kernel.isEmpty ? "--" : model.routerInfo.kernel)
-            Divider()
-            InfoRow(label: "运行时间", value: formatUptime(model.stats.uptime))
-            Divider()
-            InfoRow(label: "负载", value: String(format: "%.2f", model.stats.load))
+        // 七行信息的行数固定，首帧只是值不对：以前先写七行 "--"，数据一到整列变字。
+        // 现在没到之前画灰条——高度不变，只换「有没有内容」。
+        // 前五行来自 `refreshInfo`（静态），后两行来自每轮的 `core`。
+        let rows: [(String, String)] = [
+            ("主机名", model.routerInfo.hostname.isEmpty ? "--" : model.routerInfo.hostname),
+            ("型号", model.routerInfo.model.isEmpty ? "--" : model.routerInfo.model),
+            ("架构", model.routerInfo.architecture.isEmpty ? "--" : model.routerInfo.architecture),
+            ("固件", model.routerInfo.firmware.isEmpty ? "--" : model.routerInfo.firmware),
+            ("内核", model.routerInfo.kernel.isEmpty ? "--" : model.routerInfo.kernel),
+            ("运行时间", formatUptime(model.stats.uptime)),
+            ("负载", String(format: "%.2f", model.stats.load))
+        ]
+        let staticReady = model.infoLoaded
+        let liveReady = model.statsLoaded
+
+        return VStack(spacing: 0) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+                if index > 0 { CardRule() }
+                if index < 5 ? staticReady : liveReady {
+                    InfoRow(label: row.0, value: row.1)
+                } else {
+                    HStack {
+                        SkeletonBar(width: 48, height: 12)
+                        Spacer()
+                        SkeletonBar(width: index == 4 ? 120 : 92, height: 12)
+                    }
+                    // 和 `InfoRow` 同高（15pt 一行 + 上下各 9），换的时候不跳。
+                    .frame(height: 37)
+                }
+            }
         }
     }
 }
@@ -646,11 +786,11 @@ struct InfoRow: View {
     var body: some View {
         HStack {
             Text(label)
-                .font(.system(size: 15))
+                .font(UI.row())
                 .foregroundStyle(.secondary)
             Spacer()
             Text(value)
-                .font(.system(size: 15))
+                .font(UI.row())
                 .foregroundStyle(color)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
@@ -737,6 +877,8 @@ private struct HardwareGauge: View {
     let percent: Double
     let note: String
     let detail: String
+    /// 首帧占位：右上角「8 核」和底下那行负载先不显示数字。
+    var loading: Bool = false
 
     var body: some View {
         VStack(spacing: 8) {
@@ -756,20 +898,29 @@ private struct HardwareGauge: View {
 
                 Spacer(minLength: 4)
 
-                Text(note)
+                if loading {
+                    SkeletonBar(width: 26, height: 9)
+                } else {
+                    Text(note)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                }
+            }
+
+            RingGauge(percent: percent, accent: accent, diameter: 88, lineWidth: 10,
+                      loading: loading)
+
+            if loading {
+                SkeletonBar(width: 84, height: 9)
+            } else {
+                Text(detail)
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.7)
+                    .minimumScaleFactor(0.6)
             }
-
-            RingGauge(percent: percent, accent: accent, diameter: 88, lineWidth: 10)
-
-            Text(detail)
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.6)
         }
         .padding(10)
         .frame(maxWidth: .infinity)
@@ -786,6 +937,9 @@ private struct RingGauge: View {
     /// 轨道色。不传就跟着主色走（同一支色的淡版）。
     /// 闪存那一环传中性灰——它的轨道就是「剩余」那一段，得和图例的灰点对上。
     var track: Color? = nil
+    /// 首帧占位：只画轨道，中间写「--」。弧线不画——画成 0% 是在说
+    /// 「占用率就是 0」，而真实情况是「还没采到」。
+    var loading: Bool = false
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -808,18 +962,21 @@ private struct RingGauge: View {
                 .stroke(track ?? accent.opacity(colorScheme == .dark ? 0.34 : 0.13),
                         lineWidth: lineWidth)
 
-            Circle()
-                .trim(from: 0, to: value / 100)
-                .stroke(
-                    accent,
-                    style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
-                )
-                .rotationEffect(.degrees(-90))
+            if !loading {
+                Circle()
+                    .trim(from: 0, to: value / 100)
+                    .stroke(
+                        accent,
+                        style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+                    )
+                    .rotationEffect(.degrees(-90))
+            }
 
             VStack(spacing: 1) {
-                Text(String(format: "%.0f%%", value))
+                Text(loading ? "--" : String(format: "%.0f%%", value))
                     .font(.system(size: diameter * 0.24, weight: .semibold, design: .rounded))
                     .monospacedDigit()
+                    .foregroundStyle(loading ? Color.secondary : Color.primary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.75)
                 Text(caption)

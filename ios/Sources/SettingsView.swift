@@ -165,7 +165,7 @@ struct SettingsView: View {
                 Spacer(minLength: 0)
             }
 
-            Divider().opacity(0.5)
+            CardRule()
 
             HStack(spacing: 9) {
                 actionTile("切换连接", icon: "arrow.left.arrow.right",
@@ -329,7 +329,7 @@ struct SettingsView: View {
                     }
                 }
 
-                Divider().opacity(0.5)
+                CardRule()
 
                 NavigationLink {
                     ModuleSettingsView()
@@ -377,10 +377,10 @@ struct SettingsView: View {
         SectionCard("关于", icon: "info.circle") {
             VStack(spacing: 10) {
                 infoRow("版本", appVersion)
-                Divider().opacity(0.5)
+                CardRule()
                 infoRow("连接方式", "SSH 直连")
                 if let note = compatWindowNote {
-                    Divider().opacity(0.5)
+                    CardRule()
                     VStack(alignment: .leading, spacing: 4) {
                         infoRow("显示适配", "未铺满", color: .orange)
                         Text(note)

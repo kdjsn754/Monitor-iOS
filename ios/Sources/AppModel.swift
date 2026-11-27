@@ -39,6 +39,20 @@ final class AppModel {
     var flashInfo = FlashInfo()
     var routerInfo = RouterInfo()
     var devices: [DeviceInfo] = []
+
+    /// 概览页各块「采到过一次」的标记（v3.4.10）。
+    ///
+    /// 界面靠它区分「还没到」和「到了、值就是 0」：前者画占位条，后者照实显示。
+    /// 以前两种情况共用默认值，于是冷启动那 0.3–2 秒先画一版「CPU 0% · 0 台在线 ·
+    /// 温度无传感器」，数据一到整页一起跳——用户说的「有些数据会等一会突然闪出来」。
+    ///
+    /// 只有**真的读到内容**才算有：这一拍命令没跑通（段是空的）时保持 false，
+    /// 让占位继续盖着，比先画一版假 0 再纠正要诚实。
+    private(set) var statsLoaded = false
+    private(set) var sensorsLoaded = false
+    private(set) var flashLoaded = false
+    /// 静态信息（型号 / 固件 / 主机名 / 核数）问过没有。
+    private(set) var infoLoaded = false
     /// 网络页的数据（v2.6.5）。只读，采集项是 `PollItem.network`，
     /// 切到别的页就停——它跟 `stats` 一样是「这一页要看的东西」。
     var network = NetworkInfo()
@@ -522,17 +536,15 @@ final class AppModel {
         lastReconnectAttempt = nil
         status = "已连接"
         resetSamplingBaselines()
-        stats = OverviewStats()
-        routerInfo = RouterInfo()
-        devices = []
-        flashInfo = FlashInfo()
+        // 换了一台路由器：上一台的 CPU / 闪存 / 网络 / 设备一律不能留，
+        // 连「已经采到过」的标记一起复位，新页面才会先画占位再淡入。
+        resetCollectedData()
         openClash = OpenClashInfo()
         ocStateLoaded = false
         ocStateLoading = false
         ocMetrics = OpenClashMetrics()
         ocMetricsLoaded = false
         ocPanelReachable = false
-        history = []
         await bootstrapRefresh()
         startPolling()
         // 连上时如果正停在网络代理页，同样要补一次访问检测。
@@ -750,6 +762,7 @@ final class AppModel {
         ocStateLoading = false
         ocMetricsLoaded = false
         ocPanelReachable = false
+        resetCollectedData()
         if !keepPassword, let profile = currentProfile {
             KeychainStore.deletePassword(account: KeychainStore.passwordAccount(for: profile))
         }
@@ -771,6 +784,25 @@ final class AppModel {
         lastOcUploadTotal = nil
         lastOcDownloadTotal = nil
         lastOcTotalDate = nil
+    }
+
+    /// 把「从路由器采回来的东西」全部清空（v3.4.10）。
+    ///
+    /// 以前只有 `logout()` 清了一部分，`disconnect()` / 换连另一台时 `network`、
+    /// `flashInfo` 根本没清——网络页会先拿上一台路由器的 IP、SSID、设备名单糊一遍，
+    /// 等第一轮采集回来才换掉，看着就是「数字全错了一下又变了」。
+    /// `*Loaded` 一起复位，否则新会话的首帧会误以为数据已经有了，占位不出现。
+    private func resetCollectedData() {
+        stats = OverviewStats()
+        flashInfo = FlashInfo()
+        routerInfo = RouterInfo()
+        devices = []
+        network = NetworkInfo()
+        history = []
+        statsLoaded = false
+        sensorsLoaded = false
+        flashLoaded = false
+        infoLoaded = false
     }
 
     /// 有系统浮层（相册选择器 / 裁切页）盖在屏幕上时为真。
@@ -953,10 +985,7 @@ final class AppModel {
         // 连接都清空了，设备名也没了归属，一并抹掉。
         profileHostnames = [:]
         UserDefaults.standard.removeObject(forKey: Self.profileHostnamesKey)
-        stats = OverviewStats()
-        routerInfo = RouterInfo()
-        devices = []
-        history = []
+        resetCollectedData()
     }
 
     // MARK: - SSH
@@ -1175,13 +1204,26 @@ final class AppModel {
     }
 
     private func apply(_ sections: [String: String], items: [PollItem]) {
-        if items.contains(.core) { applyCore(sections) }
+        if items.contains(.core) {
+            applyCore(sections)
+            // 只有真读到 `STAT` 才算「这一块有了」。空段说明这一拍命令没跑通，
+            // 保持 false 让占位继续盖着，别先画一版 0% 再纠正。
+            if !firstLine(sections["STAT"] ?? "").isEmpty { statsLoaded = true }
+        }
         if items.contains(.sensors) {
             updateSensors(temp: sections["TEMP"] ?? "",
                           fan: sections["FAN"] ?? "",
                           pwm: sections["FANPWM"] ?? "")
+            let temp = firstLine(sections["TEMP"] ?? "")
+            let fan = firstLine(sections["FAN"] ?? "")
+            if !temp.isEmpty || !fan.isEmpty { sensorsLoaded = true }
         }
-        if items.contains(.flash) { updateFlash(sections["FLASH"] ?? "") }
+        if items.contains(.flash) {
+            updateFlash(sections["FLASH"] ?? "")
+            // 闪存读不到内容时 `updateFlash` 会原样返回；但「问过、确实没有」
+            // 也要收口，否则卡片会一直挂着占位。段存在就算问过了。
+            if sections["FLASH"] != nil { flashLoaded = true }
+        }
         if items.contains(.devices) { updateDevices(sections) }
         if items.contains(.network) { applyNetwork(sections) }
         if items.contains(.clashState) {
@@ -3917,6 +3959,10 @@ private struct NetVap {
             value.cpuCores = Int(firstLine(sections["CPUCORES"])) ?? 0
             value.firmware = parseRelease(sections["RELEASE"] ?? "")
             routerInfo = value
+            // 有一段读到了就算「问过」，页面不再画占位。全空（命令没跑通）时保持 false。
+            if !value.model.isEmpty || !value.hostname.isEmpty || !value.kernel.isEmpty {
+                infoLoaded = true
+            }
             // 名称留空的连接靠这个标题，采到就存下来。
             rememberHostname(value.hostname)
             let wan = parseWanDevice(sections["ROUTE"] ?? "")

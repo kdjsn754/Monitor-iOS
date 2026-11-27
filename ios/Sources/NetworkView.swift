@@ -59,8 +59,17 @@ struct NetworkView: View {
                     VStack(spacing: UI.cardSpacing) {
                         // 拓扑里的节点：出口进「上网」二级页，频段进编辑页，
                         // 路由器与有线进局域网二级页。
-                        topology(openLan: { showLan = true },
-                                 openUplink: { showUplink = true })
+                        //
+                        // 首帧（`info.loaded` 还是假）画一副同构的灰骨架：
+                        // 以前直接拿默认值画，「出口 = 未联网、LAN IP = —、0 台」
+                        // 先出现一遍，数据一到整张图从灰变蓝、叶子从无到有，
+                        // 就是用户说的「数据等一会突然闪出来」。
+                        LoadedSwap(loaded: info.loaded) {
+                            topology(openLan: { showLan = true },
+                                     openUplink: { showUplink = true })
+                        } placeholder: {
+                            topologySkeleton
+                        }
                         wifiCard
                         uplinkCard
                         // 跨页定位的落点（v3.3.3）：概览「查看全部」滚到这里。
@@ -68,7 +77,8 @@ struct NetworkView: View {
                     }
                     .padding(.horizontal, UI.pagePadding)
                     .padding(.top, 12)
-                    .padding(.bottom, 30)
+                    // v3.4.10：与另外三个根页统一（概览 / 代理 / 设置都是 28）。
+                    .padding(.bottom, 28)
                     // 滚动手感与另外三个根页一致（见 ScrollTuning.swift 与 7.1）：
                     // 长页正常回弹、短页拉不动，都不碰下拉刷新。
                     .background(ScrollBounceTuning())
@@ -501,27 +511,35 @@ struct NetworkView: View {
     /// 现在：**两列网格 + 整行项**。两列各占一半宽，标签 12pt、值 15pt，
     /// 一个字号到底；放不下的（DNS、累计流量）单独占一整行。
     private var uplinkCard: some View {
+        // 右上角那句结论也要等数据：首帧写「未联网」是错的（只是还没问到）。
         card("上网", icon: "network",
-             trailing: info.uplink == .none ? "未联网" : info.protoLabel) {
-            metricGrid([
-                [("方式", info.uplink.title, nil),
-                 ("上级网络", upstreamName, nil)],
-                [("IP 地址", info.uplinkIP.isEmpty ? "—" : info.uplinkIP, nil),
-                 ("网关", info.uplinkGateway.isEmpty ? "—" : info.uplinkGateway, nil)],
-                [("信号", signalText(info.upstreamSignal), nil),
-                 ("协商速率", info.upstreamRate.isEmpty ? "—" : info.upstreamRate, nil)],
-                [("在线时长", info.uplinkUptime > 0 ? durationLabel(info.uplinkUptime) : "—", nil),
-                 ("会话", info.connections > 0 ? "\(info.connections)" : "—", nil)]
-            ])
-            divider
-            // DNS 常常两条、一条十几个字符，两列各占一半还是紧，所以单独占一整行。
-            metricGrid([[("DNS", info.uplinkDNS.isEmpty ? "—" : info.uplinkDNS.prefix(2).joined(separator: "  "), nil)]])
-            divider
-            // 累计流量两个方向分开摆：挤在一格里必然被截。
-            metricGrid([
-                [("↓ 下载", info.wanRxTotal > 0 ? formatBytes(info.wanRxTotal) : "—", nil),
-                 ("↑ 上传", info.wanTxTotal > 0 ? formatBytes(info.wanTxTotal) : "—", nil)]
-            ])
+             trailing: !info.loaded ? "" : (info.uplink == .none ? "未联网" : info.protoLabel)) {
+            LoadedSwap(loaded: info.loaded) {
+                VStack(spacing: 0) {
+                    metricGrid([
+                        [("方式", info.uplink.title, nil),
+                         ("上级网络", upstreamName, nil)],
+                        [("IP 地址", info.uplinkIP.isEmpty ? "—" : info.uplinkIP, nil),
+                         ("网关", info.uplinkGateway.isEmpty ? "—" : info.uplinkGateway, nil)],
+                        [("信号", signalText(info.upstreamSignal), nil),
+                         ("协商速率", info.upstreamRate.isEmpty ? "—" : info.upstreamRate, nil)],
+                        [("在线时长", info.uplinkUptime > 0 ? durationLabel(info.uplinkUptime) : "—", nil),
+                         ("会话", info.connections > 0 ? "\(info.connections)" : "—", nil)]
+                    ])
+                    divider
+                    // DNS 常常两条、一条十几个字符，两列各占一半还是紧，所以单独占一整行。
+                    metricGrid([[("DNS", info.uplinkDNS.isEmpty ? "—" : info.uplinkDNS.prefix(2).joined(separator: "  "), nil)]])
+                    divider
+                    // 累计流量两个方向分开摆：挤在一格里必然被截。
+                    metricGrid([
+                        [("↓ 下载", info.wanRxTotal > 0 ? formatBytes(info.wanRxTotal) : "—", nil),
+                         ("↑ 上传", info.wanTxTotal > 0 ? formatBytes(info.wanTxTotal) : "—", nil)]
+                    ])
+                }
+            } placeholder: {
+                // 4 行网格 + DNS + 累计流量，和真实内容同样的行数与行高。
+                metricsSkeleton(rows: 6)
+            }
             // **v2.9.5 去掉「重新连接」**（用户 2026-11-15：「去掉上网瓦片的重新连接按钮」）。
             // 它一直是这一卡里唯一的动作，和下面「设备」区的操作挤在一起看着像两套东西；
             // 真要重连，断开再把中继切一下也能做到，不值得在这一卡里留一颗按钮。
@@ -609,27 +627,32 @@ struct NetworkView: View {
         let total = groups.reduce(0) { $0 + $1.clients }
         let rows = wifiRows(groups)
         return card("无线", icon: "wifi",
-                    trailing: total > 0 ? "\(total) 台" : "更多",
+                    // 首帧不写「更多」：那个位置拿到数据后会变成「N 台」，字会跳一次。
+                    trailing: !info.loaded ? "" : (total > 0 ? "\(total) 台" : "更多"),
                     trailingAction: { showWifi = true }) {
-            VStack(spacing: 0) {
-                if rows.isEmpty {
-                    HStack(spacing: 8) {
-                        Text("无线已关闭")
-                            .font(UI.row())
-                            .foregroundStyle(.secondary)
-                        Spacer(minLength: 0)
-                        Button("去开启") { showWifi = true }
-                            .font(UI.row(.medium))
-                            .foregroundStyle(.blue)
-                            .buttonStyle(.plain)
-                    }
-                    .padding(.vertical, 10)
-                } else {
-                    ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
-                        if index > 0 { CardRule() }
-                        wifiRowView(row)
+            LoadedSwap(loaded: info.loaded) {
+                VStack(spacing: 0) {
+                    if rows.isEmpty {
+                        HStack(spacing: 8) {
+                            Text("无线已关闭")
+                                .font(UI.row())
+                                .foregroundStyle(.secondary)
+                            Spacer(minLength: 0)
+                            Button("去开启") { showWifi = true }
+                                .font(UI.row(.medium))
+                                .foregroundStyle(.blue)
+                                .buttonStyle(.plain)
+                        }
+                        .padding(.vertical, 10)
+                    } else {
+                        ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                            if index > 0 { CardRule() }
+                            wifiRowView(row)
+                        }
                     }
                 }
+            } placeholder: {
+                wifiSkeleton
             }
         }
     }
@@ -784,40 +807,46 @@ struct NetworkView: View {
         let online = info.onlineClients
         let offline = info.offlineClients
         return card("设备", icon: "desktopcomputer",
-                    trailing: clientsSummary(online: online.count, offline: offline.count)) {
-            if info.clients.isEmpty {
-                emptyLine
-            } else {
-                ForEach(info.clients) { client in
-                    if client.id != info.clients.first?.id { divider }
-                    Button {
-                        editingClient = client
-                    } label: {
-                        clientRow(client)
-                    }
-                    .buttonStyle(.plain)
-                    // 概览点某一台时按这个 id 滚到它（v3.3.3）。
-                    .id(client.id)
-                    // 单条删除（v3.2.7）：只给离线设备挂，在线的那台删了也会被下一轮
-                    // 扫描写回来。长按是快捷入口，编辑页底部还有一个同样的。
-                    .contextMenu {
-                        if !client.online {
-                            Button(role: .destructive) {
-                                pendingDeleteClient = client
-                            } label: {
-                                Label("删除这条记录", systemImage: "trash")
+                    trailing: info.loaded
+                        ? clientsSummary(online: online.count, offline: offline.count)
+                        : "") {
+            LoadedSwap(loaded: info.loaded) {
+                if info.clients.isEmpty {
+                    emptyLine
+                } else {
+                    ForEach(info.clients) { client in
+                        if client.id != info.clients.first?.id { divider }
+                        Button {
+                            editingClient = client
+                        } label: {
+                            clientRow(client)
+                        }
+                        .buttonStyle(.plain)
+                        // 概览点某一台时按这个 id 滚到它（v3.3.3）。
+                        .id(client.id)
+                        // 单条删除（v3.2.7）：只给离线设备挂，在线的那台删了也会被下一轮
+                        // 扫描写回来。长按是快捷入口，编辑页底部还有一个同样的。
+                        .contextMenu {
+                            if !client.online {
+                                Button(role: .destructive) {
+                                    pendingDeleteClient = client
+                                } label: {
+                                    Label("删除这条记录", systemImage: "trash")
+                                }
                             }
                         }
                     }
-                }
-                if !offline.isEmpty {
-                    divider
-                    actionRow(clearingOffline ? "正在清除…" : "清除离线记录",
-                              symbol: "trash",
-                              busy: clearingOffline) {
-                        Task { await clearOffline() }
+                    if !offline.isEmpty {
+                        divider
+                        actionRow(clearingOffline ? "正在清除…" : "清除离线记录",
+                                  symbol: "trash",
+                                  busy: clearingOffline) {
+                            Task { await clearOffline() }
+                        }
                     }
                 }
+            } placeholder: {
+                clientRowsSkeleton(3)
             }
         }
     }
@@ -863,7 +892,8 @@ struct NetworkView: View {
         }
     }
 
-    private func clientRow(_ client: NetClient) -> some View {        // 名字下面只留「地址 · 接入」两段，设备类型交给左边那个图标
+    private func clientRow(_ client: NetClient) -> some View {
+        // 名字下面只留「地址 · 接入」两段，设备类型交给左边那个图标
         // （`ClientBadgeIcon` 按 `gl-client.class` 画图标，再写一遍纯占长度）。
         // 右侧两行数字走 `ClientMetricColumn`，和概览的「连接设备」是同一个视图；
         // 它 `.fixedSize()`，宁可让名字截断也不让数字折行。
@@ -913,6 +943,126 @@ struct NetworkView: View {
     ///
     /// 以前这里 radius 18、水平 16、上 14、下 8，而概览是 22、设置/代理是 18 + 16，
     /// 同一个 App 四套数值。现在四个根页共用 `UI` 那一份（见 DesignSystem.swift）。
+    // MARK: - 首帧占位（v3.4.10）
+
+    /// 拓扑的占位：出口胶囊 → 竖线 → 圆环 → 两行字 → 三片叶子，形状与真图一致，只是全灰。
+    ///
+    /// 要的是**等高**：整块从灰换成彩色，页面不会整体上下跳一格。
+    private var topologySkeleton: some View {
+        VStack(spacing: 0) {
+            SkeletonBar(width: 132, height: 30, radius: 15)
+            Capsule()
+                .fill(Color.primary.opacity(0.06))
+                .frame(width: 2, height: 20)
+            VStack(spacing: 5) {
+                ZStack {
+                    Circle()
+                        .fill(Color.primary.opacity(0.05))
+                        .frame(width: 88, height: 88)
+                    Circle()
+                        .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
+                        .frame(width: 88, height: 88)
+                }
+                .padding(.bottom, 3)
+                SkeletonBar(width: 84, height: 15)
+                SkeletonBar(width: 104, height: 12)
+                HStack(spacing: 8) {
+                    SkeletonBar(width: 60, height: 22, radius: 11)
+                    SkeletonBar(width: 60, height: 22, radius: 11)
+                }
+                .padding(.top, 3)
+            }
+            .padding(.vertical, 10)
+            HStack(alignment: .top, spacing: Self.leafSpacing) {
+                ForEach(0..<3, id: \.self) { _ in
+                    VStack(spacing: 5) {
+                        Circle()
+                            .fill(Color.primary.opacity(0.05))
+                            .frame(width: 34, height: 34)
+                            .padding(.bottom, 2)
+                        SkeletonBar(width: 52, height: 12)
+                        SkeletonBar(width: 40, height: 9)
+                        SkeletonBar(width: 34, height: 9)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 11)
+                    .padding(.horizontal, 4)
+                    .background {
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(Color.primary.opacity(0.035))
+                    }
+                }
+            }
+            .padding(.top, 16)
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 18)
+        .padding(.bottom, 16)
+        .frame(maxWidth: .infinity)
+        .background { topologyPanel }
+    }
+
+    /// 数据网格（`metricGrid`）的占位：每格「小标签 + 值」两根灰条，行高与真内容一致。
+    private func metricsSkeleton(rows: Int, columns: Int = 2) -> some View {
+        VStack(spacing: 0) {
+            ForEach(0..<max(1, rows), id: \.self) { index in
+                if index > 0 { divider }
+                HStack(alignment: .top, spacing: 12) {
+                    ForEach(0..<max(1, columns), id: \.self) { _ in
+                        VStack(alignment: .leading, spacing: 6) {
+                            SkeletonBar(width: 30, height: 10)
+                            SkeletonBar(width: 82, height: 14)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding(.vertical, 9)
+            }
+        }
+    }
+
+    /// 无线卡的占位：两行「SSID + 频段详情」。
+    private var wifiSkeleton: some View {
+        VStack(spacing: 0) {
+            ForEach(0..<2, id: \.self) { index in
+                if index > 0 { divider }
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        SkeletonBar(width: 96, height: 15)
+                        SkeletonBar(width: 138, height: 11)
+                    }
+                    Spacer(minLength: 8)
+                    SkeletonBar(width: 42, height: 24, radius: 12)
+                }
+                .padding(.vertical, 10)
+            }
+        }
+    }
+
+    /// 设备行的占位：图标方底 + 名字/副标题 + 右侧两行数字，和 `clientRow` 同高。
+    private func clientRowsSkeleton(_ count: Int = 3) -> some View {
+        VStack(spacing: 0) {
+            ForEach(0..<max(1, count), id: \.self) { index in
+                if index > 0 { divider }
+                HStack(spacing: 10) {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(Color.primary.opacity(0.07))
+                        .frame(width: 30, height: 30)
+                    VStack(alignment: .leading, spacing: 6) {
+                        SkeletonBar(width: 88, height: 13)
+                        SkeletonBar(width: 132, height: 10)
+                    }
+                    Spacer(minLength: 8)
+                    VStack(alignment: .trailing, spacing: 6) {
+                        SkeletonBar(width: 46, height: 11)
+                        SkeletonBar(width: 34, height: 9)
+                    }
+                }
+                .padding(.vertical, 9)
+            }
+        }
+    }
+
     private func card<Content: View>(_ title: String,
                                      icon: String = "",
                                      trailing: String = "",

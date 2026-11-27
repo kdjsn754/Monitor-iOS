@@ -259,6 +259,81 @@ struct MetricCell: View {
     }
 }
 
+/// 首帧占位条（v3.4.10）。
+///
+/// **为什么需要**：数据是 SSH 采回来的，从「页面出现」到「第一轮采集到手」之间
+/// 有 0.3–2 秒。这段空窗里如果照默认值渲染，用户看到的就是「CPU 0%、温度无传感器、
+/// 0 台在线、闪存正在读取…」，等数据一到整页数字一起跳——就是「打开软件有些数据会
+/// 等一会突然闪出来」。
+///
+/// 规矩（所有页面共用）：**没采到过一次就画占位，不画默认值**；占位必须和真实内容
+/// 同高，卡片高度不许跳；数据到手后 0.28 秒淡入，不「啪」地出现。
+struct SkeletonBar: View {
+    var width: CGFloat? = nil
+    var height: CGFloat = 12
+    var radius: CGFloat = 6
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(Color.primary.opacity(0.085))
+            .frame(width: width, height: height)
+    }
+}
+
+/// 一组占位条（几行不等宽的灰条），放在卡片正文的位置上。
+struct SkeletonLines: View {
+    var count: Int = 3
+    var height: CGFloat = 12
+    var spacing: CGFloat = 10
+    /// 每一行占可用宽度的比例，长度不一才像文字。
+    var widths: [CGFloat] = [0.62, 0.86, 0.48]
+
+    var body: some View {
+        let ratios = widths.isEmpty ? [1] : widths
+        return VStack(alignment: .leading, spacing: spacing) {
+            ForEach(0..<max(1, count), id: \.self) { index in
+                GeometryReader { proxy in
+                    SkeletonBar(width: proxy.size.width * ratios[index % ratios.count],
+                                height: height)
+                }
+                .frame(height: height)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// 「占位 → 真实内容」的切换：数据第一次到手时淡入，之后原地更新不再有过渡动画。
+///
+/// 用淡入而不是默认的「直接换」：卡里突然出现一片彩色数字，视觉上是「闪」；
+/// 0.28 秒的透明度过渡把它变成「浮现」，同时不会像移动/缩放那样把布局推来推去。
+struct LoadedSwap<Content: View, Placeholder: View>: View {
+    private let loaded: Bool
+    private let content: () -> Content
+    private let placeholder: () -> Placeholder
+
+    init(loaded: Bool,
+         @ViewBuilder content: @escaping () -> Content,
+         @ViewBuilder placeholder: @escaping () -> Placeholder) {
+        self.loaded = loaded
+        self.content = content
+        self.placeholder = placeholder
+    }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            if loaded {
+                content()
+                    .transition(.opacity)
+            } else {
+                placeholder()
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.28), value: loaded)
+    }
+}
+
 /// 状态胶囊（已拦截 / 当前 / 偏高…）：10pt 半粗 + 12% 同色底。
 struct StatusTag: View {
     let text: String
