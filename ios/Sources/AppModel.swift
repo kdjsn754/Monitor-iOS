@@ -2219,6 +2219,10 @@ private struct NetVap {
         }
         if group.kind == .mlo {
             lines.append("uci -q set wireless.mld0.disabled='\(off)'")
+            // GL 自己那份状态也一起改：官方 `get_mlo_config` 读的是 `/etc/config/mlo`，
+            // 只改 `wireless.mld0` 会让页面和运行态对不上（见 createWifiGroup 的取证表）。
+            lines.append("[ -f /etc/config/mlo ] && uci -q set mlo.mld0.disabled='\(off)'")
+            lines.append("[ -f /etc/config/mlo ] && uci -q commit mlo")
         }
         let net = group.kind.networkName
         if !net.isEmpty {
@@ -2242,6 +2246,8 @@ private struct NetVap {
         if group.kind == .mlo {
             expect.append(("mld0", off))
             lines.append("echo \"@@RB mld0 $(uci -q get wireless.mld0.disabled)\"")
+            expect.append(("mlo.mld0", off))
+            lines.append("[ -f /etc/config/mlo ] && echo \"@@RB mlo.mld0 $(uci -q get mlo.mld0.disabled)\"")
         }
         if !net.isEmpty {
             expect.append((net, off))
@@ -2258,9 +2264,13 @@ private struct NetVap {
                 guard parts.count >= 3, parts[0] == "@@RB" else { continue }
                 readBack[parts[1]] = parts[2].trimmingCharacters(in: .whitespaces)
             }
-            for (name, want) in expect where readBack[name] != want {
-                let got = readBack[name] ?? "空"
-                return "「\(name)」没写进去（读回来是「\(got)」）"
+            for (name, want) in expect {
+                // `mlo.mld0` 只在带 `/etc/config/mlo` 的固件上才有，读不到不算失败。
+                if name == "mlo.mld0", readBack[name] == nil { continue }
+                guard readBack[name] == want else {
+                    let got = readBack[name] ?? "空"
+                    return "「\(name)」没写进去（读回来是「\(got)」）"
+                }
             }
             // 配置已经确认写进去了，最后才重启无线（这一步会断线，见 reloadWireless）
             await reloadWireless()
@@ -2290,6 +2300,9 @@ private struct NetVap {
         }
         if group.kind == .mlo {
             lines.append("uci -q set wireless.mld0.disabled='1'")
+            // `/etc/config/mlo` 里那份也要标成停用，否则重启后 GL 的脚本会按旧状态处理。
+            lines.append("[ -f /etc/config/mlo ] && uci -q set mlo.mld0.disabled='1'")
+            lines.append("[ -f /etc/config/mlo ] && uci -q commit mlo")
         }
         let net = group.kind.networkName
         if !net.isEmpty {
@@ -2310,6 +2323,8 @@ private struct NetVap {
         if group.kind == .mlo {
             expect.append(("mld0", "1"))
             lines.append("echo \"@@RB mld0 $(uci -q get wireless.mld0.disabled)\"")
+            expect.append(("mlo.mld0", "1"))
+            lines.append("[ -f /etc/config/mlo ] && echo \"@@RB mlo.mld0 $(uci -q get mlo.mld0.disabled)\"")
         }
         if !net.isEmpty {
             expect.append((net, "1"))
@@ -2326,9 +2341,12 @@ private struct NetVap {
                 guard parts.count >= 3, parts[0] == "@@RB" else { continue }
                 readBack[parts[1]] = parts[2].trimmingCharacters(in: .whitespaces)
             }
-            for (name, want) in expect where readBack[name] != want {
-                let got = readBack[name] ?? "空"
-                return "「\(name)」没停用（读回来是「\(got)」）"
+            for (name, want) in expect {
+                if name == "mlo.mld0", readBack[name] == nil { continue }
+                guard readBack[name] == want else {
+                    let got = readBack[name] ?? "空"
+                    return "「\(name)」没停用（读回来是「\(got)」）"
+                }
             }
             await reloadWireless()
             return nil
@@ -2452,6 +2470,11 @@ private struct NetVap {
 
         // 频段开关：全关 = 这一组下线（连 `network.guest|iot` 一起关，否则桥还在）。
         let anyOn = bandOn.map { map in group.members.contains { map[$0.band] ?? false } }
+        // 多链路少了两段就聚不起来，固件会直接拒绝——先在这里拦住，别等写进去再报错。
+        if group.kind == .mlo, let bandOn,
+           group.members.filter({ bandOn[$0.band] ?? false }).count < 2 {
+            return "多链路至少要留两个频段才能聚合；要停用请直接关这一组"
+        }
 
         // 关掉「手机自己正在连的那一路」是单行道：一关就掉出 Wi-Fi，App 再也连不回来
         // 把它打开（与 `saveBand` 同一条规矩）。按成员逐个拦，说清是哪一路。
@@ -2499,7 +2522,10 @@ private struct NetVap {
                 lines.append("uci -q set wireless.mld0.encryption=\(shQuote(encryption))")
             }
             if let anyOn {
-                lines.append("uci -q set wireless.mld0.disabled='\(anyOn ? "0" : "1")'")
+                let off = anyOn ? "0" : "1"
+                lines.append("uci -q set wireless.mld0.disabled='\(off)'")
+                lines.append("[ -f /etc/config/mlo ] && uci -q set mlo.mld0.disabled='\(off)'")
+                lines.append("[ -f /etc/config/mlo ] && uci -q commit mlo")
             }
         }
         let net = group.kind.networkName
@@ -2634,53 +2660,171 @@ private struct NetVap {
         }
     }
 
-    /// 建一个访客 / IoT 网络：把模板段（GL 固件预留的 `guest2g` / `guest5g` 之类）
-    /// 就地启用并改名，返回 `nil` 表示成功。
+    /// 建一组附加网络（访客 / IoT / 多链路）：把模板段（GL 固件预留的 `guest2g` / `guest5g`、
+    /// `wlanmld2g` / `wlanmld5g`）就地启用并改名，返回 `nil` 表示成功。
     ///
     /// 只用现成模板，不凭空造 `wifi-iface`：MTK 驱动的 `vifidx` 与 `ifname`
     /// 是固件分配好的，乱写会把主网络挤掉。
+    ///
+    /// **多链路的写法是 v3.4.8 从官方取证来的**，不是照参考项目猜的：
+    ///
+    /// | 来源 | 取到的东西 |
+    /// | --- | --- |
+    /// | 官方 APK 字符串池（REA `inspect_dart_aot`，Dart 3.7.2 / libapp.so arm64） | RPC `get_mlo_config` / `set_mlo_config`；字段 `mlo_band` / `mlo_bandsupport` / `mlo_enable` / `mlo_ssid` / `encryption_wifi_mlo` / `password_wifi_mlo`；页面 `mlo_add_page.dart` / `mlo_wireless_detail_page.dart`；模型 `MloWifiConfig.mloBand` |
+    /// | 固件 `/usr/lib/oui-httpd/rpc/wifi`（luac 字符串表） | 同名方法；`mlo_ssid` / `mlo_encryption` / `mlo_key` / `mlo_hidden` / `mlo_init` / `mlo_iface_num` / `mlo_bandlist` / `not_selected_mlo_band`；`uci -q get mlo.global.support_bands` |
+    /// | 真机 `uci show`（GL-MT3600BE，4.9.0 r1046） | `wireless.mld0`（`wifi-mld`，`iface='ra2 rai2'`、`mldgroup=1`）+ 成员 `wlanmld2g` / `wlanmld5g`（`mld='mld0'`、`network='lan'`、`vifidx=3`）+ **独立配置文件 `/etc/config/mlo`**（`mlo.global.support_bands`、`mlo.mld0.disabled`、`mld_macaddr`） |
+    ///
+    /// 关键点：MLO 的开关记在**两个**文件里——`wireless.mld0.disabled` 决定 hostapd 建不建这条
+    /// MLD，`mlo.mld0.disabled` 是 GL 自己那份状态（官方 `get_mlo_config` 读的就是它）。
+    /// 只写前者的后果是「无线页说开着、手机搜不到」——参考项目漏的正是这个文件。
+    ///
+    /// v3.4.8 修掉一个真 bug：探针原来写成 `grep -F "network='\\(net)'"`（两个反斜杠），
+    /// Swift 里那是「反斜杠 + 字面 (net)」，`grep -F` 永远匹配不到，于是访客 / IoT 的
+    /// 「添加」一律报「路由器上没有模板段」——那条路径从出生起就是死的。
     @discardableResult
-    func createWifiGroup(_ kind: WifiNetGroup.Kind, ssid: String, key: String) async -> String? {
+    func createWifiGroup(_ kind: WifiNetGroup.Kind, ssid: String, key: String,
+                         bands: Set<String> = [],
+                         encryption: String? = nil) async -> String? {
         guard connected else { return "还没连上路由器" }
         let net = kind.networkName
-        guard !net.isEmpty else { return "多链路要在路由器后台创建，App 里只能改已建好的那一组" }
 
         let name = ssid.trimmingCharacters(in: .whitespacesAndNewlines)
         if name.isEmpty { return "Wi-Fi 名称不能为空" }
         if name.count > 32 { return "Wi-Fi 名称不能超过 32 个字符" }
         let secret = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        if secret.count < 8 || secret.count > 63 { return "密码要 8–63 个字符" }
 
-        var lines: [String] = []
-        // 先问路由器：这个 network 下已经有哪些 AP 段（GL 固件预置的 guest2g / guest5g …）。
-        // 分成两步跑，是因为把 for 循环拼进 `; ` 拼接的单行里会变成 `do;` 语法错误。
-        let probe = "uci show wireless 2>/dev/null | grep -F \"network='\\(net)'\" | cut -d. -f2"
+        // 先问路由器：这组网络有哪些模板段。
+        //   guest / iot → `network=guest|iot` 的 AP 段；
+        //   多链路      → `mld='mld0'` 或 `mld0.iface` 里列到的网口（官方 set_mlo_config 同一套判据）。
+        // 分两步跑，是因为把 for 循环拼进 `; ` 拼接的单行里会变成 `do;` 语法错误。
+        let probe = "uci -q show wireless 2>/dev/null | grep -E "
+            + "'\\.(band|device|network|mode|ifname|iface|mld|disabled|encryption|key|hidden)='"
         do {
-            let found = try await execute(probe, timeout: 20)
-            let sections = found.split(separator: "\n")
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty }
-            guard !sections.isEmpty else {
-                return "路由器上没有 \(net) 的模板段，先在路由器后台建一次再回来"
+            let raw = try await execute(probe, timeout: 20)
+            var cfg: [String: [String: String]] = [:]
+            for line in raw.split(separator: "\n") {
+                let pair = line.split(separator: "=", maxSplits: 1).map(String.init)
+                guard pair.count == 2 else { continue }
+                let path = pair[0].split(separator: ".").map(String.init)
+                guard path.count == 3, path[0] == "wireless" else { continue }
+                let value = pair[1].trimmingCharacters(in: CharacterSet(charactersIn: "'\""))
+                cfg[path[1], default: [:]][path[2]] = value
             }
-            for section in sections {
-                lines.append("uci -q set wireless.\(section).ssid=\(shQuote(name))")
-                lines.append("uci -q set wireless.\(section).key=\(shQuote(secret))")
-                lines.append("uci -q set wireless.\(section).disabled='0'")
-                lines.append("uci -q set wireless.\(section).init='1'")
-                lines.append("uci -q set wireless.\(section).hidden='0'")
+            let mldIfaces = (cfg["mld0"]?["iface"] ?? "")
+                .split(separator: " ").map(String.init).filter { !$0.isEmpty }
+
+            var candidates: [(section: String, opts: [String: String], band: String)] = []
+            for (section, opts) in cfg where opts["mode"] == "ap" && !section.hasPrefix("mld") {
+                let ifname = opts["ifname"] ?? ""
+                let belongs: Bool
+                if kind == .mlo {
+                    belongs = mldIfaces.contains(ifname) || (opts["mld"] ?? "") == "mld0"
+                } else {
+                    belongs = opts["network"] == net
+                }
+                guard belongs else { continue }
+                let band = bandLabel(cfg[opts["device"] ?? ""]?["band"] ?? "")
+                candidates.append((section, opts, band))
             }
-            lines.append("uci -q set network.\(net).disabled='0'")
+            // 6G → 5G → 2.4G，和官方页面里的顺序一致。
+            candidates.sort { $0.band > $1.band }
+            guard !candidates.isEmpty else {
+                return "路由器上没有这组网络的模板段，先在路由器后台建一次再回来"
+            }
+
+            // 要开哪几个频段：没指定就全开；多链路少了两段就聚不起来（固件同样这么要求）。
+            let wanted = candidates.filter { bands.isEmpty || bands.contains($0.band) }
+            if kind == .mlo, wanted.count < 2 {
+                return "多链路 (MLO) 至少要选两个频段，才能把两条链路聚起来"
+            }
+            let wantedSections = Set(wanted.map(\.section))
+
+            // 模板里的加密方式决定要不要密码；没显式指定就不动它。
+            let templateEnc = candidates.first.flatMap { $0.opts["encryption"] } ?? ""
+            let finalEnc = encryption ?? templateEnc
+            let needsKey = !finalEnc.isEmpty && finalEnc != "none"
+            if needsKey, secret.count < 8 || secret.count > 63 { return "密码要 8–63 个字符" }
+
+            var lines: [String] = []
+            for item in candidates {
+                let on = wantedSections.contains(item.section)
+                lines.append("uci -q set wireless.\(item.section).ssid=\(shQuote(name))")
+                if let encryption {
+                    lines.append("uci -q set wireless.\(item.section).encryption=\(shQuote(encryption))")
+                }
+                if needsKey {
+                    lines.append("uci -q set wireless.\(item.section).key=\(shQuote(secret))")
+                } else {
+                    lines.append("uci -q delete wireless.\(item.section).key 2>/dev/null; true")
+                }
+                lines.append("uci -q set wireless.\(item.section).hidden='0'")
+                lines.append("uci -q set wireless.\(item.section).disabled='\(on ? "0" : "1")'")
+                lines.append("uci -q set wireless.\(item.section).init='\(on ? "1" : "0")'")
+                let radio = item.opts["device"] ?? ""
+                if on, !radio.isEmpty {
+                    lines.append("uci -q set wireless.\(radio).disabled='0'")
+                }
+            }
+            if kind == .mlo {
+                // 聚合段本身（`wireless.mld0`）的 ssid / 密码要和每个成员一字不差，
+                // 否则 hostapd 起来时两条链路对不上同一个 MLD。
+                lines.append("uci -q set wireless.mld0.ssid=\(shQuote(name))")
+                if let encryption {
+                    lines.append("uci -q set wireless.mld0.encryption=\(shQuote(encryption))")
+                }
+                if needsKey {
+                    lines.append("uci -q set wireless.mld0.key=\(shQuote(secret))")
+                } else {
+                    lines.append("uci -q delete wireless.mld0.key 2>/dev/null; true")
+                }
+                lines.append("uci -q set wireless.mld0.hidden='0'")
+                lines.append("uci -q set wireless.mld0.disabled='0'")
+                // GL 自己那份状态（官方 get_mlo_config 读它）。个别固件没这个文件，判一下再写。
+                lines.append("[ -f /etc/config/mlo ] && uci -q set mlo.mld0.disabled='0'")
+                lines.append("[ -f /etc/config/mlo ] && uci -q commit mlo")
+            } else if !net.isEmpty {
+                lines.append("uci -q set network.\(net).disabled='0'")
+                lines.append("uci -q commit network")
+            }
             lines.append("uci -q commit wireless")
-            lines.append("uci -q commit network")
             // 桥接先起（不碰无线），hostapd 重启时才有地方挂 VAP。
-            lines.append("ifup \(net) >/dev/null 2>&1")
-            lines.append("echo \"@@RB \(net) $(uci -q get network.\(net).disabled)\"")
+            if !net.isEmpty { lines.append("ifup \(net) >/dev/null 2>&1") }
+
+            // ---- 回读：每个模板段的开关状态 + 聚合段 + 独立 network 段 ----
+            var expect: [(name: String, want: String)] = []
+            for item in candidates {
+                expect.append((item.section, wantedSections.contains(item.section) ? "0" : "1"))
+                lines.append("echo \"@@RB \(item.section) $(uci -q get wireless.\(item.section).disabled)\"")
+            }
+            if kind == .mlo {
+                expect.append(("mld0", "0"))
+                lines.append("echo \"@@RB mld0 $(uci -q get wireless.mld0.disabled)\"")
+                expect.append(("mlo.mld0", "0"))
+                lines.append("[ -f /etc/config/mlo ] && echo \"@@RB mlo.mld0 $(uci -q get mlo.mld0.disabled)\"")
+            }
+            if !net.isEmpty {
+                expect.append((net, "0"))
+                lines.append("echo \"@@RB \(net) $(uci -q get network.\(net).disabled)\"")
+            }
             lines.append("echo @@DONE ok")
 
             let text = try await execute(lines.joined(separator: "; "), timeout: 90)
             guard text.contains("@@DONE ok") else { return "路由器没有回应，配置可能没写进去" }
-            guard text.contains("@@RB \(net) 0") else { return "网络没启用成功，请稍后再试" }
+            var readBack: [String: String] = [:]
+            for raw in text.split(separator: "\n") {
+                let parts = raw.split(separator: " ").map(String.init)
+                guard parts.count >= 3, parts[0] == "@@RB" else { continue }
+                readBack[parts[1]] = parts[2].trimmingCharacters(in: .whitespaces)
+            }
+            for (tag, want) in expect {
+                // `mlo.mld0` 只在带 `/etc/config/mlo` 的固件上才有，读不到不算失败。
+                if tag == "mlo.mld0", readBack[tag] == nil { continue }
+                guard readBack[tag] == want else {
+                    let got = readBack[tag] ?? "空"
+                    let label = (tag == "mld0" || tag == "mlo.mld0") ? "聚合段" : tag
+                    return "「\(label)」没写进去（读回来是「\(got)」）"
+                }
+            }
             // 新建的网络要靠重启无线才对外广播；这一步会断线，见 reloadWireless
             await reloadWireless()
             // 界面自己 refresh（saveBand 的做法一致），这里不重复采一轮
@@ -5813,7 +5957,7 @@ private extension AppModel {
                 uci show dhcp 2>/dev/null
                 WC=$(uci show wireless 2>/dev/null)
                 echo @@WLCFG
-                echo "$WC" | grep -E '\\.(band|channel|htmode|s1g_chanbw|txpower|disabled|ssid|ifname|iface|mldgroup|network|mode|device|encryption|guest|iot|multi_ap|key|hidden|random_bssid|dfs_enable|hwmode|percentag_enable)='
+                echo "$WC" | grep -E '\\.(band|channel|htmode|s1g_chanbw|txpower|disabled|ssid|ifname|iface|mldgroup|network|mode|device|encryption|guest|iot|multi_ap|key|hidden|random_bssid|dfs_enable|hwmode|percentag_enable|init|mld)='
                 echo @@WLSTA
                 for i in $(echo "$WC" | sed -n "s/^wireless\\.[^.=]*\\.ifname='\\(.*\\)'/\\1/p"); do
                   [ -d "/sys/class/net/$i" ] || continue

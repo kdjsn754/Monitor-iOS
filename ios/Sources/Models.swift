@@ -913,7 +913,10 @@ struct WifiNetGroup: Identifiable, Equatable {
     var isCreated: Bool {
         guard !members.isEmpty else { return false }
         if kind == .main { return true }
-        return isOn || networkOn || members.contains { $0.initialized }
+        if isOn || members.contains(where: { $0.initialized }) { return true }
+        // 多链路没有独立的 network 段，`networkOn` 恒为 true——不能拿它兜底，
+        // 否则删掉之后永远回不到「＋ 添加」（v3.4.8 修）。
+        return kind == .mlo ? false : networkOn
     }
 
     /// 「2.4 GHz + 5 GHz」这种频段串。

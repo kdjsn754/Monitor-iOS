@@ -1388,12 +1388,24 @@ struct WifiGroupCreateSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     let kind: WifiNetGroup.Kind
+    /// 这台路由器有哪些频段（`2.4` / `5` / `6`），决定勾选项。
+    let available: [String]
 
     @State private var ssid = ""
     @State private var key = ""
     @State private var showKey = false
+    @State private var selectedBands: Set<String>
     @State private var busy = false
     @State private var errorText: String?
+
+    init(kind: WifiNetGroup.Kind, available: [String] = []) {
+        self.kind = kind
+        self.available = available
+        _selectedBands = State(initialValue: Set(available))
+    }
+
+    /// 多链路少了两段聚不起来（固件也这么要求），所以先在界面上拦住。
+    private var tooFewBands: Bool { kind == .mlo && selectedBands.count < 2 }
 
     var body: some View {
         NavigationStack {
@@ -1401,6 +1413,7 @@ struct WifiGroupCreateSheet: View {
                 VStack(spacing: UI.cardSpacing) {
                     introCard
                     formCard
+                    if !available.isEmpty { bandsCard }
                     if let errorText { WifiErrorNote(text: errorText) { self.errorText = nil } }
                     WifiSaveButton(title: "创建", busy: busy) {
                         Task { await create() }
@@ -1439,7 +1452,9 @@ struct WifiGroupCreateSheet: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(kind.title)
                     .font(UI.title(.semibold))
-                Text("为它单独起一个名字和密码，主网络的密码不用告诉客人。")
+                Text(kind == .mlo
+                     ? "把两个频段合成一条链路，Wi-Fi 7 设备连上会更快；其它设备照旧连主网络。"
+                     : "为它单独起一个名字和密码，主网络的密码不用告诉客人。")
                     .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1498,11 +1513,64 @@ struct WifiGroupCreateSheet: View {
         }
     }
 
+    /// 频段勾选：guest / iot 是「开哪几个」，多链路是「聚合哪几个」（至少两个）。
+    private var bandsCard: some View {
+        CardPanel("频段", icon: "antenna.radiowaves.left.and.right") {
+            VStack(spacing: 0) {
+                ForEach(Array(available.enumerated()), id: \.offset) { index, band in
+                    if index > 0 { CardRule() }
+                    HStack(spacing: 8) {
+                        Text(bandName(band))
+                            .font(UI.row())
+                        if kind == .mlo {
+                            Text(selectedBands.contains(band) ? "参与聚合" : "不参与")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 8)
+                        Toggle("", isOn: Binding(
+                            get: { selectedBands.contains(band) },
+                            set: { on in
+                                if on { selectedBands.insert(band) } else { selectedBands.remove(band) }
+                            }
+                        ))
+                        .labelsHidden()
+                        .blueSwitch()
+                        .disabled(busy)
+                    }
+                    .padding(.vertical, UI.rowPadding)
+                }
+                if tooFewBands {
+                    Text("多链路至少要选两个频段")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.bottom, 6)
+                }
+            }
+        }
+    }
+
+    private func bandName(_ code: String) -> String {
+        switch code {
+        case "2.4": return "2.4 GHz"
+        case "5": return "5 GHz"
+        case "6": return "6 GHz"
+        case "S1G": return "Sub-1 GHz"
+        default: return code.isEmpty ? "—" : code + " GHz"
+        }
+    }
+
     private func create() async {
         guard !busy else { return }
+        if tooFewBands {
+            errorText = "多链路 (MLO) 至少要选两个频段，才能把两条链路聚起来"
+            return
+        }
         busy = true
         errorText = nil
-        let problem = await model.createWifiGroup(kind, ssid: ssid, key: key)
+        let problem = await model.createWifiGroup(kind, ssid: ssid, key: key,
+                                                 bands: selectedBands)
         busy = false
         guard let problem else {
             model.notice = Notice(kind: .ok, title: "已创建", detail: ssid)

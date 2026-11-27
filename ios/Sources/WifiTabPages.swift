@@ -971,7 +971,7 @@ struct WifiSidePage: View {
             if let group { WifiGroupEditorSheet(group: group) }
         }
         .sheet(isPresented: $creating) {
-            WifiGroupCreateSheet(kind: kind)
+            WifiGroupCreateSheet(kind: kind, available: createBands)
         }
         .sheet(item: $qrTarget) { payload in
             WifiQrSheet(payload: payload)
@@ -1066,6 +1066,17 @@ struct WifiSidePage: View {
             MloViz(isOn: isOn,
                    model: model.routerInfo.model)
         }
+    }
+
+    /// 创建页要勾的频段（原始代号 `2.4` / `5` / `6`）。有模板成员就按成员的，
+    /// 没建过就退回路由器报告的频段。
+    private var createBands: [String] {
+        let list = (group?.members.isEmpty == false ? group!.members : info.bands)
+        var unique: [String] = []
+        for band in list where !band.band.isEmpty && !unique.contains(band.band) {
+            unique.append(band.band)
+        }
+        return unique
     }
 
     /// 这一组支持的频段（`2.4G / 5G`），没成员就退回全部频段的短名。
@@ -1225,20 +1236,19 @@ struct WifiSidePage: View {
                 WifiKvRow(label: "推荐加密方式", value: "WPA3")
             }
 
-            if kind == .mlo {
-                // `createWifiGroup` 只能就地启用 `network=guest|iot` 的模板段；
-                // 多链路的段是按 `mld0.iface` / `mld` 认的，这里还没有对应的创建通道。
-                // 摆一个点了必然报错的按钮，比不摆更糟。
-                Text("多链路需要先在路由器后台创建一次，App 里才能改它的名称和密码。")
+            // 多链路 v3.4.8 起也能建：写 `wireless.mld0` + 每个成员 + `/etc/config/mlo`
+            //（写法见 `AppModel.createWifiGroup` 的取证表）。
+            WifiPrimaryButton(text: addTitle, tint: WifiPalette.accent) { creating = true }
+                .padding(.top, 12)
+                .padding(.bottom, 2)
+
+            if kind == .mlo, createBands.count < 2 {
+                Text("这台路由器只有一个频段，聚不起多链路。")
                     .font(.system(size: 11.5))
                     .foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, 10)
+                    .padding(.top, 8)
                     .padding(.horizontal, 2)
-            } else {
-                WifiPrimaryButton(text: addTitle, tint: WifiPalette.accent) { creating = true }
-                    .padding(.top, 12)
-                    .padding(.bottom, 2)
             }
         }
     }
