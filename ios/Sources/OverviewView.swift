@@ -465,7 +465,7 @@ struct OverviewView: View {
         // 两格拉成等宽（v3.3.6）：宽度由容器均分，不再随「952 / 1180」的位数伸缩，
         // 这也是字体不再被压缩的前提之一。
         .frame(maxWidth: .infinity, alignment: .leading)
-        .plainTile(radius: 12)
+        .faintTile(radius: 12)
     }
 
     // MARK: - 连接设备（v2.9.0 重设计）
@@ -773,7 +773,7 @@ private struct HardwareGauge: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity)
-        .plainTile(radius: 12)
+        .faintTile(radius: 12)
     }
 }
 

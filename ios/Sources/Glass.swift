@@ -313,6 +313,37 @@ extension View {
     func plainTile(radius: CGFloat = 12) -> some View {
         plainTile(in: RoundedRectangle(cornerRadius: radius, style: .continuous))
     }
+
+    /// 更细更淡的白底格子：**只给概览页硬件那四格用**。
+    ///
+    /// 用户 2026-11-28：「概览页硬件状态那里四个细丝框，再细再淡点」。
+    /// 不去动 `plainTile` 的默认值——网络页、代理页、风扇页的格子都吃它，
+    /// 全局调淡会把那些页的行界一起抹掉。这里只把线宽 0.75 → 0.5、
+    /// `separator` 再乘 0.55。
+    func faintTile(radius: CGFloat = 12) -> some View {
+        modifier(FaintTileModifier(radius: radius))
+    }
+}
+
+/// 见 `faintTile(radius:)`。
+struct FaintTileModifier: ViewModifier {
+    let radius: CGFloat
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        content
+            .background {
+                AdaptiveFill(shape: shape,
+                             color: colorScheme == .dark
+                                    ? Color(.tertiarySystemBackground)
+                                    : Color(.systemBackground))
+            }
+            .overlay {
+                AdaptiveBorder(shape: shape, width: 0.5, strength: 0.55)
+            }
+    }
 }
 
 /// 面板 / 卡片里的「行」：和卡片同色 + 一圈细边。
